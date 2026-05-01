@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dense UI: more rows per screen (tables, nav, chrome). */
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+  }
+
+  body {
+    @apply bg-warehouse-gray text-gray-900 text-xs antialiased;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-primary-600 hover:bg-primary-700 text-white font-semibold text-xs
+           py-1.5 px-2.5 rounded-md border border-transparent
+           transition-all duration-150 shadow-sm
+           focus:outline-none focus:ring-1 focus:ring-primary-500 focus:ring-offset-1;
+  }
+
+  .btn-secondary {
+    @apply bg-white hover:bg-gray-50 text-gray-800 font-semibold text-xs
+           py-1.5 px-2.5 rounded-md border border-gray-200
+           transition-all duration-150 shadow-sm;
+  }
+
+  .btn-success {
+    @apply bg-warehouse-green hover:bg-green-600 text-white font-semibold text-xs
+           py-1.5 px-2.5 rounded-md border border-transparent
+           transition-all duration-150 shadow-sm;
+  }
+
+  .btn-danger {
+    @apply bg-warehouse-red hover:bg-red-600 text-white font-semibold text-xs
+           py-1.5 px-2.5 rounded-md border border-transparent
+           transition-all duration-150 shadow-sm;
+  }
+
+  .table-container {
+    @apply overflow-x-auto rounded-lg border border-gray-200 bg-white w-full text-xs;
+  }
+
+  .input-field {
+    @apply w-full px-2 py-1.5 border border-gray-300 rounded-md
+           focus:outline-none focus:ring-1 focus:ring-primary-500
+           focus:border-transparent transition-all text-xs;
+  }
+
+  /* Shared dense table cells (used across list pages). */
+  .tbl-th {
+    @apply px-2 py-1.5 text-left text-[10px] font-bold text-gray-600 uppercase tracking-wide;
+  }
+
+  .tbl-td {
+    @apply px-2 py-1.5 text-xs text-gray-900 leading-snug;
+  }
+
+  .tbl-td-nowrap {
+    @apply px-2 py-1.5 whitespace-nowrap text-xs text-gray-900 leading-tight;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold;
+  }
+
+  .badge-green { @apply bg-green-100 text-green-800; }
+  .badge-orange { @apply bg-orange-100 text-orange-800; }
+  .badge-red { @apply bg-red-100 text-red-800; }
+
+  .app-page-toolbar {
+    @apply bg-white p-2 rounded-lg shadow-sm border border-gray-200 mb-2;
+  }
+}

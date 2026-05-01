@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Kill anything already on the expected ports (best-effort).
+kill_port() {
+  local port="$1"
+  local pids
+  pids="$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -n "$pids" ]]; then
+    echo "Stopping processes on port $port: $pids"
+    kill $pids 2>/dev/null || true
+  fi
+}
+
+kill_port 3001
+kill_port 5173
+
+npm run dev
+

@@ -1,0 +1,30 @@
+{
+  "name": "warehouse-backend",
+  "version": "1.0.0",
+  "description": "Warehouse Stock Management API",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "db": "node db.js",
+    "clear-outbound": "node scripts/clear-outbound-data.js",
+    "clear-outbound:exec": "node scripts/clear-outbound-data.js --yes",
+    "wipe-db": "node scripts/wipe-all-data.js",
+    "wipe-db:yes": "node scripts/wipe-all-data.js --yes",
+    "ensure-admin": "node scripts/ensure-admin.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "expo-server-sdk": "^6.1.0",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "sqlite3": "^5.1.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
