@@ -6,6 +6,7 @@ const { requireAuth, requireMobileAccess, requirePermission } = require('../midd
 const { applyStockIn } = require('./stock-in');
 const MainStock = require('../models/MainStock');
 const { notifyPickProgress, notifyAdminChecker } = require('../services/notificationService');
+const { updateInboundBatchStatus } = require('../services/inboundPutawayHelpers');
 
 const router = express.Router();
 const dbGet = promisify(db.get.bind(db));
@@ -123,6 +124,86 @@ router.get('/orders/:id', requirePermission('can_view_orders'), async (req, res)
     }));
 
     res.json({ ...order, items: itemsOut, fifo_suggestions: fifo });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Main stock + stock-by-rack rows per pick line (read-only reference for mobile). Optional rack_q filters rack_location. */
+router.get('/orders/:id/stock-overview', requirePermission('can_view_orders'), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const rackQ = String(req.query.rack_q || '').trim();
+    const order = await dbGet('SELECT id FROM outbound_orders WHERE id = ?', [orderId]);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    const items = await listOutboundItemsWithPickTotals(orderId);
+    const like = rackQ ? `%${rackQ}%` : null;
+
+    const lines = [];
+    for (const it of items) {
+      const pn = String(it.part_number || '').trim();
+      const pickedEff = Math.max(Number(it.picked_qty) || 0, Number(it.picked_from_tx) || 0);
+      const rem = Math.max(0, (Number(it.required_qty) || 0) - pickedEff);
+
+      let ms = null;
+      if (pn) {
+        ms = await dbGet(
+          `SELECT part_number, sap_part_number, vendor_number, vendor_name, description,
+                  received_qty, sold_out_qty, pending_delivery_qty, available_qty, uom, remarks
+           FROM main_stock WHERE part_number = ?`,
+          [pn]
+        );
+      }
+
+      let racks = [];
+      if (pn) {
+        if (like) {
+          racks = await dbAll(
+            `SELECT id, part_number, sap_part_number, rack_location, available_qty, total_in_qty, total_out_qty,
+                    first_entry_date, description
+             FROM stock_by_rack WHERE part_number = ? AND rack_location LIKE ?
+             ORDER BY rack_location`,
+            [pn, like]
+          );
+        } else {
+          racks = await dbAll(
+            `SELECT id, part_number, sap_part_number, rack_location, available_qty, total_in_qty, total_out_qty,
+                    first_entry_date, description
+             FROM stock_by_rack WHERE part_number = ?
+             ORDER BY rack_location`,
+            [pn]
+          );
+        }
+      }
+
+      lines.push({
+        outbound_item_id: it.id,
+        material: it.material || null,
+        part_number: pn,
+        sap_part_number: String(it.sap_part_number || '').trim() || (ms?.sap_part_number ? String(ms.sap_part_number) : ''),
+        description: it.description || null,
+        required_qty: Number(it.required_qty) || 0,
+        picked_qty: Number(it.picked_qty) || 0,
+        picked_qty_effective: pickedEff,
+        remaining_qty: rem,
+        vendor_number: ms?.vendor_number != null ? String(ms.vendor_number) : null,
+        vendor_name: ms?.vendor_name != null ? String(ms.vendor_name) : null,
+        main_stock: ms
+          ? {
+              available_qty: ms.available_qty,
+              received_qty: ms.received_qty,
+              sold_out_qty: ms.sold_out_qty,
+              pending_delivery_qty: ms.pending_delivery_qty,
+              uom: ms.uom,
+              remarks: ms.remarks,
+            }
+          : null,
+        racks,
+      });
+    }
+
+    res.json({ order_id: orderId, rack_q: rackQ || null, lines });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -506,6 +587,102 @@ router.post('/rack-scan/import', requirePermission('can_scan_rack'), async (req,
     } catch {
       // ignore
     }
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.get('/inbound-batches', async (req, res) => {
+  try {
+    const rows = await dbAll(
+      `SELECT b.*,
+        (SELECT COUNT(*) FROM inbound_items i WHERE i.inbound_batch_id = b.id) AS item_count,
+        (SELECT COALESCE(SUM(i.remaining_qty),0) FROM inbound_items i WHERE i.inbound_batch_id = b.id) AS sum_remaining
+       FROM inbound_batches b
+       ORDER BY b.id DESC
+       LIMIT 300`
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/inbound-batches/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const batch = await dbGet(`SELECT * FROM inbound_batches WHERE id = ?`, [id]);
+    if (!batch) return res.status(404).json({ error: 'Batch not found' });
+    const items = await dbAll(
+      `SELECT * FROM inbound_items WHERE inbound_batch_id = ? ORDER BY part_number`,
+      [id]
+    );
+    res.json({ batch, items });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/putaway/upload', requirePermission('can_receive_stock'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const inbound_batch_id = Number(b.inbound_batch_id);
+    const inbound_item_id = Number(b.inbound_item_id);
+    const part_number = String(b.part_number || '').trim();
+    const rack_location = normRack(b.rack_location || b.scan_rack || '');
+    const qty = Number(b.qty);
+    const transaction_date = b.transaction_date || new Date().toISOString().slice(0, 10);
+    const remarks = String(b.remarks || '').trim();
+    const user_name = String(req.user?.username || '').trim() || 'mobile';
+
+    if (!inbound_batch_id || !inbound_item_id || !part_number || !rack_location || !(qty > 0)) {
+      return res.status(400).json({
+        error: 'inbound_batch_id, inbound_item_id, part_number, rack_location, qty required',
+      });
+    }
+
+    const item = await dbGet(`SELECT * FROM inbound_items WHERE id = ? AND inbound_batch_id = ?`, [
+      inbound_item_id,
+      inbound_batch_id,
+    ]);
+    if (!item) return res.status(404).json({ error: 'Inbound item not found' });
+    if (String(item.part_number).trim() !== part_number) return res.status(400).json({ error: 'part_number mismatch' });
+
+    const rem = Number(item.remaining_qty);
+    if (qty > rem + QTY_EPS) return res.status(400).json({ error: 'Qty exceeds remaining putaway allowance' });
+
+    await dbRun('BEGIN IMMEDIATE');
+    await dbRun(
+      `INSERT INTO inbound_putaway_lines
+        (inbound_item_id, inbound_batch_id, part_number, rack_location, qty, transaction_date, user_name, remarks, applied_to_rack)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      [
+        inbound_item_id,
+        inbound_batch_id,
+        part_number,
+        rack_location,
+        qty,
+        transaction_date,
+        user_name,
+        remarks || null,
+      ]
+    );
+
+    const nextPut = Number(item.putaway_qty) + qty;
+    const nextRem = Math.max(0, Number(item.total_qty) - nextPut);
+    const st = nextRem <= QTY_EPS ? 'Completed' : nextPut > QTY_EPS ? 'Partial' : 'Pending';
+
+    await dbRun(
+      `UPDATE inbound_items SET putaway_qty = ?, remaining_qty = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [nextPut, nextRem, st, inbound_item_id]
+    );
+
+    await updateInboundBatchStatus(inbound_batch_id);
+    await dbRun('COMMIT');
+
+    const updated = await dbGet(`SELECT * FROM inbound_items WHERE id = ?`, [inbound_item_id]);
+    res.json({ ok: true, item: updated });
+  } catch (e) {
+    await dbRun('ROLLBACK').catch(() => {});
     res.status(400).json({ error: e.message });
   }
 });

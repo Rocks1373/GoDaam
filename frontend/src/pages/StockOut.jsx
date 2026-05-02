@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Download, Eye, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { stockOutApi } from '../services/api';
+import { formatDateDDMMYYYY } from '../utils/dateDisplay';
 
 function parseTabSeparated(text) {
   const rawLines = (text || '')
@@ -290,7 +291,7 @@ const StockOut = () => {
               {(rows || []).map((r) => (
                 <tr key={r.id} className="hover:bg-gray-50">
                   <td className="tbl-td-nowrap">
-                    {String(r.transaction_date).slice(0, 10)}
+                    {formatDateDDMMYYYY(r.transaction_date)}
                   </td>
                   <td className="tbl-td-nowrap">{r.part_number}</td>
                   <td className="tbl-td-nowrap">{r.sap_part_number || '-'}</td>
@@ -434,7 +435,7 @@ const StockOut = () => {
                 <div className="p-4 text-sm text-gray-700 space-y-1">
                   {bulkPreview.map((r, idx) => (
                     <div key={idx} className="font-mono text-xs">
-                      {r.transaction_date} | {r.part_number} | {r.rack_location} | out:{r.qty_out}
+                      {formatDateDDMMYYYY(r.transaction_date)} | {r.part_number} | {r.rack_location} | out:{r.qty_out}
                     </div>
                   ))}
                 </div>

@@ -145,4 +145,102 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
   return { ok: true, order_id: orderId, status: 'delivered' };
 }
 
-module.exports = { markOutboundDelivered, aggregateItemsByPartNumber };
+/**
+ * Undo mark-delivered: remove sold_out rows and delivered_outbounds record, restore main_stock sold counts.
+ * Expects the same per-part dedupe keys as markOutboundDelivered. Fails if sold_out rows are missing.
+ * @param {import('sqlite3').Database} db
+ */
+async function reverseOutboundDelivered(db, orderId) {
+  const dbRun = promisify(db.run.bind(db));
+  const dbGet = promisify(db.get.bind(db));
+  const dbAll = promisify(db.all.bind(db));
+
+  const order = await dbGet('SELECT * FROM outbound_orders WHERE id = ?', [orderId]);
+  if (!order) {
+    const err = new Error('Order not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const deliveredGuard = await dbGet('SELECT id FROM delivered_outbounds WHERE outbound_id = ?', [orderId]);
+  if (!deliveredGuard?.id) {
+    const err = new Error('Order is not marked delivered — nothing to reverse');
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const rawItems = await dbAll('SELECT * FROM outbound_items WHERE outbound_id = ? ORDER BY id ASC', [orderId]);
+  const items = aggregateItemsByPartNumber(rawItems);
+  if (!items.length) {
+    const err = new Error('Outbound has no items');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  for (const it of items) {
+    const qty = asNumber(it.required_qty);
+    const dedupeKey = `outbound-deliver:${orderId}:${it.part_number}:${qty}`;
+    const logRow = await dbGet('SELECT id FROM sold_out WHERE dedupe_key = ?', [dedupeKey]);
+    if (!logRow?.id) {
+      const err = new Error(
+        `Cannot reverse: sold_out audit row missing for ${it.part_number} (dedupe key). Fix data or contact admin.`
+      );
+      err.statusCode = 409;
+      throw err;
+    }
+    const ms = await dbGet(
+      `SELECT COALESCE(sold_out_qty, issued_qty, 0) AS sold FROM main_stock WHERE part_number = ?`,
+      [it.part_number]
+    );
+    const sold = asNumber(ms?.sold);
+    if (sold < qty) {
+      const err = new Error(
+        `Cannot reverse: main stock sold_out for ${it.part_number} is lower than delivered qty (stock may have been adjusted).`
+      );
+      err.statusCode = 409;
+      throw err;
+    }
+  }
+
+  await dbRun('BEGIN IMMEDIATE');
+  try {
+    for (const it2 of items) {
+      const qty2 = asNumber(it2.required_qty);
+      const dedupeKey = `outbound-deliver:${orderId}:${it2.part_number}:${qty2}`;
+
+      await dbRun('DELETE FROM sold_out WHERE dedupe_key = ?', [dedupeKey]);
+
+      await dbRun(
+        `UPDATE main_stock SET
+           sold_out_qty = COALESCE(sold_out_qty, 0) - ?,
+           issued_qty = COALESCE(issued_qty, 0) - ?,
+           available_qty = received_qty - (COALESCE(sold_out_qty, 0) - ?) - COALESCE(pending_delivery_qty, 0),
+           last_updated = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+         WHERE part_number = ?`,
+        [qty2, qty2, qty2, it2.part_number]
+      );
+    }
+
+    await dbRun('DELETE FROM delivered_outbounds WHERE outbound_id = ?', [orderId]);
+    await dbRun(
+      `UPDATE outbound_orders SET status = 'Picked', dn_status = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [orderId]
+    );
+
+    await dbRun('COMMIT');
+  } catch (e) {
+    await dbRun('ROLLBACK').catch(() => {});
+    throw e;
+  }
+
+  return {
+    ok: true,
+    order_id: orderId,
+    status: 'Picked',
+    note:
+      'Stock and sold_out entries for this delivery were reversed. If the order was marked via Delivery Note, set that DN back from Delivered manually if needed.',
+  };
+}
+
+module.exports = { markOutboundDelivered, reverseOutboundDelivered, aggregateItemsByPartNumber };

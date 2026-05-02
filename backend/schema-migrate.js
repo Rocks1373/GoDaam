@@ -390,6 +390,57 @@ async function migrateGodamSchema(db) {
   `);
   await run(`CREATE INDEX IF NOT EXISTS idx_customer_locations_customer ON customer_locations(customer_id, is_active, id)`);
 
+  // --- Inbound batches / putaway (GoDam receiving workflow) ---
+  await run(`
+    CREATE TABLE IF NOT EXISTS inbound_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_name TEXT NOT NULL,
+      vendor_name TEXT,
+      upload_date TEXT,
+      status TEXT DEFAULT 'Pending',
+      created_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS inbound_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inbound_batch_id INTEGER NOT NULL,
+      part_number TEXT NOT NULL,
+      sap_part_number TEXT,
+      description TEXT,
+      total_qty REAL NOT NULL,
+      putaway_qty REAL DEFAULT 0,
+      remaining_qty REAL NOT NULL,
+      status TEXT DEFAULT 'Pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (inbound_batch_id) REFERENCES inbound_batches(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_inbound_items_batch ON inbound_items(inbound_batch_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_inbound_items_part ON inbound_items(part_number)`);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS inbound_putaway_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inbound_item_id INTEGER NOT NULL,
+      inbound_batch_id INTEGER NOT NULL,
+      part_number TEXT NOT NULL,
+      rack_location TEXT NOT NULL,
+      qty REAL NOT NULL,
+      transaction_date TEXT NOT NULL,
+      user_name TEXT,
+      remarks TEXT,
+      applied_to_rack INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (inbound_item_id) REFERENCES inbound_items(id),
+      FOREIGN KEY (inbound_batch_id) REFERENCES inbound_batches(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_putaway_lines_item ON inbound_putaway_lines(inbound_item_id, applied_to_rack)`);
+
   await seedDefaultRolePermissions(db);
 }
 

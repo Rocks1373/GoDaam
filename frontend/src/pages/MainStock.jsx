@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Upload, Copy, Eye, Package, Truck, GitCompare, Plus } from 'lucide-react';
 import { mainStockApi, inboundApi, soldOutApi, stockComparisonApi, vendorItemsApi, vendorsApi } from '../services/api';
+import { formatDateDDMMYYYY } from '../utils/dateDisplay';
 
 function downloadCsvFile(filename, headers, rows) {
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
@@ -1033,7 +1034,7 @@ export default function MainStock() {
                     <td className="tbl-td-nowrap">{r.po_number}</td>
                     <td className="tbl-td font-mono">{r.part_number}</td>
                     <td className="tbl-td">{r.inbound_qty}</td>
-                    <td className="tbl-td-nowrap">{r.received_date}</td>
+                    <td className="tbl-td-nowrap">{formatDateDDMMYYYY(r.received_date)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1099,7 +1100,7 @@ export default function MainStock() {
                 ) : null}
                 {soldRows.map((r) => (
                   <tr key={r.id} className="hover:bg-gray-50">
-                    <td className="tbl-td-nowrap">{r.date}</td>
+                    <td className="tbl-td-nowrap">{formatDateDDMMYYYY(r.date)}</td>
                     <td className="tbl-td font-mono">{r.part_number}</td>
                     <td className="tbl-td">{r.outbound_qty ?? r.sold_qty}</td>
                     <td className="tbl-td">{r.status}</td>

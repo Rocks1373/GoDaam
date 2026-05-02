@@ -8,6 +8,7 @@ const router = express.Router();
 const customers = new Customer();
 const upload = multer({ dest: 'uploads/' });
 
+/** Full template column order (optional columns may be omitted from the uploaded file). */
 const EXCEL_HEADERS = [
   'Customer Number',
   'Company Name',
@@ -25,12 +26,18 @@ const EXCEL_HEADERS = [
   'Remarks',
 ];
 
+const REQUIRED_EXCEL_HEADERS = ['Customer Number', 'Company Name'];
+
 function normalizeHeader(h) {
   return String(h || '').trim();
 }
 
 function mapExcelRowToCustomer(row, headerIndex) {
-  const get = (name) => row[headerIndex[name]];
+  const get = (name) => {
+    const idx = headerIndex[name];
+    if (idx === undefined || idx < 0) return undefined;
+    return row[idx];
+  };
   const cpnum = get('Contact Person Number');
   return {
     customer_number: get('Customer Number'),
@@ -176,16 +183,22 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     const headerRow = (grid[0] || []).map(normalizeHeader);
 
     const headerIndex = {};
-    for (const h of EXCEL_HEADERS) {
+    for (const h of REQUIRED_EXCEL_HEADERS) {
       const idx = headerRow.indexOf(h);
       if (idx === -1) {
         return res.status(400).json({
-          error: `Missing required header: "${h}". Headers must match the exact Excel format.`,
-          expected_headers: EXCEL_HEADERS,
+          error: `Missing required column: "${h}". Only Customer Number and Company Name are required; other columns are optional.`,
+          required_headers: REQUIRED_EXCEL_HEADERS,
+          optional_headers: EXCEL_HEADERS.filter((x) => !REQUIRED_EXCEL_HEADERS.includes(x)),
           found_headers: headerRow,
         });
       }
       headerIndex[h] = idx;
+    }
+    for (const h of EXCEL_HEADERS) {
+      if (REQUIRED_EXCEL_HEADERS.includes(h)) continue;
+      const idx = headerRow.indexOf(h);
+      if (idx !== -1) headerIndex[h] = idx;
     }
 
     const results = [];

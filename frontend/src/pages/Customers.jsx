@@ -145,19 +145,7 @@ export default function Customers() {
 
   const createCustomerRow = async () => {
     try {
-      const isPermanent = String(addForm.address_type || '').toLowerCase() === 'permanent';
-
-      // Mandatory only when permanent (per requirement).
-      if (isPermanent) {
-        const missing = [];
-        if (!String(addForm.city_name || '').trim()) missing.push('City Name');
-        if (!String(addForm.address || '').trim()) missing.push('Address');
-        if (!String(addForm.gps || '').trim()) missing.push('GPS');
-        if (!String(addForm.contact_person || '').trim()) missing.push('Contact Person');
-        if (!String(addForm.contact_person_number_1 || '').trim()) missing.push('ContactPersonNumber1');
-        if (missing.length) return alert(`Missing required fields for Permanent address: ${missing.join(', ')}`);
-      }
-
+      if (!String(addForm.customer_number || '').trim()) return alert('Customer Number is required');
       if (!String(addForm.company_name || '').trim()) return alert('Company Name is required');
 
       await customersApi.create({
@@ -218,7 +206,9 @@ export default function Customers() {
       <div className="flex flex-col md:flex-row md:items-start justify-between mb-2 gap-2">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-gray-900 leading-tight">Customer Address Book</h2>
-          <p className="text-[11px] text-gray-600">Excel: Customer Number first, Remarks last</p>
+          <p className="text-[11px] text-gray-600">
+            Excel upload: Customer Number and Company Name are required columns; all other columns are optional.
+          </p>
         </div>
         <div className="flex gap-1.5 flex-wrap justify-end">
           <button
@@ -339,7 +329,7 @@ export default function Customers() {
           <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[80vh] overflow-y-auto">
             <h3 className="text-xl font-bold mb-2">Bulk Paste Customers</h3>
             <p className="text-sm text-gray-600 mb-4">
-              Paste tab-separated rows with exact header order. Remarks must be last.
+              Paste tab-separated values. At minimum provide Customer Number and Company Name (first two columns). Extra columns are optional, in template order.
             </p>
             <textarea
               value={bulkData}
@@ -391,7 +381,7 @@ export default function Customers() {
               <div>
                 <h3 className="text-xl font-bold">Add Customer Address</h3>
                 <p className="text-xs text-gray-600 mt-1">
-                  Permanent requires: City Name, Address, GPS, Contact Person, ContactPersonNumber1. Temporary has no mandatory fields.
+                  Only Customer Number and Company Name are required. Contact, GPS, address, and other fields are optional.
                 </p>
               </div>
               <button type="button" className="btn-secondary" onClick={() => setShowAddModal(false)}>

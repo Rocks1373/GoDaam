@@ -8,6 +8,7 @@ import LoginScreen, { type RootStackParamList } from './src/screens/LoginScreen'
 import HomeScreen from './src/screens/HomeScreen';
 import OrdersScreen from './src/screens/OrdersScreen';
 import OrderDetailScreen from './src/screens/OrderDetailScreen';
+import StockPeekScreen from './src/screens/StockPeekScreen';
 import ScanRackScreen from './src/screens/ScanRackScreen';
 import ReceivingScreen from './src/screens/ReceivingScreen';
 import UpcomingOrdersScreen from './src/screens/UpcomingOrdersScreen';
@@ -51,9 +52,18 @@ export default function App() {
       <NavigationContainer>
         <Stack.Navigator initialRouteName={initial} screenOptions={{ headerShown: true }}>
           <Stack.Screen name="Login" component={LoginScreen} options={{ title: 'GoDaam Login' }} />
-          <Stack.Screen name="Home" component={HomeScreen} options={{ title: 'GoDaam' }} />
+          <Stack.Screen
+            name="Home"
+            component={HomeScreen}
+            options={{ title: 'GoDaam', headerStyle: { backgroundColor: '#f1f5f9' } }}
+          />
           <Stack.Screen name="Orders" component={OrdersScreen} />
           <Stack.Screen name="OrderDetail" component={OrderDetailScreen} options={{ title: 'Order' }} />
+          <Stack.Screen
+            name="StockPeek"
+            component={StockPeekScreen}
+            options={{ title: 'Stock review (read-only)' }}
+          />
           <Stack.Screen name="ScanRack" component={ScanRackScreen} />
           <Stack.Screen name="Receiving" component={ReceivingScreen} />
           <Stack.Screen name="Upcoming" component={UpcomingOrdersScreen} />

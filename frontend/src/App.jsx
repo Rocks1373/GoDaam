@@ -14,6 +14,8 @@ import {
   UserCog,
   GripVertical,
   Database,
+  PieChart,
+  LineChart,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Dashboard from './pages/Dashboard';
@@ -32,6 +34,8 @@ import Login from './pages/Login';
 import CarrierMaster from './pages/CarrierMaster';
 import VendorMaster from './pages/VendorMaster';
 import VendorItems from './pages/VendorItems';
+import InboundReport from './pages/InboundReport';
+import OutboundReport from './pages/OutboundReport';
 import { authApi, notificationsApi } from './services/api';
 import './index.css';
 
@@ -328,6 +332,41 @@ function App() {
                         <span className="truncate">Stock by Rack</span>
                       </NavLink>
 
+                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
+                        <PieChart className="w-3 h-3" />
+                        Reports
+                      </div>
+                      <NavLink
+                        to="/reports/inbound"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <Truck className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Inbound Report</span>
+                      </NavLink>
+                      <NavLink
+                        to="/reports/outbound"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <LineChart className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Outbound Report</span>
+                      </NavLink>
+                      <div className="px-2 py-0.5 text-[9px] text-gray-500 leading-snug pl-3">
+                        Use <span className="font-semibold">Main Stock</span> &amp;{' '}
+                        <span className="font-semibold">Stock by Rack</span> above for stock views; SAP report planned.
+                      </div>
+
                       {(user?.role === 'admin' || user?.permissions?.can_upload_outbound) && (
                         <NavLink
                           to="/outbound-upload"
@@ -511,6 +550,8 @@ function App() {
                   <main className="flex-1 min-w-0 pb-4">
                     <Routes>
                       <Route path="/dashboard" element={<Dashboard />} />
+                      <Route path="/reports/inbound" element={<InboundReport />} />
+                      <Route path="/reports/outbound" element={<OutboundReport />} />
                       <Route path="/main-stock" element={<MainStock />} />
                       <Route path="/stock-by-rack/*" element={<StockByRack />} />
                       <Route path="/pick-suggestion" element={<Navigate to="/dashboard" replace />} />

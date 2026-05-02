@@ -49,14 +49,15 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/auth', require('./routes/auth'));
 
 // Protected routes (login required)
-const { requireAuth, requireWebAccess, requireAdmin, requirePermission } = require('./middleware/auth');
-const { markOutboundDelivered } = require('./services/markOutboundDelivered');
+const { requireAuth, requireWebAccess, requireAdmin, requirePermission, requireMobileAccess } = require('./middleware/auth');
+const { markOutboundDelivered, reverseOutboundDelivered } = require('./services/markOutboundDelivered');
 const db = require('./db');
 
 const webAuth = [requireAuth, requireWebAccess];
 
 app.use('/api/main-stock', ...webAuth, require('./routes/main-stock'));
 app.use('/api/inbound', ...webAuth, require('./routes/inbound'));
+app.use('/api/reports', ...webAuth, require('./routes/reports'));
 app.use('/api/sold-out', ...webAuth, require('./routes/sold-out'));
 app.use('/api/stock-comparison-report', ...webAuth, require('./routes/stock-comparison-report'));
 app.use('/api/stock-by-rack', ...webAuth, require('./routes/stock-by-rack'));
@@ -80,6 +81,7 @@ app.use('/api/admin/maintenance', ...webAuth, requireAdmin, require('./routes/ad
 app.use('/api/pick-change-requests', ...webAuth, requireAdmin, require('./routes/pick-change-requests'));
 
 app.use('/api/mobile', require('./routes/mobile'));
+app.use('/api/mobile/ocr', requireAuth, requireMobileAccess, require('./routes/ocr'));
 app.use('/api/notifications', requireAuth, require('./routes/notifications'));
 
 app.post(
@@ -96,6 +98,24 @@ app.post(
     } catch (e) {
       const code = e.statusCode || 500;
       res.status(code).json({ error: e.message, shortages: e.shortages });
+    }
+  }
+);
+
+app.post(
+  '/api/orders/:id/reverse-delivery',
+  requireAuth,
+  requireWebAccess,
+  requirePermission('can_upload_outbound'),
+  async (req, res) => {
+    const orderId = Number(req.params.id);
+    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+    try {
+      const result = await reverseOutboundDelivered(db, orderId);
+      res.json(result);
+    } catch (e) {
+      const code = e.statusCode || 500;
+      res.status(code).json({ error: e.message });
     }
   }
 );

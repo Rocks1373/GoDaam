@@ -6,6 +6,8 @@ const { promisify } = require('util');
 const db = require('../db');
 const { requireAdmin } = require('../middleware/auth');
 
+const { normalizeExcelRows } = require('../utils/excelDates');
+
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -229,7 +231,7 @@ router.post('/upload', requireAdmin, upload.single('file'), async (req, res) => 
     if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
     const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    const rows = normalizeExcelRows(XLSX.utils.sheet_to_json(ws, { defval: '' }));
     const results = [];
     for (const r of rows) {
       try {

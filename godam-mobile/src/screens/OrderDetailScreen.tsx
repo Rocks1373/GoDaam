@@ -1,8 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
-import { View, Text, TextInput, Pressable, StyleSheet, ScrollView, Alert, Modal } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  Pressable,
+  StyleSheet,
+  ScrollView,
+  Alert,
+  Modal,
+  useWindowDimensions,
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
-import { getOrder } from '../api/ordersApi';
+import { getOrder, getOrderStockOverview, type StockOverviewLine } from '../api/ordersApi';
 import { confirmItem, confirmOrder, requestPickChange } from '../api/pickingApi';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'OrderDetail'>;
@@ -42,6 +53,11 @@ function toQty(v: unknown, fallback = 0): number {
   if (v === undefined || v === null || v === '') return fallback;
   const n = typeof v === 'number' ? v : Number(String(v).trim().replace(',', '.'));
   return Number.isFinite(n) ? n : fallback;
+}
+
+function fmtQty(v: unknown): string {
+  const n = toQty(v, NaN);
+  return Number.isFinite(n) ? String(n) : '—';
 }
 
 /** API sometimes differs by shape; keep picking UX stable. */
@@ -130,9 +146,14 @@ function formatConfirmPickFailureMessage(data: Record<string, unknown>): string 
   return msg;
 }
 
-export default function OrderDetailScreen({ route }: Props) {
+export default function OrderDetailScreen({ route, navigation }: Props) {
   const { orderId } = route.params;
+  const { width: winW } = useWindowDimensions();
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
+  const [stockLines, setStockLines] = useState<StockOverviewLine[]>([]);
+  const [rackFilter, setRackFilter] = useState('');
+  const [rackFilterDebounced, setRackFilterDebounced] = useState('');
+  const [stockOvLoading, setStockOvLoading] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
   const [selectedFifoId, setSelectedFifoId] = useState<number | null>(null);
   const [changeReason, setChangeReason] = useState('');
@@ -157,6 +178,29 @@ export default function OrderDetailScreen({ route }: Props) {
   useEffect(() => {
     load();
   }, [orderId]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setRackFilterDebounced(rackFilter.trim()), 400);
+    return () => clearTimeout(t);
+  }, [rackFilter]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setStockOvLoading(true);
+      try {
+        const ov = await getOrderStockOverview(orderId, rackFilterDebounced || undefined);
+        if (!cancelled) setStockLines(ov.lines || []);
+      } catch {
+        if (!cancelled) setStockLines([]);
+      } finally {
+        if (!cancelled) setStockOvLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [orderId, rackFilterDebounced]);
 
   const items = useMemo(() => normalizeItemsFromDetail(detail?.items), [detail]);
   const fifos = useMemo(() => {
@@ -356,12 +400,68 @@ export default function OrderDetailScreen({ route }: Props) {
     items.length > 0 && ['Sent For Pick', 'Picking'].includes(orderStatus);
 
   return (
-    <ScrollView style={styles.wrap} contentContainerStyle={{ paddingBottom: 40 }}>
+    <ScrollView style={styles.wrap} nestedScrollEnabled contentContainerStyle={{ paddingBottom: 40 }}>
       <Text style={styles.h}>Order #{orderId} · v2</Text>
       <Text style={styles.meta}>Status: {String(detail?.status)}</Text>
       <Text style={styles.meta}>
         {items.length} pick line(s) on this order — scroll through the full list before confirming.
       </Text>
+
+      <View style={styles.stockBlock}>
+        <View style={styles.stockHeadRow}>
+          <Text style={styles.section}>Stock check</Text>
+          <Ionicons name="search" size={18} color="#475569" />
+        </View>
+        <Text style={styles.stockSub}>
+          Swipe cards for each pick line. SAP & vendor # are a quick peek. Tap a card for full main stock + rack
+          list (read-only). Edits are on the web app.
+        </Text>
+        <View style={styles.searchRow}>
+          <Ionicons name="search-outline" size={20} color="#64748b" style={{ marginRight: 8 }} />
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Filter by rack location (contains…)"
+            value={rackFilter}
+            onChangeText={setRackFilter}
+            autoCapitalize="none"
+            autoCorrect={false}
+            clearButtonMode="while-editing"
+          />
+        </View>
+        {stockOvLoading ? <Text style={styles.hint}>Loading stock overview…</Text> : null}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          snapToInterval={Math.min(winW * 0.86, 340) + 10}
+          decelerationRate="fast"
+          snapToAlignment="start"
+          contentContainerStyle={styles.peekList}
+        >
+          {stockLines.map((item) => (
+            <Pressable
+              key={String(item.outbound_item_id)}
+              style={[styles.peekCard, { width: Math.min(winW * 0.86, 340) }]}
+              onPress={() =>
+                navigation.navigate('StockPeek', { orderId, outboundItemId: item.outbound_item_id })
+              }
+            >
+              <Text style={styles.peekTitle} numberOfLines={1}>
+                {String(item.material || item.part_number || 'Part')}
+              </Text>
+              <Text style={styles.peekRow}>SAP: {item.sap_part_number?.trim() ? item.sap_part_number : '—'}</Text>
+              <Text style={styles.peekRow}>Vendor #: {item.vendor_number?.trim() ? item.vendor_number : '—'}</Text>
+              <Text style={styles.peekMeta}>
+                Main avail {item.main_stock?.available_qty != null ? fmtQty(item.main_stock.available_qty) : '—'} · Racks{' '}
+                {Array.isArray(item.racks) ? item.racks.length : 0}
+              </Text>
+              <Text style={styles.peekTap}>Tap for details · reject / QA review only</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+        {!stockOvLoading && stockLines.length === 0 ? (
+          <Text style={styles.hint}>No stock lines loaded for this order.</Text>
+        ) : null}
+      </View>
 
       <View style={styles.card}>
         <Text style={styles.sectionInline}>Request change (rack/qty)</Text>
@@ -569,4 +669,31 @@ const styles = StyleSheet.create({
     borderColor: '#e2e8f0',
   },
   modalTitle: { fontSize: 16, fontWeight: '800', color: '#0f172a', marginBottom: 8 },
+  stockBlock: { marginBottom: 12 },
+  stockHeadRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 },
+  stockSub: { fontSize: 11, color: '#64748b', lineHeight: 16, marginBottom: 10 },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    marginBottom: 8,
+  },
+  searchInput: { flex: 1, paddingVertical: 10, fontSize: 14, color: '#0f172a' },
+  peekList: { paddingVertical: 4, paddingRight: 8, gap: 0 },
+  peekCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 14,
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  peekTitle: { fontSize: 16, fontWeight: '800', color: '#0f172a', marginBottom: 8 },
+  peekRow: { fontSize: 13, color: '#334155', marginTop: 2 },
+  peekMeta: { fontSize: 11, color: '#64748b', marginTop: 8 },
+  peekTap: { fontSize: 10, color: '#94a3b8', marginTop: 8, fontStyle: 'italic' },
 });

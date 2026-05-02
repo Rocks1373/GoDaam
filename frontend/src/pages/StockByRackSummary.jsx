@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Download, Filter, Search } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { stockByRackApi } from '../services/api';
+import { formatDateDDMMYYYY } from '../utils/dateDisplay';
 
 const StockByRackSummary = () => {
   const [rows, setRows] = useState([]);
@@ -197,7 +198,7 @@ const StockByRackSummary = () => {
                   <td className="tbl-td-nowrap">{r.total_out_qty ?? 0}</td>
                   <td className="tbl-td-nowrap">{r.available_qty ?? 0}</td>
                   <td className="tbl-td-nowrap">
-                    {r.first_entry_date ? String(r.first_entry_date).slice(0, 10) : '-'}
+                    {r.first_entry_date ? formatDateDDMMYYYY(r.first_entry_date) : '-'}
                   </td>
                   <td className="tbl-td-nowrap">
                     {r.last_updated ? String(r.last_updated).slice(0, 19).replace('T', ' ') : '-'}

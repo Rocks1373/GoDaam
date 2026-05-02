@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Download, Eye, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { stockInApi } from '../services/api';
+import { formatDateDDMMYYYY } from '../utils/dateDisplay';
 
 function downloadErrorWorkbook({ failed, filename }) {
   const rows = (failed || []).map((r) => ({
@@ -15,7 +16,11 @@ function downloadErrorWorkbook({ failed, filename }) {
   XLSX.writeFile(wb, filename);
 }
 
-/** Tab-separated (Excel paste) or comma-separated TXT/CSV; delimiter chosen per line. */
+/**
+ * Tab-separated (Excel paste) or comma-separated TXT/CSV; delimiter chosen per line.
+ * Rack scan mobile export (8 cols): transaction_date, part_number, sap_part_number, rack_location, qty_in, source_type, reference_no, remarks
+ * Legacy (9 cols): same with description after sap_part_number.
+ */
 function parsePastedStockRows(text) {
   const rawLines = (text || '')
     .split('\n')
@@ -30,18 +35,35 @@ function parsePastedStockRows(text) {
 
   return lines.map((line) => {
     const cols = line.includes('\t') ? line.split('\t') : line.split(',').map((c) => String(c).trim());
+    const t = (i) => (cols[i] ?? '').trim();
+
+    if (cols.length === 8) {
+      const qtyNum = parseFloat(String(t(4) || '').replace(/,/g, ''));
+      return {
+        transaction_date: t(0),
+        part_number: t(1),
+        sap_part_number: t(2),
+        description: '-',
+        rack_location: t(3),
+        qty_in: Number.isFinite(qtyNum) ? qtyNum : NaN,
+        source_type: t(5),
+        reference_no: t(6),
+        remarks: t(7),
+      };
+    }
+
     const qtyRaw = cols[5];
     const qtyNum = parseFloat(String(qtyRaw || '').replace(/,/g, ''));
     return {
-      transaction_date: (cols[0] || '').trim(),
-      part_number: (cols[1] || '').trim(),
-      sap_part_number: (cols[2] || '').trim(),
-      description: (cols[3] || '').trim(),
-      rack_location: (cols[4] || '').trim(),
+      transaction_date: t(0),
+      part_number: t(1),
+      sap_part_number: t(2),
+      description: t(3) || '-',
+      rack_location: t(4),
       qty_in: Number.isFinite(qtyNum) ? qtyNum : NaN,
-      source_type: (cols[6] || '').trim(),
-      reference_no: (cols[7] || '').trim(),
-      remarks: (cols[8] || '').trim(),
+      source_type: t(6),
+      reference_no: t(7),
+      remarks: t(8),
     };
   });
 }
@@ -342,7 +364,7 @@ const StockIn = () => {
               {(rows || []).map((r) => (
                 <tr key={r.id} className="hover:bg-gray-50">
                   <td className="tbl-td-nowrap">
-                    {String(r.transaction_date).slice(0, 10)}
+                    {formatDateDDMMYYYY(r.transaction_date)}
                   </td>
                   <td className="tbl-td-nowrap">{r.part_number}</td>
                   <td className="tbl-td-nowrap">{r.sap_part_number || '-'}</td>
@@ -474,8 +496,14 @@ const StockIn = () => {
             <p className="text-sm text-gray-600 mb-4">
               Paste tab-separated (from Excel) or comma-separated rows. Header optional.
               <br />
-              transaction_date, part_number, sap_part_number, description, rack_location, qty_in, source_type,
-              reference_no, remarks
+              <span className="font-mono text-xs">
+                Rack scan TXT (8): transaction_date, part_number, sap_part_number, rack_location, qty_in, source_type,
+                reference_no, remarks
+              </span>
+              <br />
+              <span className="font-mono text-xs text-gray-500">
+                Legacy (9): includes description after sap_part_number.
+              </span>
             </p>
             <textarea
               value={bulkData}
@@ -492,7 +520,7 @@ const StockIn = () => {
                 <div className="p-4 text-sm text-gray-700 space-y-1">
                   {bulkPreview.map((r, idx) => (
                     <div key={idx} className="font-mono text-xs">
-                      {r.transaction_date} | {r.part_number} | {r.rack_location} | in:{r.qty_in}
+                      {formatDateDDMMYYYY(r.transaction_date)} | {r.part_number} | {r.rack_location} | in:{r.qty_in}
                     </div>
                   ))}
                 </div>

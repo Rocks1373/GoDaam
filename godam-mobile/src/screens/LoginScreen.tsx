@@ -10,6 +10,7 @@ export type RootStackParamList = {
   Home: undefined;
   Orders: undefined;
   OrderDetail: { orderId: number };
+  StockPeek: { orderId: number; outboundItemId: number };
   ScanRack: undefined;
   Receiving: undefined;
   Upcoming: undefined;

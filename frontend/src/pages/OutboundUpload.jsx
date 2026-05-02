@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Truck, Upload, Wand2, ClipboardCheck, Send, Search, Trash2 } from 'lucide-react';
+import { Truck, Upload, Wand2, ClipboardCheck, Send, Search, Trash2, PackageCheck, Undo2 } from 'lucide-react';
 import { outboundGodamApi, stockByRackApi } from '../services/api';
 
 export default function OutboundUpload() {
@@ -204,6 +204,54 @@ export default function OutboundUpload() {
     }
   };
 
+  const markDelivered = async () => {
+    if (!detail?.id) return;
+    if (
+      !confirm(
+        'Mark this outbound as delivered? Main stock sold counts will increase (same rules as Delivery Note deliver). Invoice number must be set on the order.'
+      )
+    ) {
+      return;
+    }
+    setLoading(true);
+    setMsg('');
+    try {
+      await outboundGodamApi.markDelivered(detail.id);
+      const d = await outboundGodamApi.get(detail.id);
+      setDetail(d);
+      setMsg('Marked delivered. Stock deducted.');
+      await loadOrders();
+    } catch (e) {
+      setMsg(e.response?.data?.error || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const reverseDelivery = async () => {
+    if (!detail?.id) return;
+    if (
+      !confirm(
+        'Reverse delivery for this outbound? This restores main stock sold quantities and removes the delivery audit rows. Physical returns must still be received via Stock In / rack if goods came back. Continue?'
+      )
+    ) {
+      return;
+    }
+    setLoading(true);
+    setMsg('');
+    try {
+      const res = await outboundGodamApi.reverseDelivery(detail.id);
+      const d = await outboundGodamApi.get(detail.id);
+      setDetail(d);
+      setMsg(res?.note || 'Delivery reversed.');
+      await loadOrders();
+    } catch (e) {
+      setMsg(e.response?.data?.error || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const deleteOrder = async (id) => {
     if (!confirm(`Delete outbound #${id}? This cannot be undone.`)) return;
     setLoading(true);
@@ -369,6 +417,29 @@ export default function OutboundUpload() {
                 <Send size={14} />
                 Send for pick
               </button>
+              {String(detail.status || '').toLowerCase() === 'delivered' ? (
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center gap-1 border-amber-300 text-amber-900"
+                  onClick={reverseDelivery}
+                  disabled={loading}
+                  title="Undo mark-delivered (restore main stock sold counts)"
+                >
+                  <Undo2 size={14} />
+                  Reverse delivery
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center gap-1 border-emerald-200"
+                  onClick={markDelivered}
+                  disabled={loading}
+                  title="Requires invoice number on this outbound (same as DN deliver)"
+                >
+                  <PackageCheck size={14} />
+                  Mark delivered
+                </button>
+              )}
             </div>
 
             {(detail.items || []).some((it) => Number(it.shortage_qty || 0) > 0) ? (

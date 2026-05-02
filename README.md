@@ -52,11 +52,22 @@ npm run dev
 
 ## Mobile app (Expo)
 
+### Setup Android Emulator
+
+1. **Open Android Studio**.
+2. Go to **Tools -> Device Manager**.
+3. Click **Create Device**, select a device (e.g., Pixel 8), and download/select a system image (e.g., API 34).
+4. Once created, click the **Play** button to start the emulator.
+
+### Run the app
+
 ```bash
 cd godam-mobile
 npm install
 npx expo start
 ```
+
+Press **a** to open on the Android emulator.
 
 Configure API base URL via the mobile app’s env / config (see `godam-mobile/.env.example`).
 

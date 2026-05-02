@@ -117,6 +117,13 @@ export const inboundApi = {
     const res = await api.get('/inbound/template', { responseType: 'blob' });
     downloadBlob(res.data, 'inbound-template.xlsx');
   },
+  putawayReport: async (params = {}) => (await api.get('/inbound/putaway-report', { params })).data,
+  applyPutawayToRack: async (inbound_item_ids) =>
+    (await api.post('/inbound/apply-putaway-to-rack', { inbound_item_ids })).data,
+};
+
+export const reportsApi = {
+  outboundPicks: async (params = {}) => (await api.get('/reports/outbound-picks', { params })).data,
 };
 
 export const soldOutApi = {
@@ -292,6 +299,9 @@ export const outboundGodamApi = {
   markDelivered: async (id) => (await api.post(`/outbound/${id}/mark-delivered`)).data,
   /** Alias for spec path POST /api/orders/:id/mark-delivered */
   markDeliveredOrdersPath: async (id) => (await api.post(`/orders/${id}/mark-delivered`)).data,
+  /** Undo mark-delivered: restores main stock sold counts, removes delivery guard + sold_out rows for this outbound. */
+  reverseDelivery: async (id) => (await api.post(`/outbound/${id}/reverse-delivery`)).data,
+  reverseDeliveryOrdersPath: async (id) => (await api.post(`/orders/${id}/reverse-delivery`)).data,
   changePickLocation: async (id, payload) => (await api.post(`/outbound/${id}/change-pick-location`, payload)).data,
   updateFifoQty: async (id, fifoId, suggested_qty) => (await api.put(`/outbound/${id}/fifo/${fifoId}`, { suggested_qty })).data,
   removeFifoLine: async (id, fifoId) => (await api.delete(`/outbound/${id}/fifo/${fifoId}`)).data,

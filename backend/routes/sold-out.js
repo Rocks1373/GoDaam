@@ -11,6 +11,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 
 const dbRun = promisify(db.run.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const dbAll = promisify(db.all.bind(db));
+const { normalizeExcelRows } = require('../utils/excelDates');
 
 function pick(row, ...names) {
   for (const n of names) {
@@ -193,7 +194,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    const rows = normalizeExcelRows(XLSX.utils.sheet_to_json(sheet, { defval: '' }));
     if (!rows.length) return res.status(400).json({ error: 'Empty sheet' });
     const { results, shortageWarnings } = await processSoldOutRows(rows);
     const ok = results.filter((r) => r.ok).length;
@@ -212,7 +213,7 @@ router.post('/bulk-paste', async (req, res) => {
   try {
     const { data } = req.body;
     if (!Array.isArray(data)) return res.status(400).json({ error: 'data must be an array of rows' });
-    const { results, shortageWarnings } = await processSoldOutRows(data);
+    const { results, shortageWarnings } = await processSoldOutRows(normalizeExcelRows(data));
     const ok = results.filter((r) => r.ok).length;
     res.json({
       success: ok,

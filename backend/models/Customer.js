@@ -168,7 +168,9 @@ class Customer {
 
   validate(payload) {
     const company_name = cleanStr(payload.company_name);
+    const customer_number = cleanStr(payload.customer_number);
     if (!company_name) throw new Error('Company Name is required');
+    if (!customer_number) throw new Error('Customer Number is required');
   }
 
   normalize(payload) {
@@ -309,8 +311,6 @@ class Customer {
       existing = await this.findByNaturalKey(p.customer_number, p.city_name, p.address);
     } else if (p.customer_number && !p.address) {
       existing = await this.findByCustomerNumber(p.customer_number);
-    } else if (!p.customer_number) {
-      existing = await this.findByCompanyName(p.company_name);
     }
 
     if (existing?.id) {

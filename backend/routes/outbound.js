@@ -10,7 +10,8 @@ const OutboundOrder = require('../models/OutboundOrder');
 const OutboundItem = require('../models/OutboundItem');
 const { generateFifoForOutboundOrder, listFifoForOrder } = require('../services/godamFifo');
 const { notifyPickOrder, notifyPickProgress } = require('../services/notificationService');
-const { markOutboundDelivered } = require('../services/markOutboundDelivered');
+const { normalizeExcelRows } = require('../utils/excelDates');
+const { markOutboundDelivered, reverseOutboundDelivered } = require('../services/markOutboundDelivered');
 
 const router = express.Router();
 const outboundOrder = new OutboundOrder();
@@ -90,7 +91,7 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
 
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    const rows = normalizeExcelRows(XLSX.utils.sheet_to_json(sheet, { defval: '' }));
     if (!rows.length) return res.status(400).json({ error: 'Empty sheet' });
 
     const byDelivery = new Map();
@@ -306,6 +307,19 @@ router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), asy
   } catch (e) {
     const code = e.statusCode || 500;
     res.status(code).json({ error: e.message, shortages: e.shortages });
+  }
+});
+
+/** Undo mark-delivered (reject/return before restocking rack separately): restores main_stock, removes sold_out rows for this delivery. */
+router.post('/:id/reverse-delivery', requirePermission('can_upload_outbound'), async (req, res) => {
+  const orderId = Number(req.params.id);
+  if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const result = await reverseOutboundDelivered(db, orderId);
+    res.json(result);
+  } catch (e) {
+    const code = e.statusCode || 500;
+    res.status(code).json({ error: e.message });
   }
 });
 

@@ -15,6 +15,7 @@ coverage/
 .DS_Store
 .vscode/
 .idea/
+.claude/
 
 # Local tooling / logs
 .godam/

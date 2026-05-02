@@ -8,6 +8,18 @@ const DB_PATH = process.env.DB_PATH || './warehouse.db';
 const router = express.Router();
 const upload = multer({ dest: 'uploads/' });
 
+const { normalizeExcelRows } = require('../utils/excelDates');
+
+function pick(row, ...names) {
+  for (const n of names) {
+    const kn = Object.keys(row || {}).find((x) => String(x).trim().toLowerCase() === String(n).trim().toLowerCase());
+    if (kn !== undefined && row[kn] !== undefined && row[kn] !== null && String(row[kn]).trim() !== '')
+      return row[kn];
+    if (row[n] !== undefined && row[n] !== null && String(row[n]).trim() !== '') return row[n];
+  }
+  return '';
+}
+
 function openDb() {
   return new sqlite3.Database(DB_PATH);
 }
@@ -18,16 +30,32 @@ function toNumber(v) {
 }
 
 function normalizeRow(row) {
+  const transaction_date =
+    pick(row, 'transaction_date', 'Transaction Date', 'Date', 'TXN Date') || row.transaction_date;
+  const part_number = pick(row, 'part_number', 'Part Number') || row.part_number;
+  const sap_part_number = pick(row, 'sap_part_number', 'SAP Part Number') || row.sap_part_number;
+  const description = pick(row, 'description', 'Description') || row.description;
+  const rack_location = pick(row, 'rack_location', 'Rack Location', 'Rack') || row.rack_location;
+  const qty_in = pick(row, 'qty_in', 'Qty In', 'Qty') ?? row.qty_in;
+  const source_type = pick(row, 'source_type', 'Source Type') || row.source_type;
+  const reference_no = pick(row, 'reference_no', 'Reference No', 'Reference') || row.reference_no;
+  const remarks = pick(row, 'remarks', 'Remarks') || row.remarks;
+
+  const td =
+    transaction_date !== undefined && transaction_date !== null && transaction_date !== ''
+      ? String(transaction_date).trim().slice(0, 10)
+      : '';
+
   return {
-    transaction_date: row.transaction_date,
-    part_number: row.part_number,
-    sap_part_number: row.sap_part_number || null,
-    description: row.description || null,
-    rack_location: row.rack_location,
-    qty_in: toNumber(row.qty_in),
-    source_type: row.source_type || null,
-    reference_no: row.reference_no || null,
-    remarks: row.remarks || null,
+    transaction_date: td,
+    part_number,
+    sap_part_number: sap_part_number || null,
+    description: description || null,
+    rack_location,
+    qty_in: toNumber(qty_in),
+    source_type: source_type || null,
+    reference_no: reference_no || null,
+    remarks: remarks || null,
   };
 }
 
@@ -373,8 +401,8 @@ router.post('/bulk-paste', async (req, res) => {
   const db = openDb();
   const updateExisting = !!req.body?.update_existing;
   try {
-    const data = req.body?.data;
-    if (!Array.isArray(data)) return res.status(400).json({ error: 'data must be an array' });
+    if (!Array.isArray(req.body?.data)) return res.status(400).json({ error: 'data must be an array' });
+    const data = normalizeExcelRows(req.body.data);
 
     await new Promise((resolve, reject) => db.run('BEGIN IMMEDIATE', (err) => (err ? reject(err) : resolve())));
     const results = [];
@@ -414,7 +442,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     const workbook = XLSX.readFile(req.file.path);
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(sheet);
+    const data = normalizeExcelRows(XLSX.utils.sheet_to_json(sheet, { defval: '' }));
 
     await new Promise((resolve, reject) => db.run('BEGIN IMMEDIATE', (err) => (err ? reject(err) : resolve())));
     const results = [];

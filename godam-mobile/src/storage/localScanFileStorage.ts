@@ -17,7 +17,6 @@ export type RackScanRow = {
   transaction_date: string;
   part_number: string;
   sap_part_number: string;
-  description: string;
   rack_location: string;
   qty_in: number;
   source_type: string;
@@ -46,7 +45,6 @@ export async function appendRackScanRow(row: RackScanRow) {
     row.transaction_date,
     row.part_number,
     row.sap_part_number,
-    row.description,
     row.rack_location,
     row.qty_in,
     row.source_type,

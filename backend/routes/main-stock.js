@@ -5,6 +5,7 @@ const MainStock = require('../models/MainStock');
 const { promisify } = require('util');
 const db = require('../db');
 const { requireAdmin } = require('../middleware/auth');
+const { normalizeExcelRows } = require('../utils/excelDates');
 
 const router = express.Router();
 const mainStock = new MainStock();
@@ -476,7 +477,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+    const data = normalizeExcelRows(XLSX.utils.sheet_to_json(sheet, { defval: '' }));
 
     const results = [];
     for (const row of data) {
