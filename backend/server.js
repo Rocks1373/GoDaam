@@ -49,7 +49,14 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/auth', require('./routes/auth'));
 
 // Protected routes (login required)
-const { requireAuth, requireWebAccess, requireAdmin, requirePermission, requireMobileAccess } = require('./middleware/auth');
+const {
+  requireAuth,
+  requireWebAccess,
+  requireAdmin,
+  requirePermission,
+  requireMobileAccess,
+  requireMobileAppKey,
+} = require('./middleware/auth');
 const { markOutboundDelivered, reverseOutboundDelivered } = require('./services/markOutboundDelivered');
 const db = require('./db');
 
@@ -82,7 +89,7 @@ app.use('/api/admin/maintenance', ...webAuth, requireAdmin, require('./routes/ad
 app.use('/api/pick-change-requests', ...webAuth, requireAdmin, require('./routes/pick-change-requests'));
 
 app.use('/api/mobile', require('./routes/mobile'));
-app.use('/api/mobile/ocr', requireAuth, requireMobileAccess, require('./routes/ocr'));
+app.use('/api/mobile/ocr', requireMobileAppKey, requireAuth, requireMobileAccess, require('./routes/ocr'));
 app.use('/api/notifications', requireAuth, require('./routes/notifications'));
 
 app.post(

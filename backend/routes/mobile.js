@@ -2,7 +2,13 @@ const express = require('express');
 const { promisify } = require('util');
 
 const db = require('../db');
-const { requireAuth, requireMobileAccess, requirePermission, requireAnyPermission } = require('../middleware/auth');
+const {
+  requireAuth,
+  requireMobileAccess,
+  requirePermission,
+  requireAnyPermission,
+  requireMobileAppKey,
+} = require('../middleware/auth');
 const StockByRackSummary = require('../models/StockByRackSummary');
 const { applyStockIn } = require('./stock-in');
 const MainStock = require('../models/MainStock');
@@ -17,6 +23,7 @@ const dbRun = promisify(db.run.bind(db));
 const mainStock = new MainStock();
 const stockByRackSummary = new StockByRackSummary();
 
+router.use(requireMobileAppKey);
 router.use(requireAuth);
 router.use(requireMobileAccess);
 

@@ -55,6 +55,12 @@ export const api = axios.create({
   timeout: 45000,
 });
 
+/** Same value as server MOBILE_APP_API_KEY (optional). Set in EAS/env when building APK/IPA. */
+const mobileApiKey = process.env.EXPO_PUBLIC_MOBILE_API_KEY;
+if (mobileApiKey && String(mobileApiKey).trim()) {
+  api.defaults.headers.common['X-Mobile-Api-Key'] = String(mobileApiKey).trim();
+}
+
 export function setAuthHeader(token: string | null) {
   if (token) {
     api.defaults.headers.common.Authorization = `Bearer ${token}`;

@@ -1,6 +1,39 @@
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
+
+/**
+ * Optional shared secret for native app builds (header X-Mobile-Api-Key).
+ * Set MOBILE_APP_API_KEY on the server; embed the same value in the app as EXPO_PUBLIC_MOBILE_API_KEY at build time.
+ * Not a substitute for JWT login — reduces casual abuse of /api/mobile/*. Secrets in APK can be extracted.
+ */
+function requireMobileAppKey(req, res, next) {
+  const expected = process.env.MOBILE_APP_API_KEY;
+  if (!expected || !String(expected).trim()) return next();
+
+  const expStr = String(expected).trim();
+  const gotRaw = req.headers['x-mobile-api-key'] ?? req.headers['x-api-key'] ?? '';
+  const gotStr = String(gotRaw).trim();
+
+  const expBuf = Buffer.from(expStr, 'utf8');
+  const gotBuf = Buffer.from(gotStr, 'utf8');
+  let ok = expBuf.length === gotBuf.length;
+  if (ok && expBuf.length > 0) {
+    try {
+      ok = crypto.timingSafeEqual(expBuf, gotBuf);
+    } catch {
+      ok = false;
+    }
+  } else {
+    ok = false;
+  }
+
+  if (!ok) {
+    return res.status(403).json({ error: 'Invalid or missing mobile app key' });
+  }
+  return next();
+}
 
 function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
@@ -79,6 +112,7 @@ module.exports = {
   requireAnyPermission,
   requireMobileAccess,
   requireWebAccess,
+  requireMobileAppKey,
   JWT_SECRET,
 };
 
