@@ -1,0 +1,7 @@
+# Hostinger VPS: Traefik often binds ports 80/443 already.
+# Deploy: docker compose -f docker-compose.yml -f docker-compose.hostinger.yml up -d --build
+# App URL: http://YOUR_IP:8080  (add Traefik route later for HTTPS on 443)
+services:
+  web:
+    ports:
+      - "8080:80"
