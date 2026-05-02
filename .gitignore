@@ -17,6 +17,9 @@ coverage/
 .idea/
 .claude/
 
+# Large APK hosted next to web app but not stored in Git (deploy via rsync/scp)
+frontend/public/downloads/*.apk
+
 # Local tooling / logs
 .godam/
 *.pid
