@@ -3,6 +3,9 @@
     "name": "GoDaam",
     "slug": "godam-mobile",
     "version": "1.0.0",
+    "extra": {
+      "apiUrl": "http://localhost:3001"
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",

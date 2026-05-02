@@ -3,6 +3,26 @@ import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 
+/**
+ * Some AVD / Play Store images report `Device.isDevice === true` even on emulators.
+ * Heuristics match standard Android Studio device names (sdk_gphone*, "Android SDK built for*").
+ * Physical devices: use a LAN IP in EXPO_PUBLIC_API_URL — never rely on localhost.
+ */
+function isAndroidEmulatorForLocalhostRewrite(): boolean {
+  if (Platform.OS !== 'android') return false;
+  if (!Device.isDevice) return true;
+  const model = String(Device.modelName || '').toLowerCase();
+  const mfr = String(Device.manufacturer || '').toLowerCase();
+  const brand = String(Device.brand || '').toLowerCase();
+  const product = String(Device.productName || '').toLowerCase();
+  const blob = `${model} ${mfr} ${brand} ${product}`;
+  if (/\b(gphone|google_sdk|emulator|genymotion|vbox|sdk_gphone)\b/.test(blob)) return true;
+  if (model.startsWith('sdk_') || model.includes('emulator')) return true;
+  if (mfr === 'google' && (model.includes('sdk') || model.includes('gphone'))) return true;
+  if (model.includes('android sdk built for')) return true;
+  return false;
+}
+
 function resolveApiOrigin(raw: string): string {
   const trimmed = raw.replace(/\/$/, '');
   if (Platform.OS !== 'android') return trimmed;
@@ -15,9 +35,7 @@ function resolveApiOrigin(raw: string): string {
   }
 
   const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-  // Emulator / simulator: localhost is not the dev machine. (`Constants.isDevice` was removed from expo-constants; use expo-device.)
-  const onAndroidEmulator = !Device.isDevice;
-  if (loopback && onAndroidEmulator) {
+  if (loopback && isAndroidEmulatorForLocalhostRewrite()) {
     url.hostname = '10.0.2.2';
     return url.origin;
   }
