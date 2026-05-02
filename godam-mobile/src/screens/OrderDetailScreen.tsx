@@ -13,7 +13,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
-import { getOrder, getOrderStockOverview, type StockOverviewLine } from '../api/ordersApi';
+import { getOrder, getOrderStockOverview, markOrderSeen, type StockOverviewLine } from '../api/ordersApi';
 import { confirmItem, confirmOrder, requestPickChange } from '../api/pickingApi';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'OrderDetail'>;
@@ -167,6 +167,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
     try {
       const d = await getOrder(orderId);
       setDetail(d);
+      void markOrderSeen(orderId).catch(() => {});
       return d;
     } catch (e: unknown) {
       const err = e as { response?: { data?: { error?: string } } };

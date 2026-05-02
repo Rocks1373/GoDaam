@@ -2,7 +2,8 @@ const express = require('express');
 const { promisify } = require('util');
 
 const db = require('../db');
-const { requireAuth, requireMobileAccess, requirePermission } = require('../middleware/auth');
+const { requireAuth, requireMobileAccess, requirePermission, requireAnyPermission } = require('../middleware/auth');
+const StockByRackSummary = require('../models/StockByRackSummary');
 const { applyStockIn } = require('./stock-in');
 const MainStock = require('../models/MainStock');
 const { notifyPickProgress, notifyAdminChecker } = require('../services/notificationService');
@@ -14,9 +15,209 @@ const dbAll = promisify(db.all.bind(db));
 const dbRun = promisify(db.run.bind(db));
 
 const mainStock = new MainStock();
+const stockByRackSummary = new StockByRackSummary();
 
 router.use(requireAuth);
 router.use(requireMobileAccess);
+
+router.use('/deliveries', require('./mobile-deliveries'));
+
+/** One round-trip for home badges: unread notifications + unseen pick orders (for pickers). */
+router.get('/summary', async (req, res) => {
+  try {
+    const uid = Number(req.user.sub);
+    if (!uid) return res.status(400).json({ error: 'Invalid user' });
+    const notesRow = await dbGet(
+      `SELECT COUNT(1) AS c FROM notification_log WHERE user_id = ? AND read_at IS NULL`,
+      [uid]
+    );
+    const notifications_unread = Number(notesRow?.c) || 0;
+    const perm = req.user.permissions || {};
+    let orders_unseen = 0;
+    if (perm.can_view_orders) {
+      const oRow = await dbGet(
+        `SELECT COUNT(1) AS c
+         FROM outbound_orders o
+         LEFT JOIN outbound_order_seen s
+           ON s.outbound_order_id = o.id AND s.user_id = ?
+         WHERE o.status IN ('Sent For Pick', 'Picking')
+           AND s.outbound_order_id IS NULL`,
+        [uid]
+      );
+      orders_unseen = Number(oRow?.c) || 0;
+    }
+    let inbound_putaway_pending = 0;
+    if (perm.can_receive_stock || perm.can_pick_orders) {
+      const inb = await dbGet(
+        `SELECT COUNT(DISTINCT b.id) AS c
+         FROM inbound_batches b
+         WHERE EXISTS (
+           SELECT 1 FROM inbound_items i
+           WHERE i.inbound_batch_id = b.id AND COALESCE(i.remaining_qty, 0) > 0.000001
+         )`
+      );
+      inbound_putaway_pending = Number(inb?.c) || 0;
+    }
+    res.json({ notifications_unread, orders_unseen, inbound_putaway_pending });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Read-only main stock list for mobile (pickers or users with can_view_main_stock). */
+router.get(
+  '/stock/main',
+  requireAnyPermission(['can_view_main_stock', 'can_pick_orders']),
+  async (req, res) => {
+    try {
+      const part = String(req.query.part_number || req.query.q || '').trim();
+      const search = String(req.query.search || '').trim();
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const offset = (page - 1) * limit;
+
+      const clauses = ['WHERE 1=1'];
+      const params = [];
+      if (part) {
+        const like = `%${part}%`;
+        clauses.push('AND (part_number LIKE ? OR IFNULL(sap_part_number, \'\') LIKE ?)');
+        params.push(like, like);
+      }
+      if (search) {
+        const like = `%${search}%`;
+        clauses.push(
+          'AND (part_number LIKE ? OR IFNULL(sap_part_number, \'\') LIKE ? OR IFNULL(vendor_number, \'\') LIKE ? OR IFNULL(description, \'\') LIKE ?)'
+        );
+        params.push(like, like, like, like);
+      }
+
+      const sql = `SELECT * FROM main_stock ${clauses.join(' ')} ORDER BY part_number ASC LIMIT ? OFFSET ?`;
+      params.push(limit, offset);
+      const rows = await dbAll(sql, params);
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+/** Read-only stock-by-rack list for mobile (pickers or users with can_view_stock_by_rack). */
+router.get(
+  '/stock/by-rack',
+  requireAnyPermission(['can_view_stock_by_rack', 'can_pick_orders']),
+  async (req, res) => {
+    try {
+      const part_number = req.query.part_number ? String(req.query.part_number).trim() : '';
+      const rack_location =
+        req.query.rack_location != null && req.query.rack_location !== ''
+          ? String(req.query.rack_location).trim()
+          : req.query.rack != null && req.query.rack !== ''
+            ? String(req.query.rack).trim()
+            : '';
+      const search = String(req.query.search || '').trim();
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const rows = await stockByRackSummary.list({
+        part_number: part_number || undefined,
+        rack_location: rack_location || undefined,
+        search,
+        available_only: false,
+        limit,
+        offset,
+      });
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+/** Lightweight typeahead for main stock (distinct parts / match on SAP / description). */
+router.get(
+  '/stock/main/suggest',
+  requireAnyPermission(['can_view_main_stock', 'can_pick_orders']),
+  async (req, res) => {
+    try {
+      const q = String(req.query.q || '').trim();
+      if (!q) return res.json([]);
+      const lim = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+      const like = `%${q.toUpperCase()}%`;
+      const rows = await dbAll(
+        `SELECT part_number,
+                MIN(sap_part_number) AS sap_part_number,
+                MIN(description) AS description
+         FROM main_stock
+         WHERE UPPER(part_number) LIKE ?
+            OR UPPER(IFNULL(sap_part_number, '')) LIKE ?
+            OR UPPER(IFNULL(description, '')) LIKE ?
+         GROUP BY part_number
+         ORDER BY
+           CASE
+             WHEN SUBSTR(UPPER(part_number), 1, LENGTH(?)) = UPPER(?) THEN 0
+             ELSE 1
+           END,
+           part_number ASC
+         LIMIT ?`,
+        [like, like, like, q, q, lim]
+      );
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+/** Typeahead for stock-by-rack: type=part|rack (default part). */
+router.get(
+  '/stock/by-rack/suggest',
+  requireAnyPermission(['can_view_stock_by_rack', 'can_pick_orders']),
+  async (req, res) => {
+    try {
+      const type = String(req.query.type || 'part').toLowerCase();
+      const q = String(req.query.q || '').trim();
+      if (!q) return res.json([]);
+      const lim = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+      const like = `%${q.toUpperCase()}%`;
+      if (type === 'rack') {
+        const rows = await dbAll(
+          `SELECT DISTINCT rack_location
+           FROM stock_by_rack
+           WHERE UPPER(rack_location) LIKE ?
+           ORDER BY
+             CASE
+               WHEN SUBSTR(UPPER(rack_location), 1, LENGTH(?)) = UPPER(?) THEN 0
+               ELSE 1
+             END,
+             rack_location ASC
+           LIMIT ?`,
+          [like, q, q, lim]
+        );
+        return res.json(rows);
+      }
+      const rows = await dbAll(
+        `SELECT part_number,
+                MIN(sap_part_number) AS sap_part_number,
+                MIN(description) AS description
+         FROM stock_by_rack
+         WHERE UPPER(part_number) LIKE ?
+            OR UPPER(IFNULL(sap_part_number, '')) LIKE ?
+            OR UPPER(IFNULL(description, '')) LIKE ?
+         GROUP BY part_number
+         ORDER BY
+           CASE
+             WHEN SUBSTR(UPPER(part_number), 1, LENGTH(?)) = UPPER(?) THEN 0
+             ELSE 1
+           END,
+           part_number ASC
+         LIMIT ?`,
+        [like, like, like, q, q, lim]
+      );
+      res.json(rows);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
 
 function normRack(s) {
   return String(s || '').trim().toUpperCase();
@@ -81,19 +282,57 @@ async function bumpMainStock(part_number, sap_part_number, description, qtyIn) {
 
 router.get('/orders', requirePermission('can_view_orders'), async (req, res) => {
   try {
+    const uid = Number(req.user.sub);
     const rows = await dbAll(
       `SELECT o.*,
-        SUM(i.required_qty) AS total_required,
-        SUM(i.picked_qty) AS total_picked
+        (SELECT COALESCE(SUM(required_qty), 0) FROM outbound_items WHERE outbound_id = o.id) AS total_required,
+        (SELECT COALESCE(SUM(picked_qty), 0) FROM outbound_items WHERE outbound_id = o.id) AS total_picked,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM outbound_order_seen s WHERE s.outbound_order_id = o.id AND s.user_id = ?
+        ) THEN 1 ELSE 0 END AS order_seen
        FROM outbound_orders o
-       LEFT JOIN outbound_items i ON i.outbound_id = o.id
        WHERE o.status IN ('Sent For Pick', 'Picking')
-       GROUP BY o.id
-       ORDER BY o.updated_at DESC`
+       ORDER BY o.updated_at DESC`,
+      [uid]
     );
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/orders/:id/seen', requirePermission('can_view_orders'), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const uid = Number(req.user.sub);
+    if (!orderId || !uid) return res.status(400).json({ error: 'Invalid order or user' });
+
+    await dbRun(
+      `INSERT OR IGNORE INTO outbound_order_seen (user_id, outbound_order_id) VALUES (?, ?)`,
+      [uid, orderId]
+    );
+
+    try {
+      await dbRun(
+        `UPDATE notification_log
+         SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+         WHERE user_id = ? AND read_at IS NULL
+           AND json_extract(data_json, '$.outbound_order_id') = ?`,
+        [uid, orderId]
+      );
+    } catch {
+      await dbRun(
+        `UPDATE notification_log
+         SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+         WHERE user_id = ? AND read_at IS NULL
+             AND data_json LIKE '%"outbound_order_id":' || ? || '%'`,
+        [uid, orderId]
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
   }
 });
 

@@ -1,39 +1,49 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const { promisify } = require('util');
 
 const db = require('../db');
-const { requirePermission } = require('../middleware/auth');
+const { requirePermission, requireAdmin, requireAnyPermission } = require('../middleware/auth');
 const { markOutboundDelivered } = require('../services/markOutboundDelivered');
+const {
+  DS,
+  normalizeTransportType,
+  normalizePackageType,
+  dnIsLocked,
+  canConfirmGapp,
+  findUserIdByMobile,
+  asNumber,
+} = require('../services/deliveryWorkflow');
+const { notifyWebDeliveryStaff } = require('../services/deliveryNotifications');
+const { sendExpoPushToUserIds } = require('../services/notificationService');
 
 const router = express.Router();
 const dbAll = promisify(db.all.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const dbRun = promisify(db.run.bind(db));
 
-function asNumber(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function normalizePackageType(t) {
-  const v = String(t || '').trim().toLowerCase();
-  if (v === 'pallet') return 'Pallet';
-  if (v === 'box') return 'Box';
-  if (v === 'ignore') return 'Ignore';
-  return '';
-}
-
-function normalizeTransportType(t) {
-  const v = String(t || '').trim().toLowerCase();
-  if (v === 'gapp' || v === 'own') return 'GAPP';
-  if (v === 'rental') return 'Rental';
-  if (v === 'courier') return 'Courier';
-  if (v === 'self collection' || v === 'selfcollection') return 'Self Collection';
-  return '';
-}
-
 function trimStr(v) {
   return String(v ?? '').trim();
+}
+
+function assertDnEditable(dn, res) {
+  if (dnIsLocked(dn)) {
+    res.status(400).json({ error: 'Delivery note is closed — no further edits.' });
+    return false;
+  }
+  return true;
+}
+
+function resolvePodAbsolute(stored) {
+  if (!stored) return null;
+  const rel = String(stored).replace(/^\/+/, '');
+  if (rel.includes('..')) return null;
+  const abs = path.resolve(__dirname, '..', rel);
+  const root = path.resolve(__dirname, '..');
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  if (!rel.startsWith('uploads/')) return null;
+  return abs;
 }
 
 function rowPrimaryPhone(row) {
@@ -192,9 +202,10 @@ async function getDnView(id) {
   let outbound_customer_reference = null;
   let outbound_sales_doc = null;
   let outbound_header_customer_name = null;
+  let outbound_invoice_number = null;
   if (outboundNum) {
     const ord = await dbGet(
-      `SELECT sold_to, name_1, customer_reference, sales_doc, customer_name
+      `SELECT sold_to, name_1, customer_reference, sales_doc, customer_name, invoice_number
        FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`,
       [outboundNum, outboundNum]
     );
@@ -204,6 +215,7 @@ async function getDnView(id) {
       outbound_customer_reference = ord.customer_reference || null;
       outbound_sales_doc = ord.sales_doc || null;
       outbound_header_customer_name = ord.customer_name || null;
+      outbound_invoice_number = trimStr(ord.invoice_number) || null;
     }
   }
   return {
@@ -213,6 +225,7 @@ async function getDnView(id) {
     outbound_customer_reference,
     outbound_sales_doc,
     outbound_header_customer_name,
+    outbound_invoice_number,
     items,
   };
 }
@@ -345,6 +358,7 @@ async function postDeliveryTo(req, res) {
     const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
     if (!dn) return res.status(404).json({ error: 'DN not found' });
     if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'DN already delivered' });
+    if (!assertDnEditable(dn, res)) return;
 
     const outboundNum = trimStr(dn.outbound_number);
     const order = outboundNum
@@ -462,6 +476,277 @@ async function postDeliveryTo(req, res) {
   }
 }
 
+// GET /api/delivery-notes/:id/timeline
+router.get('/:id/timeline', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
+    if (!dn) return res.status(404).json({ error: 'DN not found' });
+
+    let confirmed_by_name = null;
+    let closed_by_name = null;
+    if (dn.confirmed_by) {
+      const u = await dbGet(`SELECT full_name FROM users WHERE id = ?`, [dn.confirmed_by]);
+      confirmed_by_name = trimStr(u?.full_name) || null;
+    }
+    if (dn.closed_by) {
+      const u = await dbGet(`SELECT full_name FROM users WHERE id = ?`, [dn.closed_by]);
+      closed_by_name = trimStr(u?.full_name) || null;
+    }
+
+    let task = null;
+    if (dn.driver_task_id) {
+      task = await dbGet(`SELECT * FROM driver_delivery_tasks WHERE id = ?`, [dn.driver_task_id]);
+    }
+
+    res.json({
+      delivery_status: dn.delivery_status || DS.DRAFT,
+      confirmed_at: dn.confirmed_at || null,
+      confirmed_by: dn.confirmed_by || null,
+      confirmed_by_name,
+      driver_opened_at: dn.driver_opened_at || task?.opened_at || null,
+      pickup_confirmed_at: dn.pickup_confirmed_at || task?.pickup_confirmed_at || null,
+      out_for_delivery_at: dn.out_for_delivery_at || task?.out_for_delivery_at || null,
+      pod_uploaded_at: dn.pod_uploaded_at || task?.pod_uploaded_at || null,
+      pod_file_path: dn.pod_file_path || task?.pod_file_path || null,
+      closed_at: dn.closed_at || task?.closed_at || null,
+      closed_by: dn.closed_by || null,
+      closed_by_name,
+      is_closed: Number(dn.is_closed) === 1,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/delivery-notes/:id/pod — download POD (image/PDF) if present
+router.get(
+  '/:id/pod',
+  requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+      const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
+      if (!dn) return res.status(404).json({ error: 'DN not found' });
+      const rel = trimStr(dn.pod_file_path);
+      if (!rel) return res.status(404).json({ error: 'No POD on file' });
+      const abs = resolvePodAbsolute(rel);
+      if (!abs || !fs.existsSync(abs)) return res.status(404).json({ error: 'POD file not found' });
+      const ext = path.extname(abs).toLowerCase();
+      const types = {
+        '.pdf': 'application/pdf',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.heic': 'image/heic',
+      };
+      if (types[ext]) res.setHeader('Content-Type', types[ext]);
+      return res.sendFile(abs);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// POST /api/delivery-notes/:id/confirm — GAPP only; creates driver task + notifications
+router.post('/:id/confirm', requirePermission('can_upload_outbound'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
+    if (!dn) return res.status(404).json({ error: 'DN not found' });
+    if (String(dn.status || '').toLowerCase() === 'delivered') {
+      return res.status(400).json({ error: 'DN already delivered' });
+    }
+    if (dnIsLocked(dn)) return res.status(400).json({ error: 'Delivery note is closed — no further edits.' });
+    if (normalizeTransportType(dn.transportation_type) !== 'GAPP') {
+      return res.status(400).json({ error: 'Confirm is only for GAPP transportation.' });
+    }
+
+    const outboundNum = trimStr(dn.outbound_number);
+    let outboundInvoice = '';
+    if (outboundNum) {
+      const ordInv = await dbGet(
+        `SELECT invoice_number FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`,
+        [outboundNum, outboundNum]
+      );
+      outboundInvoice = trimStr(ordInv?.invoice_number);
+    }
+    const dnForConfirm = {
+      ...dn,
+      invoice_number: trimStr(dn.invoice_number) || outboundInvoice || dn.invoice_number,
+    };
+    if (!canConfirmGapp(dnForConfirm)) {
+      return res.status(400).json({
+        error: 'Complete Delivery To, package info, and GAPP driver details before confirming.',
+      });
+    }
+
+    const uid = Number(req.user.sub);
+    const already =
+      String(dn.delivery_status || '').toLowerCase() === 'confirmed' && dn.driver_task_id;
+    if (already) {
+      return res.json(await getDnView(id));
+    }
+
+    const driverUserId = await findUserIdByMobile(db, dn.driver_mobile);
+    const gpsLink = trimStr(dn.gps) || '';
+    const customerName = trimStr(dn.customer_name);
+    const address = trimStr(dn.delivery_address);
+    const driverName = trimStr(dn.driver_name);
+
+    await dbRun('BEGIN IMMEDIATE');
+    try {
+      await dbRun(
+        `INSERT INTO driver_delivery_tasks (
+          dn_id, outbound_number, invoice_number, customer_name, delivery_address, city_name, gps_link,
+          contact_person, contact_number, driver_user_id, driver_name, driver_mobile, status,
+          confirmed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          id,
+          outboundNum,
+          trimStr(dnForConfirm.invoice_number),
+          customerName,
+          address,
+          trimStr(dn.city_name),
+          gpsLink || null,
+          trimStr(dn.contact_person),
+          trimStr(dn.contact_number),
+          driverUserId,
+          driverName,
+          trimStr(dn.driver_mobile),
+          DS.CONFIRMED,
+        ]
+      );
+      const taskRow = await dbGet(`SELECT * FROM driver_delivery_tasks WHERE id = last_insert_rowid()`);
+      await dbRun(
+        `UPDATE delivery_notes SET
+          delivery_status = ?,
+          confirmed_at = CURRENT_TIMESTAMP,
+          confirmed_by = ?,
+          driver_task_id = ?,
+          updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [DS.CONFIRMED, Number.isFinite(uid) ? uid : null, taskRow.id, id]
+      );
+      await dbRun('COMMIT');
+
+      const mapsHint = gpsLink ? `\nMaps: ${gpsLink}` : '';
+      const bodyDriver = `Outbound: ${outboundNum}\nCustomer: ${customerName}\nAddress: ${address}\nDriver: ${driverName}${mapsHint}`;
+
+      if (driverUserId) {
+        await sendExpoPushToUserIds(
+          [driverUserId],
+          'Order Confirmed for Delivery',
+          bodyDriver,
+          {
+            type: 'delivery_confirmed',
+            dn_id: id,
+            task_id: taskRow.id,
+            outbound_number: outboundNum,
+            open_action: 'delivery_open',
+          }
+        );
+      }
+
+      const city = trimStr(dn.city_name);
+      const webTitle = `Outbound ${outboundNum} confirmed for delivery`;
+      const webBody =
+        city && customerName
+          ? `${webTitle} – ${customerName.split(/\s+/).slice(0, 2).join(' ')} ${city}`
+          : webTitle;
+      await notifyWebDeliveryStaff(webTitle, webBody, { dn_id: id, outbound_number: outboundNum });
+
+      return res.json(await getDnView(id));
+    } catch (e) {
+      await dbRun('ROLLBACK').catch(() => {});
+      throw e;
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/delivery-notes/:id/close-admin — admin final lock (POD or override)
+router.post('/:id/close-admin', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
+    if (!dn) return res.status(404).json({ error: 'DN not found' });
+    if (Number(dn.is_closed)) return res.status(400).json({ error: 'Already closed.' });
+
+    const hasPod = Boolean(trimStr(dn.pod_file_path));
+    const override = req.body?.admin_override === true || req.body?.admin_override === 'true';
+    if (!hasPod && !override) {
+      return res.status(400).json({ error: 'Upload POD or use admin override to close without POD.' });
+    }
+
+    const uid = Number(req.user.sub);
+    await dbRun('BEGIN IMMEDIATE');
+    try {
+      await dbRun(
+        `UPDATE delivery_notes SET
+          delivery_status = ?,
+          is_closed = 1,
+          closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP),
+          closed_by = ?,
+          updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [DS.CLOSED, Number.isFinite(uid) ? uid : null, id]
+      );
+      if (dn.driver_task_id) {
+        await dbRun(
+          `UPDATE driver_delivery_tasks SET
+            status = ?,
+            closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP),
+            updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [DS.CLOSED, dn.driver_task_id]
+        );
+      }
+      await dbRun('COMMIT');
+    } catch (e) {
+      await dbRun('ROLLBACK').catch(() => {});
+      throw e;
+    }
+
+    const ob = trimStr(dn.outbound_number);
+    await notifyWebDeliveryStaff(
+      `Outbound ${ob} delivered and CLOSED`,
+      `Admin closed order ${ob}${hasPod ? '' : ' (override, no POD)'}.`,
+      { dn_id: id, outbound_number: ob, channel: 'delivery_admin_close' }
+    );
+
+    res.json(await getDnView(id));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** List delivery notes that have a driver POD file (newest first). */
+router.get('/recent-pods', async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const rows = await dbAll(
+      `SELECT id, outbound_number, customer_name, invoice_number, pod_uploaded_at, pod_file_path, delivery_status, status
+       FROM delivery_notes
+       WHERE TRIM(COALESCE(pod_file_path, '')) != ''
+       ORDER BY datetime(COALESCE(pod_uploaded_at, updated_at)) DESC
+       LIMIT ?`,
+      [limit]
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/delivery-notes/:id
 router.get('/:id', async (req, res) => {
   try {
@@ -483,6 +768,7 @@ router.post('/:id/hold', async (req, res) => {
     const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
     if (!dn) return res.status(404).json({ error: 'DN not found' });
     if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'DN already delivered' });
+    if (!assertDnEditable(dn, res)) return;
 
     const is_hold = req.body?.is_hold ? true : false;
     const nextStatus = is_hold ? 'On Hold' : 'Draft';
@@ -506,6 +792,7 @@ router.post('/:id/transportation', async (req, res) => {
     const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
     if (!dn) return res.status(404).json({ error: 'DN not found' });
     if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'DN already delivered' });
+    if (!assertDnEditable(dn, res)) return;
 
     const transportation_type = normalizeTransportType(req.body?.transportation_type || req.body?.type);
     if (!transportation_type) return res.status(400).json({ error: 'transportation_type is required' });
@@ -597,13 +884,24 @@ router.post('/:id/package-info', async (req, res) => {
     const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
     if (!dn) return res.status(404).json({ error: 'DN not found' });
     if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'DN already delivered' });
+    if (!assertDnEditable(dn, res)) return;
 
-    const invoice_number = req.body?.invoice_number === undefined ? dn.invoice_number : String(req.body.invoice_number || '').trim();
+    let invoice_number = req.body?.invoice_number === undefined ? dn.invoice_number : String(req.body.invoice_number || '').trim();
     const package_type = normalizePackageType(req.body?.package_type);
     const package_qty = asNumber(req.body?.package_qty);
     const gross_weight_kg = req.body?.gross_weight_kg === undefined ? dn.gross_weight_kg : asNumber(req.body.gross_weight_kg);
     const volume_cbm = req.body?.volume_cbm === undefined ? dn.volume_cbm : asNumber(req.body.volume_cbm);
 
+    if (!String(invoice_number || '').trim()) {
+      const ob = trimStr(dn.outbound_number);
+      if (ob) {
+        const ordRow = await dbGet(
+          `SELECT invoice_number FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`,
+          [ob, ob]
+        );
+        invoice_number = trimStr(ordRow?.invoice_number);
+      }
+    }
     if (!String(invoice_number || '').trim()) return res.status(400).json({ error: 'Invoice Number is required' });
     if (!package_type) return res.status(400).json({ error: 'Package Type is required' });
     if ((package_type === 'Pallet' || package_type === 'Box') && !(package_qty > 0)) {
@@ -640,25 +938,57 @@ router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), asy
     if (!dn) return res.status(404).json({ error: 'DN not found' });
     if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'This DN is already delivered.' });
 
+    const trans = normalizeTransportType(dn.transportation_type);
+    if (trans === 'GAPP') {
+      if (!dn.confirmed_at) {
+        return res.status(400).json({ error: 'GAPP: confirm for delivery is required before marking delivered.' });
+      }
+      if (!Number(dn.is_closed)) {
+        return res
+          .status(400)
+          .json({ error: 'GAPP: driver must close the delivery (POD) before marking delivered — or use admin close.' });
+      }
+    }
+
     // Validate transportation
     if (!String(dn.transportation_type || '').trim()) return res.status(400).json({ error: 'Transportation Method must be saved before Delivered.' });
-    if (dn.transportation_type === 'GAPP') {
+    if (trans === 'GAPP') {
       if (!String(dn.driver_name || '').trim() && !dn.driver_id) return res.status(400).json({ error: 'Driver is required' });
       if (!String(dn.driver_mobile || '').trim()) return res.status(400).json({ error: 'Driver phone is required' });
       if (!String(dn.vehicle || '').trim()) return res.status(400).json({ error: 'Vehicle is required' });
     }
-    if (dn.transportation_type === 'Rental') {
+    if (trans === 'Rental') {
       if (!String(dn.carrier_name || '').trim() && !dn.carrier_id) return res.status(400).json({ error: 'Rental carrier is required' });
       if (!String(dn.truck_type || '').trim()) return res.status(400).json({ error: 'Truck Type is required' });
       if (!(asNumber(dn.truck_qty) > 0)) return res.status(400).json({ error: 'Truck Quantity is required' });
     }
-    if (dn.transportation_type === 'Courier') {
+    if (trans === 'Courier') {
       if (!String(dn.carrier_name || '').trim() && !dn.carrier_id) return res.status(400).json({ error: 'Courier company is required' });
       if (!String(dn.waybill_number || '').trim()) return res.status(400).json({ error: 'Waybill number is required' });
     }
 
-    // Validate invoice + package
-    if (!String(dn.invoice_number || '').trim()) return res.status(400).json({ error: 'Invoice Number is required' });
+    const outboundNum = trimStr(dn.outbound_number);
+    const order = outboundNum
+      ? await dbGet(`SELECT * FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`, [outboundNum, outboundNum])
+      : null;
+    if (!order?.id) return res.status(400).json({ error: 'Outbound not found for this DN' });
+
+    let effectiveInvoice = trimStr(dn.invoice_number) || trimStr(order.invoice_number);
+    if (!effectiveInvoice) return res.status(400).json({ error: 'Invoice Number is required' });
+
+    if (!trimStr(order.invoice_number) && trimStr(dn.invoice_number)) {
+      await dbRun(`UPDATE outbound_orders SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
+        trimStr(dn.invoice_number),
+        order.id,
+      ]);
+    } else if (!trimStr(dn.invoice_number) && trimStr(order.invoice_number)) {
+      await dbRun(`UPDATE delivery_notes SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
+        trimStr(order.invoice_number),
+        id,
+      ]);
+      dn.invoice_number = order.invoice_number;
+    }
+
     const pkg = normalizePackageType(dn.package_type);
     if (!pkg) return res.status(400).json({ error: 'Package Type is required' });
     if ((pkg === 'Pallet' || pkg === 'Box') && !(asNumber(pkg === 'Pallet' ? dn.pallet_qty : dn.box_qty) > 0)) {
@@ -666,13 +996,6 @@ router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), asy
     }
 
     // Deduct main stock only at Delivered status (reuse existing outbound delivered logic, which guards double deduction).
-    const order = await dbGet(`SELECT id FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`, [
-      dn.outbound_number,
-      dn.outbound_number,
-    ]);
-    if (!order?.id) return res.status(400).json({ error: 'Outbound not found for this DN' });
-
-    // Let existing service handle shortage checks + deduction + sold_out insert + delivered guard on outbound_id.
     await markOutboundDelivered(db, Number(order.id), { requireInvoice: true });
 
     // Persist delivered table snapshot (one row per item, with header fields duplicated).
@@ -700,7 +1023,7 @@ router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), asy
             dn.gapp_po || '',
             dn.customer_po || '',
             dn.outbound_number || '',
-            dn.invoice_number || '',
+            trimStr(dn.invoice_number) || effectiveInvoice || '',
             dn.customer_number || '',
             dn.customer_name || '',
             dn.delivery_address || '',

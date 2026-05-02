@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -10,16 +10,24 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp, NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
 import { me } from '../api/authApi';
 import { registerDevice } from '../api/notificationsApi';
-import { listOrders } from '../api/ordersApi';
+import { getMobileSummary, listOrders } from '../api/ordersApi';
 import { shouldSkipExpoNotifications, tryConfigurePushNotifications } from '../utils/expoPushSafe';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
-type QuickActionRoute = 'Orders' | 'ScanRack' | 'Receiving' | 'Upcoming';
+type QuickActionRoute =
+  | 'Orders'
+  | 'ScanRack'
+  | 'Receiving'
+  | 'Upcoming'
+  | 'MainStockCheck'
+  | 'StockByRackCheck'
+  | 'DeliveryList';
 
 type ActionItem = {
   key: string;
@@ -36,6 +44,13 @@ const ACTIONS: ActionItem[] = [
     subtitle: 'Assigned & pick lists',
     icon: 'clipboard-outline',
     route: 'Orders',
+  },
+  {
+    key: 'delivery',
+    title: 'Delivery',
+    subtitle: 'GAPP confirmed orders',
+    icon: 'car-outline',
+    route: 'DeliveryList',
   },
   {
     key: 'scan',
@@ -58,14 +73,36 @@ const ACTIONS: ActionItem[] = [
     icon: 'calendar-outline',
     route: 'Upcoming',
   },
+  {
+    key: 'mainStock',
+    title: 'Check Main Stock',
+    subtitle: 'View only · by part #',
+    icon: 'albums-outline',
+    route: 'MainStockCheck',
+  },
+  {
+    key: 'stockByRack',
+    title: 'Stock by rack',
+    subtitle: 'View only · part & rack',
+    icon: 'grid-outline',
+    route: 'StockByRackCheck',
+  },
 ];
 
 export default function HomeScreen({ navigation }: Props) {
   const insets = useSafeAreaInsets();
+  const rootNav = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [userLabel, setUserLabel] = useState('');
   const [roleLabel, setRoleLabel] = useState('');
-  const [orderHint, setOrderHint] = useState('—');
+  const [orderTotal, setOrderTotal] = useState(0);
+  const [summary, setSummary] = useState({
+    notifications_unread: 0,
+    orders_unseen: 0,
+    inbound_putaway_pending: 0,
+  });
   const [pushNote, setPushNote] = useState('');
+  const [perms, setPerms] = useState<Record<string, boolean>>({});
+  const [permissionsLoaded, setPermissionsLoaded] = useState(false);
 
   useEffect(() => {
     setPushNote(
@@ -81,6 +118,8 @@ export default function HomeScreen({ navigation }: Props) {
         const { user } = await me();
         setUserLabel(user.full_name || user.username);
         setRoleLabel(user.role);
+        setPerms(user.permissions || {});
+        setPermissionsLoaded(true);
         await tryConfigurePushNotifications(registerDevice);
       } catch {
         setUserLabel('');
@@ -88,26 +127,103 @@ export default function HomeScreen({ navigation }: Props) {
     })();
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await listOrders();
-        if (!cancelled) setOrderHint(String(data?.length ?? 0));
-      } catch {
-        if (!cancelled) setOrderHint('—');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const refreshSummary = useCallback(async () => {
+    try {
+      const [s, list] = await Promise.all([getMobileSummary(), listOrders().catch(() => [])]);
+      setSummary(s);
+      setOrderTotal(Array.isArray(list) ? list.length : 0);
+    } catch {
+      setSummary({ notifications_unread: 0, orders_unseen: 0, inbound_putaway_pending: 0 });
+    }
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      const run = async () => {
+        if (!alive) return;
+        await refreshSummary();
+      };
+      void run();
+      const t = setInterval(() => void run(), 25000);
+      return () => {
+        alive = false;
+        clearInterval(t);
+      };
+    }, [refreshSummary])
+  );
+
+  useLayoutEffect(() => {
+    const n = summary.notifications_unread;
+    navigation.setOptions({
+      headerRight: () => (
+        <Pressable
+          onPress={() => rootNav.navigate('Notifications')}
+          style={({ pressed }) => [
+            { marginRight: 4, padding: 8, position: 'relative' as const },
+            pressed && { opacity: 0.75 },
+          ]}
+          accessibilityLabel={`Notifications${n > 0 ? `, ${n} unread` : ''}`}
+        >
+          <Ionicons name="notifications-outline" size={24} color="#0f172a" />
+          {n > 0 ? (
+            <View style={styles.notifBadge}>
+              <Text style={styles.notifBadgeText}>{n > 99 ? '99+' : String(n)}</Text>
+            </View>
+          ) : null}
+        </Pressable>
+      ),
+    });
+  }, [navigation, rootNav, summary.notifications_unread]);
 
   const greetingName = useMemo(() => {
     const raw = userLabel.trim();
     if (!raw) return 'there';
     return raw.split(/\s+/)[0] ?? 'there';
   }, [userLabel]);
+
+  const visibleActions = useMemo(() => {
+    return ACTIONS.filter((item) => {
+      if (item.key === 'delivery') {
+        if (!permissionsLoaded) return false;
+        const r = String(roleLabel || '').toLowerCase();
+        return r === 'driver' || r === 'admin' || !!perms.can_confirm_picked;
+      }
+      if (item.key === 'mainStock') {
+        if (!permissionsLoaded) return true;
+        return !!(perms.can_pick_orders || perms.can_view_main_stock);
+      }
+      if (item.key === 'stockByRack') {
+        if (!permissionsLoaded) return true;
+        return !!(perms.can_pick_orders || perms.can_view_stock_by_rack);
+      }
+      return true;
+    });
+  }, [perms, permissionsLoaded, roleLabel]);
+
+  const actionItems = useMemo(() => {
+    return visibleActions.map((item) => {
+      if (item.key === 'orders') {
+        return {
+          ...item,
+          subtitle:
+            summary.orders_unseen > 0
+              ? `${summary.orders_unseen} not opened · Assigned & pick lists`
+              : item.subtitle,
+        };
+      }
+      if (item.key === 'receiving') {
+        return {
+          ...item,
+          subtitle:
+            summary.inbound_putaway_pending > 0
+              ? `${summary.inbound_putaway_pending} batch(es) need putaway · Inbound & putaway`
+              : item.subtitle,
+        };
+      }
+      return item;
+    });
+  }, [visibleActions, summary.orders_unseen, summary.inbound_putaway_pending]);
 
   return (
     <View style={styles.screen}>
@@ -165,7 +281,10 @@ export default function HomeScreen({ navigation }: Props) {
             </View>
             <View>
               <Text style={styles.statLabel}>Assigned orders</Text>
-              <Text style={styles.statValue}>{orderHint}</Text>
+              <Text style={styles.statValue}>{orderTotal}</Text>
+              {summary.orders_unseen > 0 ? (
+                <Text style={styles.statNewHint}>{summary.orders_unseen} new to open</Text>
+              ) : null}
             </View>
           </View>
         </View>
@@ -177,9 +296,9 @@ export default function HomeScreen({ navigation }: Props) {
 
         <Text style={styles.sectionLabel}>Quick actions</Text>
         <View style={styles.grid}>
-          {[0, 2].map((start) => (
+          {Array.from({ length: Math.ceil(actionItems.length / 2) }, (_, i) => i * 2).map((start) => (
             <View key={start} style={styles.gridRow}>
-              {ACTIONS.slice(start, start + 2).map((item) => (
+              {actionItems.slice(start, start + 2).map((item) => (
                 <Pressable
                   key={item.key}
                   style={({ pressed }) => [styles.tile, pressed && styles.tilePressed]}
@@ -190,7 +309,21 @@ export default function HomeScreen({ navigation }: Props) {
                   <View style={styles.tileIconCircle}>
                     <Ionicons name={item.icon} size={26} color="#1d4ed8" />
                   </View>
-                  <Text style={styles.tileTitle}>{item.title}</Text>
+                  <View style={styles.tileTitleRow}>
+                    <Text style={styles.tileTitle}>{item.title}</Text>
+                    {item.key === 'orders' && summary.orders_unseen > 0 ? (
+                      <View style={styles.tileInlineBadge}>
+                        <Text style={styles.tileInlineBadgeText}>{String(summary.orders_unseen)}</Text>
+                      </View>
+                    ) : null}
+                    {item.key === 'receiving' && summary.inbound_putaway_pending > 0 ? (
+                      <View style={styles.tileInlineBadge}>
+                        <Text style={styles.tileInlineBadgeText}>
+                          {String(summary.inbound_putaway_pending)}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
                   <Text style={styles.tileSub}>{item.subtitle}</Text>
                   <Ionicons name="chevron-forward" size={18} color="#94a3b8" style={styles.tileChevron} />
                 </Pressable>
@@ -288,6 +421,20 @@ const styles = StyleSheet.create({
   },
   statLabel: { fontSize: 11, fontWeight: '600', color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.6 },
   statValue: { fontSize: 17, fontWeight: '700', color: '#0f172a', marginTop: 2 },
+  statNewHint: { fontSize: 12, fontWeight: '600', color: '#c2410c', marginTop: 4 },
+  notifBadge: {
+    position: 'absolute',
+    right: -2,
+    top: -4,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#dc2626',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  notifBadgeText: { color: '#fff', fontSize: 10, fontWeight: '800' },
   alertBanner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -320,6 +467,17 @@ const styles = StyleSheet.create({
     ...shadowCard,
   },
   tilePressed: { opacity: 0.92 },
+  tileTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  tileInlineBadge: {
+    minWidth: 22,
+    height: 22,
+    paddingHorizontal: 6,
+    borderRadius: 11,
+    backgroundColor: '#dc2626',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tileInlineBadgeText: { color: '#fff', fontSize: 12, fontWeight: '800' },
   tileIconCircle: {
     width: 48,
     height: 48,

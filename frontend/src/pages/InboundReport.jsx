@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-import { inboundApi } from '../services/api';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { reportsApi, inboundApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 export default function InboundReport() {
   const [rows, setRows] = useState([]);
@@ -17,7 +19,7 @@ export default function InboundReport() {
     setLoading(true);
     setErr('');
     try {
-      const data = await inboundApi.putawayReport({
+      const data = await reportsApi.inbound({
         ...(batch.trim() ? { batch: batch.trim() } : {}),
         ...(vendor.trim() ? { vendor: vendor.trim() } : {}),
         ...(from ? { from } : {}),
@@ -58,6 +60,17 @@ export default function InboundReport() {
   };
 
   const clearSel = () => setSelected(new Set());
+
+  const inboundSortValue = useCallback((r, k) => {
+    if (['total_qty', 'putaway_qty', 'remaining_qty', 'pending_lines'].includes(k)) return Number(r[k]) || 0;
+    if (k === 'last_updated') {
+      const t = r.last_updated ? new Date(r.last_updated).getTime() : 0;
+      return Number.isFinite(t) ? t : 0;
+    }
+    return r[k];
+  }, []);
+
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, inboundSortValue);
 
   const applyRack = async () => {
     if (!selected.size) return;
@@ -149,21 +162,111 @@ export default function InboundReport() {
         <table className="min-w-full text-[11px]">
           <thead>
             <tr className="bg-gray-50 text-left border-b border-gray-200">
-              <th className="px-2 py-2 w-10"></th>
-              <th className="px-2 py-2 font-bold">Batch</th>
-              <th className="px-2 py-2 font-bold">Vendor</th>
-              <th className="px-2 py-2 font-bold">Part</th>
-              <th className="px-2 py-2 font-bold">Description</th>
-              <th className="px-2 py-2 font-bold text-right">Total</th>
-              <th className="px-2 py-2 font-bold text-right">Putaway</th>
-              <th className="px-2 py-2 font-bold text-right">Remaining</th>
-              <th className="px-2 py-2 font-bold">Status</th>
-              <th className="px-2 py-2 font-bold">Pending rack lines</th>
-              <th className="px-2 py-2 font-bold">Last updated</th>
+              <th className="px-2 py-2 w-10" aria-hidden />
+              <SortTh
+                bare
+                columnKey="batch_name"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Batch
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="vendor_name"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Vendor
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="part_number"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Part
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="description"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Description
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="total_qty"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold text-right border-b border-gray-200"
+              >
+                Total
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="putaway_qty"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold text-right border-b border-gray-200"
+              >
+                Putaway
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="remaining_qty"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold text-right border-b border-gray-200"
+              >
+                Remaining
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="item_status"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Status
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="pending_lines"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Pending rack lines
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="last_updated"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Last updated
+              </SortTh>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
+            {displayRows.map((r) => {
               const id = r.inbound_item_id;
               const canSel = selectableIds.has(id);
               return (

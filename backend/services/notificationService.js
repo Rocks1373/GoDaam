@@ -73,6 +73,34 @@ async function getExpoTokensForRoles(roleList) {
   return (rows || []).filter((r) => r.expo_push_token && Expo.isExpoPushToken(r.expo_push_token));
 }
 
+/**
+ * User IDs who should receive in-app notification rows (web + mobile).
+ * Admin always included; others need at least one enabled permission in the list.
+ */
+async function getUserIdsWhoHaveAnyPermission(permissionKeys) {
+  if (!permissionKeys?.length) return [];
+  const all = promisify(db.all.bind(db));
+  const placeholders = permissionKeys.map(() => '?').join(',');
+  const rows = await all(
+    `
+    SELECT DISTINCT u.id
+    FROM users u
+    WHERE COALESCE(u.is_active, 1) = 1
+      AND (
+        lower(u.role) = 'admin'
+        OR EXISTS (
+          SELECT 1 FROM role_permissions rp
+          WHERE lower(rp.role) = lower(u.role)
+            AND rp.permission_key IN (${placeholders})
+            AND rp.is_enabled = 1
+        )
+      )
+  `,
+    permissionKeys
+  );
+  return (rows || []).map((r) => r.id).filter((id) => id != null);
+}
+
 async function sendExpoPushToTokens(rows, title, body, data = {}) {
   if (!rows || !rows.length) return [];
   const messages = [];
@@ -103,8 +131,12 @@ async function sendExpoPushToTokens(rows, title, body, data = {}) {
 async function notifyPickOrder(title, body, data) {
   const rows = await getExpoTokensForPermission('can_pick_orders');
   await sendExpoPushToTokens(rows, title, body, data);
-  for (const r of rows) {
-    await logNotification(r.user_id, title, body, data);
+  const userIds = await getUserIdsWhoHaveAnyPermission(['can_pick_orders']);
+  const seen = new Set();
+  for (const uid of userIds) {
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    await logNotification(uid, title, body, data);
   }
 }
 
@@ -119,8 +151,12 @@ async function notifyPickProgress(title, body, data) {
   }
   const rows = [...map.values()];
   await sendExpoPushToTokens(rows, title, body, data);
-  for (const r of rows) {
-    await logNotification(r.user_id, title, body, data);
+  const userIds = await getUserIdsWhoHaveAnyPermission(['can_pick_orders', 'can_confirm_picked']);
+  const seen = new Set();
+  for (const uid of userIds) {
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    await logNotification(uid, title, body, data);
   }
 }
 
@@ -133,9 +169,52 @@ async function notifyAdminChecker(title, body, data) {
   }
   const rows = [...map.values()];
   await sendExpoPushToTokens(rows, title, body, data);
-  for (const r of rows) {
-    await logNotification(r.user_id, title, body, data);
+  const userIds = await getUserIdsWhoHaveAnyPermission(['can_confirm_picked']);
+  const seen = new Set();
+  for (const uid of userIds) {
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    await logNotification(uid, title, body, data);
   }
+}
+
+/** Inbound uploaded → putaway in racks: notify receiving staff + pickers (warehouse). */
+async function notifyInboundPutaway(title, body, data) {
+  const receivers = await getExpoTokensForPermission('can_receive_stock');
+  const pickers = await getExpoTokensForPermission('can_pick_orders');
+  const map = new Map();
+  for (const r of [...receivers, ...pickers]) {
+    if (r.expo_push_token) map.set(r.expo_push_token, r);
+  }
+  const rows = [...map.values()];
+  await sendExpoPushToTokens(rows, title, body, data);
+  const userIds = await getUserIdsWhoHaveAnyPermission(['can_receive_stock', 'can_pick_orders']);
+  const seen = new Set();
+  for (const uid of userIds) {
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    await logNotification(uid, title, body, data);
+  }
+}
+
+/** Push + in-app log for specific user ids (e.g. matched driver). */
+async function sendExpoPushToUserIds(userIds, title, body, data = {}) {
+  if (!userIds?.length) return [];
+  const all = promisify(db.all.bind(db));
+  const ph = userIds.map(() => '?').join(',');
+  const rows = await all(
+    `SELECT DISTINCT expo_push_token, user_id FROM push_devices WHERE user_id IN (${ph}) AND expo_push_token IS NOT NULL`,
+    userIds
+  );
+  const valid = (rows || []).filter((r) => r.expo_push_token && Expo.isExpoPushToken(r.expo_push_token));
+  await sendExpoPushToTokens(valid, title, body, data);
+  const seen = new Set();
+  for (const uid of userIds) {
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    await logNotification(uid, title, body, data);
+  }
+  return valid;
 }
 
 module.exports = {
@@ -143,6 +222,9 @@ module.exports = {
   notifyPickOrder,
   notifyPickProgress,
   notifyAdminChecker,
+  notifyInboundPutaway,
   sendExpoPushToTokens,
+  sendExpoPushToUserIds,
   getExpoTokensForPermission,
+  getUserIdsWhoHaveAnyPermission,
 };

@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Upload, Copy, Eye, Package, Truck, GitCompare, Plus } from 'lucide-react';
 import { mainStockApi, inboundApi, soldOutApi, stockComparisonApi, vendorItemsApi, vendorsApi } from '../services/api';
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 function downloadCsvFile(filename, headers, rows) {
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
@@ -351,6 +353,55 @@ export default function MainStock() {
   }, [stockInPn, stockInOpen]);
 
   const stockRows = useMemo(() => stocks || [], [stocks]);
+
+  const stockSortValue = useCallback((r, k) => {
+    if (k === 'sold_out_qty') return Number(r.sold_out_qty ?? r.issued_qty) || 0;
+    const nums = new Set(['received_qty', 'issued_qty', 'pending_delivery_qty', 'available_qty', 'sap_qty']);
+    if (nums.has(k)) {
+      const v = r[k];
+      if (v === '' || v === null || v === undefined || v === '-') return -Infinity;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : -Infinity;
+    }
+    return r[k];
+  }, []);
+  const { displayRows: stockDisplay, sortKey: sortStockKey, direction: dirStock, requestSort: sortStock } =
+    useTableSort(stockRows, stockSortValue);
+
+  const inboundSortValue = useCallback((r, k) => {
+    if (k === 'inbound_qty') return Number(r.inbound_qty) || 0;
+    if (k === 'received_date') {
+      const t = r.received_date ? new Date(r.received_date).getTime() : 0;
+      return Number.isFinite(t) ? t : 0;
+    }
+    return r[k];
+  }, []);
+  const { displayRows: inboundDisplay, sortKey: sortInboundKey, direction: dirInbound, requestSort: sortInbound } =
+    useTableSort(inboundRows, inboundSortValue);
+
+  const soldSortValue = useCallback((r, k) => {
+    if (k === 'outbound_qty') return Number(r.outbound_qty ?? r.sold_qty) || 0;
+    if (k === 'date') {
+      const t = r.date ? new Date(r.date).getTime() : 0;
+      return Number.isFinite(t) ? t : 0;
+    }
+    return r[k];
+  }, []);
+  const { displayRows: soldDisplay, sortKey: sortSoldKey, direction: dirSold, requestSort: sortSold } =
+    useTableSort(soldRows, soldSortValue);
+
+  const reportSortValue = useCallback((r, k) => {
+    if (['main_stock_available_qty', 'stock_by_rack_available_qty', 'difference'].includes(k)) return Number(r[k]) || 0;
+    if (k === 'sap_qty') {
+      const v = r.sap_qty;
+      if (v === '' || v === null || v === undefined || v === '-') return -Infinity;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : -Infinity;
+    }
+    return r[k];
+  }, []);
+  const { displayRows: reportDisplay, sortKey: sortReportKey, direction: dirReport, requestSort: sortReport } =
+    useTableSort(reportRows, reportSortValue);
 
   const openBulk = (mode) => {
     setBulkMode(mode);
@@ -936,15 +987,33 @@ export default function MainStock() {
             <table className="min-w-full divide-y divide-gray-200 text-[11px]">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="tbl-th">Part #</th>
-                  <th className="tbl-th">SAP PN</th>
-                  <th className="tbl-th">Description</th>
-                  <th className="tbl-th">Received</th>
-                  <th className="tbl-th">Sold out</th>
-                  <th className="tbl-th">Pending del.</th>
-                  <th className="tbl-th">Available</th>
-                  <th className="tbl-th">SAP Qty</th>
-                  <th className="tbl-th">UOM</th>
+                  <SortTh columnKey="part_number" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    Part #
+                  </SortTh>
+                  <SortTh columnKey="sap_part_number" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    SAP PN
+                  </SortTh>
+                  <SortTh columnKey="description" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    Description
+                  </SortTh>
+                  <SortTh columnKey="received_qty" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    Received
+                  </SortTh>
+                  <SortTh columnKey="sold_out_qty" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    Sold out
+                  </SortTh>
+                  <SortTh columnKey="pending_delivery_qty" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    Pending del.
+                  </SortTh>
+                  <SortTh columnKey="available_qty" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    Available
+                  </SortTh>
+                  <SortTh columnKey="sap_qty" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    SAP Qty
+                  </SortTh>
+                  <SortTh columnKey="uom" sortKey={sortStockKey} direction={dirStock} onSort={sortStock}>
+                    UOM
+                  </SortTh>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -955,7 +1024,7 @@ export default function MainStock() {
                     </td>
                   </tr>
                 ) : null}
-                {stockRows.map((r) => (
+                {stockDisplay.map((r) => (
                   <tr key={r.id || r.part_number} className="hover:bg-gray-50">
                     <td className="tbl-td-nowrap font-mono">{r.part_number}</td>
                     <td className="tbl-td-nowrap font-mono">{r.sap_part_number || '-'}</td>
@@ -1011,12 +1080,24 @@ export default function MainStock() {
             <table className="min-w-full divide-y divide-gray-200 text-[11px]">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="tbl-th">Vendor batch</th>
-                  <th className="tbl-th">Invoice</th>
-                  <th className="tbl-th">PO</th>
-                  <th className="tbl-th">Part #</th>
-                  <th className="tbl-th">Qty</th>
-                  <th className="tbl-th">Date</th>
+                  <SortTh columnKey="batch_vendor_name" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
+                    Vendor batch
+                  </SortTh>
+                  <SortTh columnKey="invoice_no" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
+                    Invoice
+                  </SortTh>
+                  <SortTh columnKey="po_number" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
+                    PO
+                  </SortTh>
+                  <SortTh columnKey="part_number" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
+                    Part #
+                  </SortTh>
+                  <SortTh columnKey="inbound_qty" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
+                    Qty
+                  </SortTh>
+                  <SortTh columnKey="received_date" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
+                    Date
+                  </SortTh>
                 </tr>
               </thead>
               <tbody>
@@ -1027,7 +1108,7 @@ export default function MainStock() {
                     </td>
                   </tr>
                 ) : null}
-                {inboundRows.map((r) => (
+                {inboundDisplay.map((r) => (
                   <tr key={r.id} className="hover:bg-gray-50">
                     <td className="tbl-td">{r.batch_vendor_name}</td>
                     <td className="tbl-td-nowrap">{r.invoice_no}</td>
@@ -1082,12 +1163,24 @@ export default function MainStock() {
             <table className="min-w-full divide-y divide-gray-200 text-[11px]">
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
-                  <th className="tbl-th">Date</th>
-                  <th className="tbl-th">Part #</th>
-                  <th className="tbl-th">Outbound qty</th>
-                  <th className="tbl-th">Status</th>
-                  <th className="tbl-th">Invoice</th>
-                  <th className="tbl-th">Delivery</th>
+                  <SortTh columnKey="date" sortKey={sortSoldKey} direction={dirSold} onSort={sortSold}>
+                    Date
+                  </SortTh>
+                  <SortTh columnKey="part_number" sortKey={sortSoldKey} direction={dirSold} onSort={sortSold}>
+                    Part #
+                  </SortTh>
+                  <SortTh columnKey="outbound_qty" sortKey={sortSoldKey} direction={dirSold} onSort={sortSold}>
+                    Outbound qty
+                  </SortTh>
+                  <SortTh columnKey="status" sortKey={sortSoldKey} direction={dirSold} onSort={sortSold}>
+                    Status
+                  </SortTh>
+                  <SortTh columnKey="invoice_number" sortKey={sortSoldKey} direction={dirSold} onSort={sortSold}>
+                    Invoice
+                  </SortTh>
+                  <SortTh columnKey="delivery" sortKey={sortSoldKey} direction={dirSold} onSort={sortSold}>
+                    Delivery
+                  </SortTh>
                 </tr>
               </thead>
               <tbody>
@@ -1098,7 +1191,7 @@ export default function MainStock() {
                     </td>
                   </tr>
                 ) : null}
-                {soldRows.map((r) => (
+                {soldDisplay.map((r) => (
                   <tr key={r.id} className="hover:bg-gray-50">
                     <td className="tbl-td-nowrap">{formatDateDDMMYYYY(r.date)}</td>
                     <td className="tbl-td font-mono">{r.part_number}</td>
@@ -1152,14 +1245,30 @@ export default function MainStock() {
             <table className="min-w-full divide-y divide-gray-200 text-[11px]">
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
-                  <th className="tbl-th">Part #</th>
-                  <th className="tbl-th">SAP PN</th>
-                  <th className="tbl-th">Description</th>
-                  <th className="tbl-th">Main avail</th>
-                  <th className="tbl-th">Rack sum</th>
-                  <th className="tbl-th">SAP Qty</th>
-                  <th className="tbl-th">Difference</th>
-                  <th className="tbl-th">Status</th>
+                  <SortTh columnKey="part_number" sortKey={sortReportKey} direction={dirReport} onSort={sortReport}>
+                    Part #
+                  </SortTh>
+                  <SortTh columnKey="sap_part_number" sortKey={sortReportKey} direction={dirReport} onSort={sortReport}>
+                    SAP PN
+                  </SortTh>
+                  <SortTh columnKey="description" sortKey={sortReportKey} direction={dirReport} onSort={sortReport}>
+                    Description
+                  </SortTh>
+                  <SortTh columnKey="main_stock_available_qty" sortKey={sortReportKey} direction={dirReport} onSort={sortReport}>
+                    Main avail
+                  </SortTh>
+                  <SortTh columnKey="stock_by_rack_available_qty" sortKey={sortReportKey} direction={dirReport} onSort={sortReport}>
+                    Rack sum
+                  </SortTh>
+                  <SortTh columnKey="sap_qty" sortKey={sortReportKey} direction={dirReport} onSort={sortReport}>
+                    SAP Qty
+                  </SortTh>
+                  <SortTh columnKey="difference" sortKey={sortReportKey} direction={dirReport} onSort={sortReport}>
+                    Difference
+                  </SortTh>
+                  <SortTh columnKey="status" sortKey={sortReportKey} direction={dirReport} onSort={sortReport}>
+                    Status
+                  </SortTh>
                 </tr>
               </thead>
               <tbody>
@@ -1170,7 +1279,7 @@ export default function MainStock() {
                     </td>
                   </tr>
                 ) : null}
-                {reportRows.map((r, i) => (
+                {reportDisplay.map((r, i) => (
                   <tr key={`${r.part_number}-${i}`} className="hover:bg-gray-50">
                     <td className="tbl-td font-mono">{r.part_number}</td>
                     <td className="tbl-td font-mono">{r.sap_part_number || '-'}</td>

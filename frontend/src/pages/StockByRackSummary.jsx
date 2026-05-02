@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, Filter, Search } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { stockByRackApi } from '../services/api';
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 const StockByRackSummary = () => {
   const [rows, setRows] = useState([]);
@@ -86,6 +88,18 @@ const StockByRackSummary = () => {
     URL.revokeObjectURL(url);
   };
 
+  const rackSummarySort = useCallback((r, k) => {
+    if (['total_in_qty', 'total_out_qty', 'available_qty'].includes(k)) return Number(r[k]) || 0;
+    if (k === 'first_entry_date' || k === 'last_updated') {
+      const raw = r[k];
+      const t = raw ? new Date(raw).getTime() : 0;
+      return Number.isFinite(t) ? t : 0;
+    }
+    return r[k];
+  }, []);
+
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, rackSummarySort);
+
   return (
     <div>
       <div className="app-page-toolbar">
@@ -158,37 +172,37 @@ const StockByRackSummary = () => {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="tbl-th">
+                <SortTh columnKey="part_number" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Part Number
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="sap_part_number" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   SAP PN
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="description" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Description
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="rack_location" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Rack Location
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="total_in_qty" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Total In Qty
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="total_out_qty" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Total Out Qty
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="available_qty" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Available Qty
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="first_entry_date" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   First Entry Date
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="last_updated" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Last Updated
-                </th>
+                </SortTh>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {(rows || []).map((r) => (
+              {(displayRows || []).map((r) => (
                 <tr key={`${r.part_number}-${r.rack_location}`} className="hover:bg-gray-50">
                   <td className="tbl-td-nowrap">{r.part_number}</td>
                   <td className="tbl-td-nowrap">{r.sap_part_number || '-'}</td>

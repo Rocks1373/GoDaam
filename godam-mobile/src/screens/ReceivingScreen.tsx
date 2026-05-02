@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   View,
   Text,
@@ -38,6 +39,8 @@ export default function ReceivingScreen() {
   const [qty, setQty] = useState('');
   const [remarks, setRemarks] = useState('');
   const [localPreview, setLocalPreview] = useState('');
+  /** Filter batch line list by part (and description) when the batch has many parts */
+  const [itemPartQuery, setItemPartQuery] = useState('');
 
   const loadBatches = useCallback(async () => {
     setLoading(true);
@@ -52,12 +55,15 @@ export default function ReceivingScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    loadBatches();
-  }, [loadBatches]);
+  useFocusEffect(
+    useCallback(() => {
+      void loadBatches();
+    }, [loadBatches])
+  );
 
   const openBatch = async (id: number) => {
     setLoading(true);
+    setItemPartQuery('');
     try {
       const data = await getInboundBatchDetail(id);
       setBatchDetail(data);
@@ -136,6 +142,18 @@ export default function ReceivingScreen() {
     }
   };
 
+  const filteredBatchItems = useMemo(() => {
+    const list = batchDetail?.items;
+    if (!list?.length) return [];
+    const q = itemPartQuery.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((it) => {
+      const pn = String(it.part_number ?? '').toLowerCase();
+      const desc = String(it.description ?? '').toLowerCase();
+      return pn.includes(q) || desc.includes(q);
+    });
+  }, [batchDetail?.items, itemPartQuery]);
+
   const shareLocal = async () => {
     const uri = await getPutawaySessionUri();
     if (!uri) {
@@ -197,6 +215,7 @@ export default function ReceivingScreen() {
             setMode('batches');
             setBatchDetail(null);
             setActiveBatchId(null);
+            setItemPartQuery('');
           }}
           style={styles.back}
         >
@@ -204,11 +223,33 @@ export default function ReceivingScreen() {
         </Pressable>
         <Text style={styles.h}>{batchDetail.batch.batch_name}</Text>
         <Text style={styles.meta}>{batchDetail.batch.vendor_name || ''}</Text>
+        <Text style={styles.searchLabel}>Search by part # (or text in description)</Text>
+        <TextInput
+          style={styles.searchInput}
+          value={itemPartQuery}
+          onChangeText={setItemPartQuery}
+          placeholder="e.g. ER8202 or cable"
+          autoCapitalize="none"
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+        />
+        {itemPartQuery.trim() ? (
+          <Text style={styles.searchMeta}>
+            {filteredBatchItems.length} of {batchDetail.items.length} line(s)
+          </Text>
+        ) : null}
         {loading ? <ActivityIndicator style={{ marginTop: 12 }} /> : null}
         <FlatList
-          data={batchDetail.items}
+          data={filteredBatchItems}
           keyExtractor={(it) => String(it.id)}
           contentContainerStyle={{ paddingBottom: 24 }}
+          ListEmptyComponent={
+            <Text style={styles.emptySearch}>
+              {batchDetail.items.length === 0
+                ? 'No lines in this batch.'
+                : 'No parts match your search. Clear the search or try another part number.'}
+            </Text>
+          }
           renderItem={({ item }) => (
             <Pressable style={styles.card} onPress={() => openPutaway(item)}>
               <Text style={styles.part}>{item.part_number}</Text>
@@ -321,6 +362,19 @@ const styles = StyleSheet.create({
   },
   tbSecText: { fontWeight: '700', fontSize: 11, color: '#334155' },
   empty: { textAlign: 'center', color: '#94a3b8', marginTop: 24, fontSize: 13 },
+  searchLabel: { fontSize: 11, fontWeight: '700', color: '#475569', marginTop: 4 },
+  searchInput: {
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginTop: 6,
+    backgroundColor: '#fff',
+    fontSize: 16,
+  },
+  searchMeta: { fontSize: 12, color: '#64748b', marginTop: 6 },
+  emptySearch: { textAlign: 'center', color: '#94a3b8', marginTop: 20, fontSize: 13, paddingHorizontal: 8 },
   preview: { marginTop: 16, padding: 10, backgroundColor: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#e2e8f0' },
   previewTitle: { fontWeight: '700', marginBottom: 6, fontSize: 12 },
   previewTxt: { fontFamily: 'Courier', fontSize: 9, color: '#334155' },

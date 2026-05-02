@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { reportsApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 export default function OutboundReport() {
   const [rows, setRows] = useState([]);
@@ -15,7 +17,7 @@ export default function OutboundReport() {
     setLoading(true);
     setErr('');
     try {
-      const data = await reportsApi.outboundPicks({
+      const data = await reportsApi.outbound({
         ...(from ? { from } : {}),
         ...(to ? { to } : {}),
         ...(outbound_number.trim() ? { outbound_number: outbound_number.trim() } : {}),
@@ -34,6 +36,18 @@ export default function OutboundReport() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const outboundReportSort = useCallback((r, k) => {
+    if (k === 'picked_qty') return Number(r.picked_qty) || 0;
+    if (k === 'picked_at') {
+      const t = r.picked_at ? new Date(r.picked_at).getTime() : 0;
+      return Number.isFinite(t) ? t : 0;
+    }
+    if (k === 'item_status') return r.item_status ?? r.order_status ?? '';
+    return r[k];
+  }, []);
+
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, outboundReportSort);
 
   return (
     <div className="max-w-[1600px]">
@@ -83,18 +97,90 @@ export default function OutboundReport() {
         <table className="min-w-full text-[11px]">
           <thead>
             <tr className="bg-gray-50 text-left border-b border-gray-200">
-              <th className="px-2 py-2 font-bold">Outbound #</th>
-              <th className="px-2 py-2 font-bold">Delivery</th>
-              <th className="px-2 py-2 font-bold">Customer</th>
-              <th className="px-2 py-2 font-bold">Part</th>
-              <th className="px-2 py-2 font-bold text-right">Picked Qty</th>
-              <th className="px-2 py-2 font-bold">Picked By</th>
-              <th className="px-2 py-2 font-bold">Picked At</th>
-              <th className="px-2 py-2 font-bold">Status</th>
+              <SortTh
+                bare
+                columnKey="outbound_number"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Outbound #
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="delivery"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Delivery
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="customer"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Customer
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="part_number"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Part
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="picked_qty"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold text-right border-b border-gray-200"
+              >
+                Picked Qty
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="picked_by"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Picked By
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="picked_at"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Picked At
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="item_status"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 font-bold border-b border-gray-200"
+              >
+                Status
+              </SortTh>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, idx) => (
+            {displayRows.map((r, idx) => (
               <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50/80">
                 <td className="px-2 py-1.5 font-mono">{r.outbound_number}</td>
                 <td className="px-2 py-1.5">{r.delivery || '—'}</td>
@@ -103,7 +189,7 @@ export default function OutboundReport() {
                 <td className="px-2 py-1.5 text-right">{r.picked_qty}</td>
                 <td className="px-2 py-1.5">{r.picked_by || '—'}</td>
                 <td className="px-2 py-1.5 whitespace-nowrap">{r.picked_at || '—'}</td>
-                <td className="px-2 py-1.5">{r.item_status || r.order_status || '—'}</td>
+                <td className="px-2 py-1.5">{r.item_status ?? r.order_status ?? '—'}</td>
               </tr>
             ))}
           </tbody>

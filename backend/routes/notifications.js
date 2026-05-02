@@ -48,6 +48,19 @@ router.post('/send', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+router.get('/unread-count', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.sub;
+    const row = await dbGet(
+      `SELECT COUNT(1) AS c FROM notification_log WHERE user_id = ? AND read_at IS NULL`,
+      [uid]
+    );
+    res.json({ count: Number(row?.c) || 0 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/', requireAuth, async (req, res) => {
   try {
     const uid = req.user.sub;
@@ -63,6 +76,22 @@ router.get('/', requireAuth, async (req, res) => {
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/mark-all-read', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.sub;
+    await dbRun(`UPDATE notification_log SET read_at = CURRENT_TIMESTAMP WHERE user_id = ? AND read_at IS NULL`, [
+      uid,
+    ]);
+    const row = await dbGet(
+      `SELECT COUNT(1) AS c FROM notification_log WHERE user_id = ? AND read_at IS NULL`,
+      [uid]
+    );
+    res.json({ ok: true, unread_remaining: Number(row?.c) || 0 });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
   }
 });
 

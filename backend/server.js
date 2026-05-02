@@ -58,6 +58,7 @@ const webAuth = [requireAuth, requireWebAccess];
 app.use('/api/main-stock', ...webAuth, require('./routes/main-stock'));
 app.use('/api/inbound', ...webAuth, require('./routes/inbound'));
 app.use('/api/reports', ...webAuth, require('./routes/reports'));
+app.use('/api/dashboard', ...webAuth, require('./routes/dashboard'));
 app.use('/api/sold-out', ...webAuth, require('./routes/sold-out'));
 app.use('/api/stock-comparison-report', ...webAuth, require('./routes/stock-comparison-report'));
 app.use('/api/stock-by-rack', ...webAuth, require('./routes/stock-by-rack'));

@@ -16,6 +16,8 @@ import {
   Database,
   PieChart,
   LineChart,
+  FileSpreadsheet,
+  Image,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Dashboard from './pages/Dashboard';
@@ -29,6 +31,7 @@ import RolePermissions from './pages/RolePermissions';
 import PickedOrdersAdmin from './pages/PickedOrdersAdmin';
 import PickChangeRequests from './pages/PickChangeRequests';
 import Notifications from './pages/Notifications';
+import PodInbox from './pages/PodInbox';
 import AdminMaintenance from './pages/AdminMaintenance';
 import Login from './pages/Login';
 import CarrierMaster from './pages/CarrierMaster';
@@ -36,6 +39,8 @@ import VendorMaster from './pages/VendorMaster';
 import VendorItems from './pages/VendorItems';
 import InboundReport from './pages/InboundReport';
 import OutboundReport from './pages/OutboundReport';
+import DeliveryReport from './pages/DeliveryReport';
+import ReportExportPage from './pages/ReportExportPage';
 import { authApi, notificationsApi } from './services/api';
 import './index.css';
 
@@ -146,31 +151,40 @@ function App() {
     setUser(null);
   };
 
-  // Poll unread notifications for badge (slow + visibility-aware; avoid pointless App re-renders).
+  const prevDesktopNotifCountRef = useRef(0);
+
+  // Poll unread notifications for badge (also while tab hidden so mobile/web stay in sync).
   useEffect(() => {
     if (!user) {
       notifUnreadSigRef.current = '';
+      prevDesktopNotifCountRef.current = 0;
       return;
     }
     let alive = true;
     const tick = async () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       try {
-        const rows = await notificationsApi.list({ unread_only: true });
+        const { count } = await notificationsApi.unreadCount();
         if (!alive) return;
-        const list = rows || [];
-        const sig = `${list.length}:${list.map((r) => r.id).join(',')}`;
+        let list = [];
+        if (Number(count) > 0) {
+          list = await notificationsApi.list({ unread_only: true });
+        }
+        const listNorm = list || [];
+        const sig = `${Number(count) || 0}:${listNorm.map((r) => r.id).join(',')}`;
         if (sig !== notifUnreadSigRef.current) {
           notifUnreadSigRef.current = sig;
-          setNotifRows(list);
-          setNotifUnread(list.length);
+          setNotifRows(listNorm);
+          setNotifUnread(Number(count) || 0);
+        }
+        if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+          prevDesktopNotifCountRef.current = Number(count) || 0;
         }
       } catch {
         // ignore
       }
     };
     tick();
-    const t = setInterval(tick, 60000);
+    const t = setInterval(tick, 30000);
     const onVis = () => {
       if (document.visibilityState === 'visible') tick();
     };
@@ -181,6 +195,31 @@ function App() {
       document.removeEventListener('visibilitychange', onVis);
     };
   }, [user]);
+
+  // Browser notification when unread count goes up while the tab is in the background (after user grants permission in the browser).
+  useEffect(() => {
+    if (!user) return;
+    if (typeof document === 'undefined' || document.visibilityState !== 'hidden') return;
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    const prev = prevDesktopNotifCountRef.current;
+    if (notifUnread < prev) {
+      prevDesktopNotifCountRef.current = notifUnread;
+      return;
+    }
+    if (notifUnread > prev && notifUnread > 0) {
+      const first = (notifRows || [])[0];
+      try {
+        new Notification(first?.title || 'GoDaam', {
+          body: first?.body || 'New notification',
+          icon: '/LOGO.png',
+          tag: `godam-notify-${first?.id ?? 'new'}`,
+        });
+      } catch {
+        // ignore
+      }
+    }
+    prevDesktopNotifCountRef.current = notifUnread;
+  }, [user, notifUnread, notifRows]);
 
   return (
     <Router
@@ -329,7 +368,81 @@ function App() {
                         }
                       >
                         <Layers className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Stock by Rack</span>
+                        <span className="truncate">Stock By Rack</span>
+                      </NavLink>
+
+                      {(user?.role === 'admin' || user?.permissions?.can_upload_outbound) && (
+                        <NavLink
+                          to="/outbound-upload"
+                          className={({ isActive }) =>
+                            `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                              isActive
+                                ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                                : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                            }`
+                          }
+                        >
+                          <UploadCloud className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="truncate">Outbound Upload</span>
+                        </NavLink>
+                      )}
+
+                      {(user?.role === 'admin' || user?.permissions?.can_view_picked_table) && (
+                        <NavLink
+                          to="/picked-orders"
+                          className={({ isActive }) =>
+                            `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                              isActive
+                                ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                                : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                            }`
+                          }
+                        >
+                          <ClipboardList className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="truncate">Pickup / Picked Orders</span>
+                        </NavLink>
+                      )}
+
+                      <NavLink
+                        to="/customers"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <Users className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Customers</span>
+                      </NavLink>
+
+                      <NavLink
+                        to="/delivery-note"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Delivery Order / Delivery Note</span>
+                      </NavLink>
+
+                      <NavLink
+                        to="/pod-inbox"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <Image className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">POD inbox</span>
                       </NavLink>
 
                       <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
@@ -362,45 +475,8 @@ function App() {
                         <LineChart className="w-3.5 h-3.5 flex-shrink-0" />
                         <span className="truncate">Outbound Report</span>
                       </NavLink>
-                      <div className="px-2 py-0.5 text-[9px] text-gray-500 leading-snug pl-3">
-                        Use <span className="font-semibold">Main Stock</span> &amp;{' '}
-                        <span className="font-semibold">Stock by Rack</span> above for stock views; SAP report planned.
-                      </div>
-
-                      {(user?.role === 'admin' || user?.permissions?.can_upload_outbound) && (
-                        <NavLink
-                          to="/outbound-upload"
-                          className={({ isActive }) =>
-                            `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                              isActive
-                                ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                            }`
-                          }
-                        >
-                          <UploadCloud className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="truncate">Outbound Upload</span>
-                        </NavLink>
-                      )}
-
-                      {user?.role === 'admin' && (
-                        <NavLink
-                          to="/picked-orders"
-                          className={({ isActive }) =>
-                            `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                              isActive
-                                ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                            }`
-                          }
-                        >
-                          <ClipboardList className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="truncate">Picked Orders</span>
-                        </NavLink>
-                      )}
-
                       <NavLink
-                        to="/customers"
+                        to="/reports/delivery"
                         className={({ isActive }) =>
                           `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
                             isActive
@@ -409,12 +485,11 @@ function App() {
                           }`
                         }
                       >
-                        <Users className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Customers</span>
+                        <FileSpreadsheet className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Delivery Report</span>
                       </NavLink>
-
                       <NavLink
-                        to="/delivery-note"
+                        to="/reports/stock-by-rack-report"
                         className={({ isActive }) =>
                           `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
                             isActive
@@ -423,13 +498,39 @@ function App() {
                           }`
                         }
                       >
-                        <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Delivery Note</span>
+                        <Layers className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Stock By Rack Report</span>
+                      </NavLink>
+                      <NavLink
+                        to="/reports/main-stock-report"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <Package className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Main Stock Report</span>
+                      </NavLink>
+                      <NavLink
+                        to="/reports/sap-stock"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <Database className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">SAP Stock Report</span>
                       </NavLink>
 
                       {user?.role === 'admin' && (
                         <>
-                          <div className="flex items-center gap-2 px-2 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
+                          <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
                             <ShieldCheck className="w-3 h-3" />
                             Admin
                           </div>
@@ -552,6 +653,26 @@ function App() {
                       <Route path="/dashboard" element={<Dashboard />} />
                       <Route path="/reports/inbound" element={<InboundReport />} />
                       <Route path="/reports/outbound" element={<OutboundReport />} />
+                      <Route path="/reports/delivery" element={<DeliveryReport />} />
+                      <Route
+                        path="/reports/stock-by-rack-report"
+                        element={<ReportExportPage title="Stock By Rack Report" fileSlug="stock-by-rack" endpoint="/reports/stock-by-rack" />}
+                      />
+                      <Route
+                        path="/reports/main-stock-report"
+                        element={<ReportExportPage title="Main Stock Report" fileSlug="main-stock" endpoint="/reports/main-stock" />}
+                      />
+                      <Route
+                        path="/reports/sap-stock"
+                        element={
+                          <ReportExportPage
+                            title="SAP Stock Report"
+                            fileSlug="sap-stock"
+                            endpoint="/reports/sap-stock"
+                            hint="SAP-related rows from main stock (SAP qty or SAP part number)."
+                          />
+                        }
+                      />
                       <Route path="/main-stock" element={<MainStock />} />
                       <Route path="/stock-by-rack/*" element={<StockByRack />} />
                       <Route path="/pick-suggestion" element={<Navigate to="/dashboard" replace />} />
@@ -559,6 +680,7 @@ function App() {
                       <Route path="/picked-orders" element={<PickedOrdersAdmin />} />
                       <Route path="/customers" element={<Customers />} />
                       <Route path="/delivery-note" element={<DeliveryNote />} />
+                      <Route path="/pod-inbox" element={<PodInbox />} />
                       <Route path="/carrier-master" element={<CarrierMaster />} />
                       <Route path="/vendor-master" element={<VendorMaster />} />
                       <Route path="/vendor-items" element={<VendorItems />} />

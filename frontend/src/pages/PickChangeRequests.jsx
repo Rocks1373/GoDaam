@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import api from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 export default function PickChangeRequests() {
   const [rows, setRows] = useState([]);
@@ -24,6 +26,23 @@ export default function PickChangeRequests() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);
+
+  const pickChangeSort = useCallback((r, k) => {
+    if (k === 'id') return Number(r.id) || 0;
+    if (k === 'outbound')
+      return [r.delivery, r.outbound_order_id, r.sales_doc].filter(Boolean).join(' · ');
+    if (k === 'item') return r.material || r.part_number || String(r.outbound_item_id ?? '');
+    if (k === 'requested') {
+      const q = Number(r.requested_qty);
+      return Number.isFinite(q) ? q : 0;
+    }
+    if (k === 'reason') return r.reason || '';
+    if (k === 'by') return r.requested_by_user_name || String(r.requested_by_user_id ?? '');
+    if (k === 'status') return r.status || '';
+    return r[k];
+  }, []);
+
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, pickChangeSort);
 
   const resolve = async (id, next) => {
     setLoading(true);
@@ -68,18 +87,32 @@ export default function PickChangeRequests() {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="tbl-th">ID</th>
-              <th className="tbl-th">Outbound</th>
-              <th className="tbl-th">Item</th>
-              <th className="tbl-th">Requested</th>
-              <th className="tbl-th">Reason</th>
-              <th className="tbl-th">By</th>
-              <th className="tbl-th">Status</th>
+              <SortTh columnKey="id" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                ID
+              </SortTh>
+              <SortTh columnKey="outbound" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Outbound
+              </SortTh>
+              <SortTh columnKey="item" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Item
+              </SortTh>
+              <SortTh columnKey="requested" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Requested
+              </SortTh>
+              <SortTh columnKey="reason" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Reason
+              </SortTh>
+              <SortTh columnKey="by" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                By
+              </SortTh>
+              <SortTh columnKey="status" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Status
+              </SortTh>
               <th className="tbl-th">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {rows.map((r) => (
+            {displayRows.map((r) => (
               <tr key={r.id} className="hover:bg-gray-50">
                 <td className="tbl-td-nowrap">{r.id}</td>
                 <td className="tbl-td-nowrap">

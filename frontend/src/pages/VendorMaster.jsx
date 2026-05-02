@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Download, Plus, Search, Upload, Eye, Trash2 } from 'lucide-react';
 import { vendorsApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 const HEADERS = ['Vendor Number', 'Vendor Name', 'Contact Person', 'Phone Number', 'Email', 'Remarks'];
+const VENDOR_KEYS = ['vendor_number', 'vendor_name', 'contact_person', 'phone_number', 'email', 'remarks'];
 
 export default function VendorMaster() {
   const [rows, setRows] = useState([]);
@@ -48,6 +51,13 @@ export default function VendorMaster() {
   }, [search]);
 
   const tableRows = useMemo(() => rows || [], [rows]);
+
+  const vendorSortValue = useCallback((row, key) => {
+    if (key === 'is_active') return Number(row.is_active) ? 1 : 0;
+    return row?.[key];
+  }, []);
+
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(tableRows, vendorSortValue);
 
   const resetForm = () => {
     setForm({
@@ -186,12 +196,14 @@ export default function VendorMaster() {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              {HEADERS.map((h) => (
-                <th key={h} className="tbl-th">
+              {HEADERS.map((h, i) => (
+                <SortTh key={h} columnKey={VENDOR_KEYS[i]} sortKey={sortKey} direction={direction} onSort={requestSort}>
                   {h}
-                </th>
+                </SortTh>
               ))}
-              <th className="tbl-th">Active</th>
+              <SortTh columnKey="is_active" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Active
+              </SortTh>
               <th className="tbl-th">Actions</th>
             </tr>
           </thead>
@@ -203,7 +215,7 @@ export default function VendorMaster() {
                 </td>
               </tr>
             ) : null}
-            {tableRows.map((r) => (
+            {displayRows.map((r) => (
               <tr key={r.id} className="hover:bg-gray-50">
                 <td className="tbl-td-nowrap">{r.vendor_number || ''}</td>
                 <td className="tbl-td-nowrap">{r.vendor_name || ''}</td>
@@ -219,7 +231,7 @@ export default function VendorMaster() {
                 </td>
               </tr>
             ))}
-            {!loading && !tableRows.length ? (
+            {!loading && !displayRows.length ? (
               <tr>
                 <td className="px-2 py-3 text-xs text-gray-500" colSpan={HEADERS.length + 2}>
                   No vendors found.

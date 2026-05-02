@@ -1,133 +1,159 @@
 import { useEffect, useState } from 'react';
-import api from '../services/api';
-import { BarChart3, Package, Layers, Truck, AlertCircle } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { dashboardApi } from '../services/api';
+import {
+  UploadCloud,
+  Truck,
+  ClipboardList,
+  Package,
+  Clock,
+  CheckCircle2,
+  AlertCircle,
+  Bell,
+} from 'lucide-react';
 
-const Dashboard = () => {
-  const [stats, setStats] = useState({
-    total_skus: 0,
-    total_available_qty: 0,
-    low_stock_count: 0,
-    pending_outbound: 0
-  });
+function StatCard({ title, value, icon: Icon, tone = 'slate' }) {
+  const tones = {
+    slate: 'bg-slate-50 text-slate-800 border-slate-200',
+    blue: 'bg-blue-50 text-blue-900 border-blue-200',
+    amber: 'bg-amber-50 text-amber-900 border-amber-200',
+    green: 'bg-emerald-50 text-emerald-900 border-emerald-200',
+    red: 'bg-rose-50 text-rose-900 border-rose-200',
+  };
+  return (
+    <div className={`rounded-lg border p-2.5 ${tones[tone] || tones.slate}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-[9px] font-bold uppercase tracking-wide opacity-80">{title}</p>
+          <p className="text-lg font-extrabold leading-tight mt-0.5">{value}</p>
+        </div>
+        {Icon ? <Icon className="w-5 h-5 flex-shrink-0 opacity-80" /> : null}
+      </div>
+    </div>
+  );
+}
+
+export default function Dashboard() {
+  const navigate = useNavigate();
+  const [summary, setSummary] = useState(null);
+  const [activity, setActivity] = useState(null);
+  const [dn, setDn] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchDashboardStats();
-  }, []);
-
-  const fetchDashboardStats = async () => {
+  const load = async () => {
+    setLoading(true);
     try {
-      setLoading(true);
-      const [mainStockRes, rackRes, outboundRes] = await Promise.all([
-        api.get('/main-stock', { params: { limit: 1000 } }),
-        api.get('/stock-by-rack', { params: { available_only: true, limit: 1000 } }),
-        api.get('/outbound')
+      const [s, a, n] = await Promise.all([
+        dashboardApi.summary(),
+        dashboardApi.recentActivity(),
+        dashboardApi.notifications(),
       ]);
-
-      const mainStock = mainStockRes.data;
-      const racks = rackRes.data;
-      const outbounds = outboundRes.data;
-
-      setStats({
-        total_skus: mainStock.length,
-        total_available_qty: mainStock.reduce((sum, item) => sum + (item.available_qty || 0), 0),
-        low_stock_count: mainStock.filter(item => (item.available_qty || 0) < 10).length,
-        pending_outbound: outbounds.filter((o) => {
-          const st = String(o.status || '').toLowerCase();
-          return ['pending', 'uploaded', 'stock checked', 'sent for pick'].includes(st);
-        }).length
-      });
-    } catch (error) {
-      console.error('Dashboard stats error:', error);
+      setSummary(s);
+      setActivity(a);
+      setDn(n);
+    } catch (e) {
+      console.error(e);
     } finally {
       setLoading(false);
     }
   };
 
-  const StatsCard = ({ title, value, icon: Icon, color = 'primary', change = 0 }) => (
-    <div className="bg-white p-2.5 rounded-lg shadow-sm border border-gray-200 hover:shadow-sm transition-all">
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          <p className="text-[10px] font-bold text-gray-600 uppercase tracking-wide">{title}</p>
-          <p className="mt-0.5 text-lg font-bold text-gray-900 leading-tight">{value}</p>
-          {change !== 0 && (
-            <p className={`text-[11px] mt-0.5 font-semibold ${
-              change >= 0 ? 'text-warehouse-green' : 'text-warehouse-red'
-            }`}>
-              {change >= 0 ? '+' : ''}{change}%
-            </p>
-          )}
-        </div>
-        <div className={`p-1.5 rounded-md bg-${color}-50 flex-shrink-0`}>
-          <Icon className={`w-4 h-4 text-${color}-600`} />
-        </div>
-      </div>
-    </div>
-  );
+  useEffect(() => {
+    load();
+  }, []);
 
-  if (loading) {
+  const fmtAct = (row) => {
+    if (!row?.ref && !row?.at) return '—';
+    return `${row.ref || '—'} · ${row.at ? String(row.at).replace('T', ' ').slice(0, 19) : ''}`;
+  };
+
+  if (loading && !summary) {
     return (
       <div className="flex items-center justify-center min-h-[200px]">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600" />
       </div>
     );
   }
 
+  const s = summary || {};
+
   return (
-    <div>
-      <div className="mb-2">
-        <h2 className="text-base font-bold text-gray-900 leading-tight">Dashboard</h2>
-        <p className="text-[11px] text-gray-600">Warehouse overview and key metrics</p>
+    <div className="max-w-[1400px]">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-bold text-gray-900 leading-tight">Dashboard</h2>
+          <p className="text-[11px] text-gray-600">Orders overview — upload runs daily</p>
+        </div>
+        <button type="button" className="btn-primary flex items-center gap-2 px-4 py-2" onClick={() => navigate('/outbound-upload')}>
+          <UploadCloud size={18} />
+          Upload Order
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
-        <StatsCard 
-          title="Total SKUs" 
-          value={stats.total_skus.toLocaleString()}
-          icon={Package}
-          color="blue"
-        />
-        <StatsCard 
-          title="Available Qty" 
-          value={Math.round(stats.total_available_qty).toLocaleString()}
-          icon={Layers}
-          color="green"
-        />
-        <StatsCard 
-          title="Low Stock" 
-          value={stats.low_stock_count}
-          icon={AlertCircle}
-          color="orange"
-        />
-        <StatsCard 
-          title="Pending Outbound" 
-          value={stats.pending_outbound}
-          icon={Truck}
-          color="primary"
-        />
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-2 mb-3">
+        <StatCard title="Total Orders Uploaded" value={s.total_orders_uploaded ?? '—'} icon={Package} tone="slate" />
+        <StatCard title="Orders Pending" value={s.orders_pending ?? '—'} icon={Clock} tone="amber" />
+        <StatCard title="Under Picking" value={s.orders_under_picking ?? '—'} icon={Truck} tone="blue" />
+        <StatCard title="Orders Picked" value={s.orders_picked ?? '—'} icon={ClipboardList} tone="blue" />
+        <StatCard title="Orders Delivered" value={s.orders_delivered ?? '—'} icon={CheckCircle2} tone="green" />
+        <StatCard title="Orders Cancelled" value={s.orders_cancelled ?? '—'} icon={AlertCircle} tone="red" />
+        <StatCard title="Today Uploaded" value={s.today_uploaded_orders ?? '—'} icon={UploadCloud} tone="slate" />
+        <StatCard title="Today Delivered" value={s.today_delivered_orders ?? '—'} icon={CheckCircle2} tone="green" />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-        <div className="bg-white p-3 rounded-lg shadow-sm border">
-          <h3 className="text-xs font-bold text-gray-900 mb-2">Recent Activity</h3>
-          <div className="text-center py-6 text-[11px] text-gray-500">
-            Recent stock movements will appear here
-          </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 mb-3">
+        <div className="bg-white rounded-lg border border-gray-200 p-3 shadow-sm">
+          <h3 className="text-xs font-bold text-gray-900 mb-2 flex items-center gap-1">
+            <ClipboardList size={14} /> Order activity (latest)
+          </h3>
+          <ul className="space-y-1.5 text-[11px] text-gray-700">
+            <li>
+              <span className="font-semibold text-gray-900">Last uploaded:</span> {fmtAct(activity?.last_uploaded_order)}
+            </li>
+            <li>
+              <span className="font-semibold text-gray-900">Last sent for pick:</span> {fmtAct(activity?.last_sent_for_pick)}
+            </li>
+            <li>
+              <span className="font-semibold text-gray-900">Last picked:</span> {fmtAct(activity?.last_picked_order)}
+            </li>
+            <li>
+              <span className="font-semibold text-gray-900">Last delivered:</span> {fmtAct(activity?.last_delivered_order)}
+            </li>
+          </ul>
         </div>
-        <div className="bg-white p-3 rounded-lg shadow-sm border">
-          <h3 className="text-xs font-bold text-gray-900 mb-2">Quick Actions</h3>
-          <div className="space-y-1.5">
-            <a href="/main-stock" className="btn-primary w-full block text-center py-1.5">
-              Manage Main Stock
-            </a>
-            <a href="/stock-by-rack" className="btn-secondary w-full block text-center py-1.5">
-              Update Rack Stock
-            </a>
-          </div>
+
+        <div className="bg-white rounded-lg border border-gray-200 p-3 shadow-sm">
+          <h3 className="text-xs font-bold text-gray-900 mb-2 flex items-center gap-1">
+            <Bell size={14} /> Notifications summary (today)
+          </h3>
+          <ul className="space-y-1.5 text-[11px] text-gray-700">
+            <li>
+              <span className="font-semibold">Order uploaded:</span> {dn?.order_uploaded?.today_count ?? 0}
+            </li>
+            <li>
+              <span className="font-semibold">Order sent for pick:</span> {dn?.order_sent_for_pick?.today_count ?? 0}
+            </li>
+            <li>
+              <span className="font-semibold">Order picked:</span> {dn?.order_picked?.today_count ?? 0}
+            </li>
+            <li>
+              <span className="font-semibold">Order delivered:</span> {dn?.order_delivered?.today_count ?? 0}
+            </li>
+            <li>
+              <span className="font-semibold">Driver / POD (DN delivered today):</span> {dn?.driver_pod_uploaded?.today_count ?? 0}
+            </li>
+            {dn?.driver_pod_uploaded?.note ? (
+              <li className="text-[10px] text-gray-500">{dn.driver_pod_uploaded.note}</li>
+            ) : null}
+          </ul>
         </div>
+      </div>
+
+      <div className="text-[10px] text-gray-500">
+        <button type="button" className="text-primary-700 font-bold hover:underline" onClick={load} disabled={loading}>
+          Refresh data
+        </button>
       </div>
     </div>
   );
-};
-
-export default Dashboard;
+}

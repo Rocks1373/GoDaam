@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Plus, Pencil, Ban, KeyRound } from 'lucide-react';
 import { usersApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 const ROLES = ['admin', 'picker', 'checker', 'viewer', 'driver'];
 
@@ -111,6 +113,12 @@ export default function UsersAdmin() {
     }
   };
 
+  const userSortValue = useCallback((r, k) => {
+    if (['is_active', 'can_access_web', 'can_access_mobile'].includes(k)) return Number(r[k]) ? 1 : 0;
+    return r[k];
+  }, []);
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, userSortValue);
+
   if (loading) return <div className="p-4 text-xs">Loading…</div>;
 
   return (
@@ -130,17 +138,29 @@ export default function UsersAdmin() {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="tbl-th">Username</th>
-              <th className="tbl-th">Full name</th>
-              <th className="tbl-th">Role</th>
-              <th className="tbl-th">Active</th>
-              <th className="tbl-th">Web</th>
-              <th className="tbl-th">Mobile</th>
+              <SortTh columnKey="username" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Username
+              </SortTh>
+              <SortTh columnKey="full_name" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Full name
+              </SortTh>
+              <SortTh columnKey="role" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Role
+              </SortTh>
+              <SortTh columnKey="is_active" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Active
+              </SortTh>
+              <SortTh columnKey="can_access_web" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Web
+              </SortTh>
+              <SortTh columnKey="can_access_mobile" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Mobile
+              </SortTh>
               <th className="tbl-th">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {rows.map((u) => (
+            {displayRows.map((u) => (
               <tr key={u.id} className="hover:bg-gray-50">
                 <td className="tbl-td-nowrap">{u.username}</td>
                 <td className="tbl-td">{u.full_name || '-'}</td>

@@ -2,6 +2,26 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Download, Edit3, Plus, Search, Trash2, Upload, Eye } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { customersApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
+
+/** Column keys matching EXCEL_HEADERS order (for sort) */
+const CUSTOMER_COL_KEYS = [
+  'customer_number',
+  'company_name',
+  'city_name',
+  'address',
+  'gps',
+  'contact_person',
+  'contact_person_number',
+  'email_1',
+  'designation_job',
+  'second_name',
+  'second_number',
+  'second_email',
+  'designation_job_2',
+  'remarks',
+];
 
 const EXCEL_HEADERS = [
   'Customer Number',
@@ -200,6 +220,7 @@ export default function Customers() {
   };
 
   const tableRows = useMemo(() => rows || [], [rows]);
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(tableRows);
 
   return (
     <div>
@@ -268,10 +289,16 @@ export default function Customers() {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              {EXCEL_HEADERS.map((h) => (
-                <th key={h} className="tbl-th">
+              {EXCEL_HEADERS.map((h, i) => (
+                <SortTh
+                  key={h}
+                  columnKey={CUSTOMER_COL_KEYS[i]}
+                  sortKey={sortKey}
+                  direction={direction}
+                  onSort={requestSort}
+                >
                   {h}
-                </th>
+                </SortTh>
               ))}
               <th className="tbl-th">Actions</th>
             </tr>
@@ -284,7 +311,7 @@ export default function Customers() {
                 </td>
               </tr>
             ) : null}
-            {tableRows.map((r) => (
+            {displayRows.map((r) => (
               <tr key={r.id} className="hover:bg-gray-50">
                 <td className="tbl-td-nowrap">{r.customer_number || ''}</td>
                 <td className="tbl-td-nowrap">{r.company_name}</td>
@@ -312,7 +339,7 @@ export default function Customers() {
                 </td>
               </tr>
             ))}
-            {!tableRows.length ? (
+            {!displayRows.length ? (
               <tr>
                 <td className="px-2 py-3 text-xs text-gray-500" colSpan={EXCEL_HEADERS.length + 1}>
                   No customers found.

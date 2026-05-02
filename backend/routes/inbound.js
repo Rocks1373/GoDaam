@@ -13,6 +13,7 @@ const dbAll = promisify(db.all.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const { applyStockIn } = require('./stock-in');
 const { normalizeExcelRows } = require('../utils/excelDates');
+const { notifyInboundPutaway } = require('../services/notificationService');
 
 function pick(row, ...names) {
   for (const n of names) {
@@ -222,6 +223,20 @@ async function processInboundRows(rows, uploadedBy) {
       }
 
       await dbRun('COMMIT');
+
+      const partCount = partMap.size;
+      const label = [batch_name, vendor_name].filter(Boolean).join(' | ') || batchKey;
+      const body = `${label} — ${partCount} part line(s) ready for rack putaway.`;
+      try {
+        await notifyInboundPutaway('New inbound — putaway', body, {
+          type: 'inbound_putaway',
+          inbound_batch_id: batchId,
+          batch_name,
+          vendor_name: vendor_name || '',
+        });
+      } catch (notifyErr) {
+        console.error('Inbound putaway notification:', notifyErr?.message || notifyErr);
+      }
     } catch (err) {
       await dbRun('ROLLBACK').catch(() => {});
       for (const agg of partMap.values()) {

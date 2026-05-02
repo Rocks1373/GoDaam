@@ -441,6 +441,65 @@ async function migrateGodamSchema(db) {
   `);
   await run(`CREATE INDEX IF NOT EXISTS idx_putaway_lines_item ON inbound_putaway_lines(inbound_item_id, applied_to_rack)`);
 
+  await run(`
+    CREATE TABLE IF NOT EXISTS outbound_order_seen (
+      user_id INTEGER NOT NULL,
+      outbound_order_id INTEGER NOT NULL,
+      seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, outbound_order_id),
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (outbound_order_id) REFERENCES outbound_orders(id)
+    )
+  `);
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_outbound_seen_order ON outbound_order_seen(outbound_order_id)`
+  );
+
+  // --- Delivery workflow (GAPP driver flow + final lock) ---
+  await ensureColumn(db, 'delivery_notes', 'delivery_status', "TEXT DEFAULT 'Draft'");
+  await ensureColumn(db, 'delivery_notes', 'confirmed_at', 'DATETIME');
+  await ensureColumn(db, 'delivery_notes', 'confirmed_by', 'INTEGER');
+  await ensureColumn(db, 'delivery_notes', 'driver_task_id', 'INTEGER');
+  await ensureColumn(db, 'delivery_notes', 'driver_opened_at', 'DATETIME');
+  await ensureColumn(db, 'delivery_notes', 'pickup_confirmed_at', 'DATETIME');
+  await ensureColumn(db, 'delivery_notes', 'out_for_delivery_at', 'DATETIME');
+  await ensureColumn(db, 'delivery_notes', 'pod_file_path', 'TEXT');
+  await ensureColumn(db, 'delivery_notes', 'pod_uploaded_at', 'DATETIME');
+  await ensureColumn(db, 'delivery_notes', 'closed_at', 'DATETIME');
+  await ensureColumn(db, 'delivery_notes', 'closed_by', 'INTEGER');
+  await ensureColumn(db, 'delivery_notes', 'is_closed', 'INTEGER DEFAULT 0');
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS driver_delivery_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dn_id INTEGER NOT NULL,
+      outbound_number TEXT,
+      invoice_number TEXT,
+      customer_name TEXT,
+      delivery_address TEXT,
+      city_name TEXT,
+      gps_link TEXT,
+      contact_person TEXT,
+      contact_number TEXT,
+      driver_user_id INTEGER,
+      driver_name TEXT,
+      driver_mobile TEXT,
+      status TEXT DEFAULT 'Confirmed',
+      confirmed_at DATETIME,
+      opened_at DATETIME,
+      pickup_confirmed_at DATETIME,
+      out_for_delivery_at DATETIME,
+      pod_uploaded_at DATETIME,
+      pod_file_path TEXT,
+      closed_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (dn_id) REFERENCES delivery_notes(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_driver_tasks_dn ON driver_delivery_tasks(dn_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_driver_tasks_driver ON driver_delivery_tasks(driver_user_id)`);
+
   await seedDefaultRolePermissions(db);
 }
 

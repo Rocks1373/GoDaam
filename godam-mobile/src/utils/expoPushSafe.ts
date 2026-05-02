@@ -1,6 +1,11 @@
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { Platform } from 'react-native';
 
+function resolveExpoProjectId(): string | undefined {
+  const extra = Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined;
+  return extra?.eas?.projectId ?? (Constants as { easConfig?: { projectId?: string } }).easConfig?.projectId;
+}
+
 /**
  * Remote push was removed from Expo Go on Android (SDK 53+).
  * Importing `expo-notifications` there throws — gate all loads behind this check.
@@ -37,7 +42,10 @@ export async function tryConfigurePushNotifications(
     const { status } = await Notifications.requestPermissionsAsync();
     if (status !== 'granted') return;
 
-    const tok = await Notifications.getExpoPushTokenAsync();
+    const projectId = resolveExpoProjectId();
+    const tok = projectId
+      ? await Notifications.getExpoPushTokenAsync({ projectId })
+      : await Notifications.getExpoPushTokenAsync();
     const token = tok.data;
     if (token) await registerDeviceApi(token);
   } catch {

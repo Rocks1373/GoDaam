@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Download, Eye, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { stockOutApi } from '../services/api';
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 function parseTabSeparated(text) {
   const rawLines = (text || '')
@@ -71,6 +73,17 @@ const StockOut = () => {
   useEffect(() => {
     fetchRows();
   }, []);
+
+  const stockOutSortValue = useCallback((r, k) => {
+    if (k === 'qty_out') return Number(r.qty_out) || 0;
+    if (k === 'transaction_date') {
+      const t = r.transaction_date ? new Date(r.transaction_date).getTime() : 0;
+      return Number.isFinite(t) ? t : 0;
+    }
+    return r[k];
+  }, []);
+
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, stockOutSortValue);
 
   const openCreate = () => {
     setEditId(null);
@@ -257,38 +270,38 @@ const StockOut = () => {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="tbl-th">
+                <SortTh columnKey="transaction_date" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Transaction Date
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="part_number" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Part Number
-                </th>
-                <th className="tbl-th">SAP PN</th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="sap_part_number" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                  SAP PN
+                </SortTh>
+                <SortTh columnKey="description" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Description
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="rack_location" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Rack
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="qty_out" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Qty Out
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="outbound_number" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Outbound #
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="reference_no" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Reference No
-                </th>
-                <th className="tbl-th">
+                </SortTh>
+                <SortTh columnKey="remarks" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Remarks
-                </th>
-                <th className="tbl-th">
-                  Actions
-                </th>
+                </SortTh>
+                <th className="tbl-th">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {(rows || []).map((r) => (
+              {(displayRows || []).map((r) => (
                 <tr key={r.id} className="hover:bg-gray-50">
                   <td className="tbl-td-nowrap">
                     {formatDateDDMMYYYY(r.transaction_date)}

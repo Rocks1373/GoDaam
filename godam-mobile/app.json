@@ -35,6 +35,13 @@
           "cameraPermission": "GoDaam needs camera access to scan barcodes and read part labels (OCR).",
           "microphonePermission": "Allow GoDaam to record audio with video (optional)."
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "GoDaam may access photos when attaching POD.",
+          "cameraPermission": "GoDaam uses the camera for proof-of-delivery (POD) photos."
+        }
       ]
     ]
   }

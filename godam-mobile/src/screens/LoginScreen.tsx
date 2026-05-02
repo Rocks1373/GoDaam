@@ -8,13 +8,18 @@ import { API_ORIGIN, setAuthHeader } from '../api/client';
 export type RootStackParamList = {
   Login: undefined;
   Home: undefined;
+  Notifications: undefined;
   Orders: undefined;
   OrderDetail: { orderId: number };
   StockPeek: { orderId: number; outboundItemId: number };
   ScanRack: undefined;
   Receiving: undefined;
   Upcoming: undefined;
+  MainStockCheck: undefined;
+  StockByRackCheck: undefined;
   Profile: undefined;
+  DeliveryList: undefined;
+  DeliveryDetail: { taskId: number };
 };
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Login'>;

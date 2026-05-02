@@ -124,6 +124,19 @@ export const inboundApi = {
 
 export const reportsApi = {
   outboundPicks: async (params = {}) => (await api.get('/reports/outbound-picks', { params })).data,
+  /** Same data as outbound-picks; spec path */
+  outbound: async (params = {}) => (await api.get('/reports/outbound', { params })).data,
+  inbound: async (params = {}) => (await api.get('/reports/inbound', { params })).data,
+  delivery: async (params = {}) => (await api.get('/reports/delivery', { params })).data,
+  stockByRackReport: async (params = {}) => (await api.get('/reports/stock-by-rack', { params })).data,
+  mainStockReport: async (params = {}) => (await api.get('/reports/main-stock', { params })).data,
+  sapStock: async (params = {}) => (await api.get('/reports/sap-stock', { params })).data,
+};
+
+export const dashboardApi = {
+  summary: async () => (await api.get('/dashboard/summary')).data,
+  recentActivity: async () => (await api.get('/dashboard/recent-activity')).data,
+  notifications: async () => (await api.get('/dashboard/notifications')).data,
 };
 
 export const soldOutApi = {
@@ -225,6 +238,12 @@ export const deliveryNotesApi = {
   setHold: async (id, is_hold) => (await api.post(`/delivery-notes/${id}/hold`, { is_hold })).data,
   markDelivered: async (id) => (await api.post(`/delivery-notes/${id}/mark-delivered`)).data,
   print: async (id) => (await api.get(`/delivery-notes/${id}/print`)).data,
+  getTimeline: async (id) => (await api.get(`/delivery-notes/${id}/timeline`)).data,
+  confirmForDelivery: async (id) => (await api.post(`/delivery-notes/${id}/confirm`)).data,
+  closeAdmin: async (id, payload) => (await api.post(`/delivery-notes/${id}/close-admin`, payload)).data,
+  downloadPod: async (id) =>
+    (await api.get(`/delivery-notes/${id}/pod`, { responseType: 'blob' })).data,
+  recentPods: async (params = {}) => (await api.get('/delivery-notes/recent-pods', { params })).data,
 };
 
 export const carriersApi = {
@@ -281,7 +300,9 @@ export const vendorItemsApi = {
 
 export const notificationsApi = {
   list: async ({ unread_only = false } = {}) => (await api.get('/notifications', { params: { unread_only } })).data,
+  unreadCount: async () => (await api.get('/notifications/unread-count')).data,
   markRead: async (id) => (await api.post(`/notifications/${id}/read`)).data,
+  markAllRead: async () => (await api.post('/notifications/mark-all-read')).data,
 };
 
 export const outboundGodamApi = {

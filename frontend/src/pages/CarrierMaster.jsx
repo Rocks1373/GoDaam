@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Plus, Search, Trash2, Pencil } from 'lucide-react';
 import { carriersApi, driversApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 const TYPE_OPTIONS = ['GAPP', 'Rental', 'Courier', 'Self Collection'];
 
@@ -23,6 +25,20 @@ export default function CarrierMaster() {
     if (!q) return rows;
     return rows.filter((r) => String(r.carrier_name || '').toLowerCase().includes(q));
   }, [rows, search]);
+
+  const {
+    displayRows: carrierRows,
+    sortKey: sortCarrierKey,
+    direction: carrierDir,
+    requestSort: sortCarrierBy,
+  } = useTableSort(filtered);
+
+  const {
+    displayRows: driverRows,
+    sortKey: sortDriverKey,
+    direction: driverDir,
+    requestSort: sortDriverBy,
+  } = useTableSort(drivers);
 
   const load = async () => {
     setLoading(true);
@@ -194,9 +210,30 @@ export default function CarrierMaster() {
             <table className="min-w-full divide-y divide-gray-200 text-[11px]">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="tbl-th">Carrier</th>
-                  <th className="tbl-th">Type</th>
-                  <th className="tbl-th">Active</th>
+                  <SortTh
+                    columnKey="carrier_name"
+                    sortKey={sortCarrierKey}
+                    direction={carrierDir}
+                    onSort={sortCarrierBy}
+                  >
+                    Carrier
+                  </SortTh>
+                  <SortTh
+                    columnKey="carrier_type"
+                    sortKey={sortCarrierKey}
+                    direction={carrierDir}
+                    onSort={sortCarrierBy}
+                  >
+                    Type
+                  </SortTh>
+                  <SortTh
+                    columnKey="is_active"
+                    sortKey={sortCarrierKey}
+                    direction={carrierDir}
+                    onSort={sortCarrierBy}
+                  >
+                    Active
+                  </SortTh>
                   <th className="tbl-th w-[120px]">Actions</th>
                 </tr>
               </thead>
@@ -208,7 +245,7 @@ export default function CarrierMaster() {
                     </td>
                   </tr>
                 ) : null}
-                {filtered.map((c) => (
+                {carrierRows.map((c) => (
                   <tr
                     key={c.id}
                     className={`hover:bg-gray-50 cursor-pointer ${selectedCarrierId === c.id ? 'bg-primary-50' : ''}`}
@@ -227,7 +264,7 @@ export default function CarrierMaster() {
                     </td>
                   </tr>
                 ))}
-                {!loading && !filtered.length ? (
+                {!loading && !carrierRows.length ? (
                   <tr>
                     <td className="tbl-td text-gray-500" colSpan={4}>
                       No carriers found.
@@ -316,15 +353,23 @@ export default function CarrierMaster() {
             <table className="min-w-full divide-y divide-gray-200 text-[11px]">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="tbl-th">Driver</th>
-                  <th className="tbl-th">Phone</th>
-                  <th className="tbl-th">Vehicle</th>
-                  <th className="tbl-th">Active</th>
+                  <SortTh columnKey="driver_name" sortKey={sortDriverKey} direction={driverDir} onSort={sortDriverBy}>
+                    Driver
+                  </SortTh>
+                  <SortTh columnKey="phone_number" sortKey={sortDriverKey} direction={driverDir} onSort={sortDriverBy}>
+                    Phone
+                  </SortTh>
+                  <SortTh columnKey="vehicle" sortKey={sortDriverKey} direction={driverDir} onSort={sortDriverBy}>
+                    Vehicle
+                  </SortTh>
+                  <SortTh columnKey="is_active" sortKey={sortDriverKey} direction={driverDir} onSort={sortDriverBy}>
+                    Active
+                  </SortTh>
                   <th className="tbl-th w-[120px]">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {drivers.map((d) => (
+                {driverRows.map((d) => (
                   <tr key={d.id} className="hover:bg-gray-50">
                     <td className="tbl-td">{d.driver_name}</td>
                     <td className="tbl-td-nowrap">{d.phone_number || '-'}</td>
@@ -340,7 +385,7 @@ export default function CarrierMaster() {
                     </td>
                   </tr>
                 ))}
-                {!drivers.length ? (
+                {!driverRows.length ? (
                   <tr>
                     <td className="tbl-td text-gray-500" colSpan={5}>
                       No drivers for this carrier.

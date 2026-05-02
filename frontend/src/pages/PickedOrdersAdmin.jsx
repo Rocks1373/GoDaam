@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Eye, FileText } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { pickedOrdersApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 export default function PickedOrdersAdmin() {
   const [rows, setRows] = useState([]);
@@ -19,6 +21,34 @@ export default function PickedOrdersAdmin() {
   useEffect(() => {
     load();
   }, []);
+
+  const pickedListSort = useCallback((r, k) => {
+    if (k === 'id') return Number(r.id) || 0;
+    if (k === 'confirmed_at') {
+      const t = r.confirmed_at ? new Date(r.confirmed_at).getTime() : 0;
+      return Number.isFinite(t) ? t : 0;
+    }
+    return r[k];
+  }, []);
+
+  const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, pickedListSort);
+
+  const txSort = useCallback((t, k) => {
+    if (k === 'picked_qty') return Number(t.picked_qty) || 0;
+    if (k === 'picked_at') {
+      const x = t.picked_at ? new Date(t.picked_at).getTime() : 0;
+      return Number.isFinite(x) ? x : 0;
+    }
+    if (k === 'part') return t.sap_part_number || t.material || '';
+    return t[k];
+  }, []);
+
+  const {
+    displayRows: txDisplayRows,
+    sortKey: txSortKey,
+    direction: txDirection,
+    requestSort: txRequestSort,
+  } = useTableSort(detail?.transactions, txSort);
 
   const openDetail = async (id) => {
     try {
@@ -39,18 +69,32 @@ export default function PickedOrdersAdmin() {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="tbl-th">ID</th>
-              <th className="tbl-th">Delivery</th>
-              <th className="tbl-th">Sales Doc.</th>
-              <th className="tbl-th">Customer Ref.</th>
-              <th className="tbl-th">Customer name</th>
-              <th className="tbl-th">Confirmed by</th>
-              <th className="tbl-th">At</th>
+              <SortTh columnKey="id" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                ID
+              </SortTh>
+              <SortTh columnKey="delivery" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Delivery
+              </SortTh>
+              <SortTh columnKey="sales_doc" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Sales Doc.
+              </SortTh>
+              <SortTh columnKey="customer_reference" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Customer Ref.
+              </SortTh>
+              <SortTh columnKey="customer_name" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Customer name
+              </SortTh>
+              <SortTh columnKey="confirmed_by_user_name" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                Confirmed by
+              </SortTh>
+              <SortTh columnKey="confirmed_at" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                At
+              </SortTh>
               <th className="tbl-th"> </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {rows.map((r) => (
+            {displayRows.map((r) => (
               <tr key={r.id} className="hover:bg-gray-50">
                 <td className="tbl-td-nowrap">{r.id}</td>
                 <td className="tbl-td-nowrap">{r.delivery}</td>
@@ -96,15 +140,25 @@ export default function PickedOrdersAdmin() {
             <table className="min-w-full text-[11px] border">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="tbl-th">User</th>
-                  <th className="tbl-th">Part</th>
-                  <th className="tbl-th">Rack</th>
-                  <th className="tbl-th">Qty</th>
-                  <th className="tbl-th">When</th>
+                  <SortTh columnKey="user_name" sortKey={txSortKey} direction={txDirection} onSort={txRequestSort}>
+                    User
+                  </SortTh>
+                  <SortTh columnKey="part" sortKey={txSortKey} direction={txDirection} onSort={txRequestSort}>
+                    Part
+                  </SortTh>
+                  <SortTh columnKey="rack_location" sortKey={txSortKey} direction={txDirection} onSort={txRequestSort}>
+                    Rack
+                  </SortTh>
+                  <SortTh columnKey="picked_qty" sortKey={txSortKey} direction={txDirection} onSort={txRequestSort}>
+                    Qty
+                  </SortTh>
+                  <SortTh columnKey="picked_at" sortKey={txSortKey} direction={txDirection} onSort={txRequestSort}>
+                    When
+                  </SortTh>
                 </tr>
               </thead>
               <tbody>
-                {(detail.transactions || []).map((t) => (
+                {txDisplayRows.map((t) => (
                   <tr key={t.id}>
                     <td className="tbl-td">{t.user_name}</td>
                     <td className="tbl-td">{t.sap_part_number || t.material}</td>

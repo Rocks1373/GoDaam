@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Truck, Upload, Wand2, ClipboardCheck, Send, Search, Trash2, PackageCheck, Undo2 } from 'lucide-react';
 import { outboundGodamApi, stockByRackApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 export default function OutboundUpload() {
   const fileRef = useRef(null);
@@ -55,6 +57,68 @@ export default function OutboundUpload() {
       return hay.includes(q);
     });
   }, [orders, pageSearch]);
+
+  const orderSortValue = useCallback((o, k) => {
+    if (k === 'id') return Number(o.id) || 0;
+    if (k === 'delivery') return o.delivery || o.outbound_number || '';
+    if (k === 'sales_doc') return o.sales_doc || o.sales_order_number || '';
+    if (k === 'customer_name') return o.customer_name || '';
+    if (k === 'status') return o.status || '';
+    return o[k];
+  }, []);
+
+  const {
+    displayRows: orderDisplayRows,
+    sortKey: orderSortKey,
+    direction: orderDir,
+    requestSort: orderRequestSort,
+  } = useTableSort(filteredOrders, orderSortValue);
+
+  const itemSortValue = useCallback((it, k) => {
+    if (k === 'material') return it.material || it.part_number || '';
+    if (k === 'required_qty') return Number(it.required_qty) || 0;
+    if (k === 'available_qty_main_stock') {
+      const v = it.available_qty_main_stock;
+      if (v === null || v === undefined || v === '-') return Number.NEGATIVE_INFINITY;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : Number.NEGATIVE_INFINITY;
+    }
+    if (k === 'shortage_qty') return Number(it.shortage_qty) || 0;
+    return it[k];
+  }, []);
+
+  const {
+    displayRows: itemDisplayRows,
+    sortKey: itemSortKey,
+    direction: itemDir,
+    requestSort: itemRequestSort,
+  } = useTableSort(detail?.items, itemSortValue);
+
+  const fifoSortValue = useCallback((f, k) => {
+    if (k === 'material') return f.material || f.sap_part_number || '';
+    if (k === 'suggested_qty') return Number(f.suggested_qty) || 0;
+    if (k === 'fifo_sequence') return Number(f.fifo_sequence) || 0;
+    return f[k];
+  }, []);
+
+  const {
+    displayRows: fifoDisplayRows,
+    sortKey: fifoSortKey,
+    direction: fifoDir,
+    requestSort: fifoRequestSort,
+  } = useTableSort(detail?.fifo_suggestions, fifoSortValue);
+
+  const rackSortValue = useCallback((r, k) => {
+    if (k === 'available_qty') return Number(r.available_qty) || 0;
+    return r[k];
+  }, []);
+
+  const {
+    displayRows: rackDisplayRows,
+    sortKey: rackSortKey,
+    direction: rackDir,
+    requestSort: rackRequestSort,
+  } = useTableSort(rackPicker.rows, rackSortValue);
 
   const uploadFile = async (file) => {
     setLoading(true);
@@ -322,16 +386,26 @@ export default function OutboundUpload() {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
-              <th className="tbl-th">ID</th>
-              <th className="tbl-th">Delivery</th>
-              <th className="tbl-th">Sales Doc.</th>
-              <th className="tbl-th">Customer name</th>
-              <th className="tbl-th">Status</th>
+              <SortTh columnKey="id" sortKey={orderSortKey} direction={orderDir} onSort={orderRequestSort}>
+                ID
+              </SortTh>
+              <SortTh columnKey="delivery" sortKey={orderSortKey} direction={orderDir} onSort={orderRequestSort}>
+                Delivery
+              </SortTh>
+              <SortTh columnKey="sales_doc" sortKey={orderSortKey} direction={orderDir} onSort={orderRequestSort}>
+                Sales Doc.
+              </SortTh>
+              <SortTh columnKey="customer_name" sortKey={orderSortKey} direction={orderDir} onSort={orderRequestSort}>
+                Customer name
+              </SortTh>
+              <SortTh columnKey="status" sortKey={orderSortKey} direction={orderDir} onSort={orderRequestSort}>
+                Status
+              </SortTh>
               <th className="tbl-th">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {filteredOrders.map((o) => (
+            {orderDisplayRows.map((o) => (
               <tr key={o.id} className="hover:bg-gray-50">
                 <td className="tbl-td-nowrap">{o.id}</td>
                 <td className="tbl-td-nowrap">{o.delivery || o.outbound_number}</td>
@@ -372,9 +446,9 @@ export default function OutboundUpload() {
                 </td>
               </tr>
             ))}
-            {!filteredOrders.length ? (
+            {!orderDisplayRows.length ? (
               <tr>
-                <td className="px-2 py-3 text-xs text-gray-500" colSpan={5}>
+                <td className="px-2 py-3 text-xs text-gray-500" colSpan={6}>
                   No outbounds found.
                 </td>
               </tr>
@@ -454,18 +528,32 @@ export default function OutboundUpload() {
               <table className="min-w-full text-[11px]">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th className="tbl-th">Material</th>
-                    <th className="tbl-th">SAP PN</th>
-                    <th className="tbl-th">Description</th>
-                    <th className="tbl-th">Req (editable if shortage)</th>
-                    <th className="tbl-th">Main avail</th>
-                    <th className="tbl-th">FIFO</th>
-                    <th className="tbl-th">Shortage</th>
+                    <SortTh columnKey="material" sortKey={itemSortKey} direction={itemDir} onSort={itemRequestSort}>
+                      Material
+                    </SortTh>
+                    <SortTh columnKey="sap_part_number" sortKey={itemSortKey} direction={itemDir} onSort={itemRequestSort}>
+                      SAP PN
+                    </SortTh>
+                    <SortTh columnKey="description" sortKey={itemSortKey} direction={itemDir} onSort={itemRequestSort}>
+                      Description
+                    </SortTh>
+                    <SortTh columnKey="required_qty" sortKey={itemSortKey} direction={itemDir} onSort={itemRequestSort}>
+                      Req (editable if shortage)
+                    </SortTh>
+                    <SortTh columnKey="available_qty_main_stock" sortKey={itemSortKey} direction={itemDir} onSort={itemRequestSort}>
+                      Main avail
+                    </SortTh>
+                    <SortTh columnKey="fifo_status" sortKey={itemSortKey} direction={itemDir} onSort={itemRequestSort}>
+                      FIFO
+                    </SortTh>
+                    <SortTh columnKey="shortage_qty" sortKey={itemSortKey} direction={itemDir} onSort={itemRequestSort}>
+                      Shortage
+                    </SortTh>
                     <th className="tbl-th">Save</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(detail.items || []).map((it) => (
+                  {itemDisplayRows.map((it) => (
                     <tr key={it.id} className={Number(it.shortage_qty || 0) > 0 ? 'bg-red-50' : ''}>
                       <td className="tbl-td">{it.material || it.part_number}</td>
                       <td className="tbl-td">{it.sap_part_number}</td>
@@ -512,15 +600,23 @@ export default function OutboundUpload() {
               <table className="min-w-full text-[11px]">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th className="tbl-th">Item</th>
-                    <th className="tbl-th">Rack</th>
-                    <th className="tbl-th">Suggest qty</th>
-                    <th className="tbl-th">Seq</th>
+                    <SortTh columnKey="material" sortKey={fifoSortKey} direction={fifoDir} onSort={fifoRequestSort}>
+                      Item
+                    </SortTh>
+                    <SortTh columnKey="rack_location" sortKey={fifoSortKey} direction={fifoDir} onSort={fifoRequestSort}>
+                      Rack
+                    </SortTh>
+                    <SortTh columnKey="suggested_qty" sortKey={fifoSortKey} direction={fifoDir} onSort={fifoRequestSort}>
+                      Suggest qty
+                    </SortTh>
+                    <SortTh columnKey="fifo_sequence" sortKey={fifoSortKey} direction={fifoDir} onSort={fifoRequestSort}>
+                      Seq
+                    </SortTh>
                     <th className="tbl-th">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(detail.fifo_suggestions || []).map((f) => (
+                  {fifoDisplayRows.map((f) => (
                     <tr key={f.id}>
                       <td className="tbl-td">{f.material || f.sap_part_number}</td>
                       <td className="tbl-td-nowrap">{f.rack_location}</td>
@@ -582,15 +678,23 @@ export default function OutboundUpload() {
                   <table className="min-w-full text-[11px]">
                     <thead className="bg-white">
                       <tr>
-                        <th className="tbl-th">Rack</th>
-                        <th className="tbl-th">Part</th>
-                        <th className="tbl-th">SAP</th>
-                        <th className="tbl-th">Avail</th>
+                        <SortTh columnKey="rack_location" sortKey={rackSortKey} direction={rackDir} onSort={rackRequestSort}>
+                          Rack
+                        </SortTh>
+                        <SortTh columnKey="part_number" sortKey={rackSortKey} direction={rackDir} onSort={rackRequestSort}>
+                          Part
+                        </SortTh>
+                        <SortTh columnKey="sap_part_number" sortKey={rackSortKey} direction={rackDir} onSort={rackRequestSort}>
+                          SAP
+                        </SortTh>
+                        <SortTh columnKey="available_qty" sortKey={rackSortKey} direction={rackDir} onSort={rackRequestSort}>
+                          Avail
+                        </SortTh>
                         <th className="tbl-th">Action</th>
                       </tr>
                     </thead>
                     <tbody className="bg-white">
-                      {(rackPicker.rows || []).map((r) => (
+                      {rackDisplayRows.map((r) => (
                         <tr key={r.id} className="hover:bg-gray-50">
                           <td className="tbl-td-nowrap">{r.rack_location}</td>
                           <td className="tbl-td-nowrap">{r.part_number}</td>

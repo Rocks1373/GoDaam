@@ -29,6 +29,22 @@ export type StockOverviewResponse = {
   lines: StockOverviewLine[];
 };
 
+export type MobileSummary = {
+  notifications_unread: number;
+  orders_unseen: number;
+  /** Inbound batches that still have remaining qty to put away */
+  inbound_putaway_pending: number;
+};
+
+export async function getMobileSummary() {
+  const res = await api.get<MobileSummary>('/mobile/summary');
+  return res.data;
+}
+
+export async function markOrderSeen(orderId: number) {
+  await api.post(`/mobile/orders/${orderId}/seen`);
+}
+
 export async function listOrders() {
   const res = await api.get('/mobile/orders');
   return res.data as Record<string, unknown>[];

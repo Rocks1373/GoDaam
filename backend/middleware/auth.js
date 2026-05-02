@@ -37,6 +37,21 @@ function requirePermission(key) {
   };
 }
 
+/** True if the user has at least one of the given permission keys (admin always passes). */
+function requireAnyPermission(keys) {
+  const list = Array.isArray(keys) ? keys : [keys];
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const role = String(req.user.role || '').toLowerCase();
+    if (role === 'admin') return next();
+    const perms = req.user.permissions || {};
+    for (const k of list) {
+      if (perms[k]) return next();
+    }
+    return res.status(403).json({ error: 'Forbidden' });
+  };
+}
+
 /** Mobile routes: must allow mobile access (JWT snapshot). Admin passes. */
 function requireMobileAccess(req, res, next) {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
@@ -61,6 +76,7 @@ module.exports = {
   requireAuth,
   requireAdmin,
   requirePermission,
+  requireAnyPermission,
   requireMobileAccess,
   requireWebAccess,
   JWT_SECRET,

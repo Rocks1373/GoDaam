@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Search, Printer, CheckCircle2 } from 'lucide-react';
-import { carriersApi, customersApi, deliveryNotesApi } from '../services/api';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Search, Printer, CheckCircle2, FileSpreadsheet } from 'lucide-react';
+import { buildDeliveryNoteFilename, downloadDeliveryNoteExcel } from '../utils/deliveryNoteExport';
+import { authApi, carriersApi, customersApi, deliveryNotesApi } from '../services/api';
 import { useLocation } from 'react-router-dom';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 export default function DeliveryNote() {
   const location = useLocation();
@@ -43,6 +46,10 @@ export default function DeliveryNote() {
   const [deliveryToCity, setDeliveryToCity] = useState('');
   const [deliveryToAddrId, setDeliveryToAddrId] = useState('');
   const [deliveryToPanel, setDeliveryToPanel] = useState('main');
+  const [me, setMe] = useState(null);
+  const [timeline, setTimeline] = useState(null);
+  const [adminCloseOverride, setAdminCloseOverride] = useState(false);
+  const [showAdminCloseDialog, setShowAdminCloseDialog] = useState(false);
   const [addAddrForm, setAddAddrForm] = useState({
     city_name: '',
     address: '',
@@ -60,6 +67,41 @@ export default function DeliveryNote() {
   });
 
   const trim = (v) => String(v ?? '').trim();
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await authApi.me();
+        setMe(r.user);
+      } catch {
+        setMe(null);
+      }
+    })();
+  }, []);
+
+  const fmtDt = (v) => {
+    if (!v) return '—';
+    try {
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return String(v);
+      return d.toLocaleString();
+    } catch {
+      return String(v);
+    }
+  };
+
+  const refreshTimeline = async (id) => {
+    if (!id) {
+      setTimeline(null);
+      return;
+    }
+    try {
+      const t = await deliveryNotesApi.getTimeline(id);
+      setTimeline(t);
+    } catch {
+      setTimeline(null);
+    }
+  };
 
   const filteredDeliveryAddresses = useMemo(() => {
     const list = deliveryToCtx?.addresses || [];
@@ -81,9 +123,52 @@ export default function DeliveryNote() {
     else if (deliveryToAddrId && !list.some((a) => String(a.id) === String(deliveryToAddrId))) setDeliveryToAddrId('');
   }, [deliveryToCity, deliveryToCtx, deliveryToAddrId]);
 
-  const hasInvoice = Boolean(String(dn?.invoice_number || '').trim());
+  const effectiveInvoice = useMemo(
+    () => trim(dn?.invoice_number) || trim(dn?.outbound_invoice_number),
+    [dn?.invoice_number, dn?.outbound_invoice_number]
+  );
+  const hasInvoice = Boolean(effectiveInvoice);
   const hasPackageType = Boolean(String(dn?.package_type || '').trim());
   const hasTransportation = Boolean(String(dn?.transportation_type || '').trim());
+
+  const isGapp = String(dn?.transportation_type || '').trim().toLowerCase() === 'gapp';
+  const isAdmin = String(me?.role || '').toLowerCase() === 'admin';
+  const canUploadOutbound = Boolean(me?.permissions?.can_upload_outbound) || isAdmin;
+  const dnLocked =
+    Number(dn?.is_closed) === 1 || String(dn?.delivery_status || '').toLowerCase() === 'closed';
+
+  const packageValidForConfirm = useMemo(() => {
+    if (!dn) return false;
+    if (!trim(dn.invoice_number) && !trim(dn.outbound_invoice_number)) return false;
+    const pt = String(dn.package_type || '').trim().toLowerCase();
+    if (!pt) return false;
+    if (pt === 'ignore') return true;
+    if (pt === 'pallet') return (Number(dn.pallet_qty) || 0) > 0;
+    if (pt === 'box') return (Number(dn.box_qty) || 0) > 0;
+    return false;
+  }, [dn]);
+
+  const gappTransportComplete = useMemo(() => {
+    if (!dn || !isGapp) return true;
+    const hasDriver = Boolean(String(dn.driver_name || '').trim()) || Boolean(dn.driver_id);
+    const hasPhone = Boolean(String(dn.driver_mobile || '').trim());
+    const hasVeh = Boolean(String(dn.vehicle || '').trim());
+    return hasDriver && hasPhone && hasVeh;
+  }, [dn, isGapp]);
+
+  const gappCanConfirm = useMemo(() => {
+    if (!dn || !isGapp || dnLocked) return false;
+    if (dn.confirmed_at) return false;
+    const addrOk = Boolean(String(dn.delivery_address || '').trim());
+    return addrOk && packageValidForConfirm && gappTransportComplete;
+  }, [dn, isGapp, dnLocked, packageValidForConfirm, gappTransportComplete]);
+
+  const gappMarkDeliveredBlocked = useMemo(() => {
+    if (!dn || !isGapp) return false;
+    if (!dn.confirmed_at) return true;
+    if (!Number(dn.is_closed)) return true;
+    return false;
+  }, [dn, isGapp]);
 
   const load = async () => {
     setError('');
@@ -94,10 +179,11 @@ export default function DeliveryNote() {
       setDnId(id);
       const full = await deliveryNotesApi.get(id);
       setDn(full);
+      await refreshTimeline(id);
 
-      // Invoice + package required before deliver
-      if (!String(full?.invoice_number || '').trim() || !String(full?.package_type || '').trim()) {
-        setInvoiceDraft(String(full?.invoice_number || ''));
+      const invOk = trim(full?.invoice_number) || trim(full?.outbound_invoice_number);
+      if (!invOk || !String(full?.package_type || '').trim()) {
+        setInvoiceDraft(trim(full?.invoice_number) || trim(full?.outbound_invoice_number));
         setPackageTypeDraft(String(full?.package_type || 'Ignore'));
         const qty = String(full?.package_type || '').toLowerCase() === 'pallet' ? full?.pallet_qty : full?.box_qty;
         setPackageQtyDraft(qty ? String(qty) : '');
@@ -122,6 +208,10 @@ export default function DeliveryNote() {
 
   const saveInvoiceFromModal = async () => {
     if (!dnId) return;
+    if (dn && Number(dn.is_closed) === 1) {
+      alert('Delivery note is closed — no further edits.');
+      return;
+    }
     try {
       await deliveryNotesApi.savePackageInfo(dnId, {
         invoice_number: invoiceDraft.trim(),
@@ -141,6 +231,10 @@ export default function DeliveryNote() {
   const deliver = async () => {
     try {
       if (!dnId) return;
+      if (gappMarkDeliveredBlocked) {
+        alert('GAPP: wait for driver close (POD) after Confirm before Mark Delivered.');
+        return;
+      }
       if (!hasTransportation) {
         alert('Transportation Method must be saved before Delivered.');
         setShowTransportPrompt(true);
@@ -154,6 +248,49 @@ export default function DeliveryNote() {
       await deliveryNotesApi.markDelivered(dnId);
       await load();
       alert('Marked as Delivered. Stock deducted (double deduction prevented).');
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    }
+  };
+
+  const handleConfirmForDelivery = async () => {
+    if (!dnId) return;
+    try {
+      const data = await deliveryNotesApi.confirmForDelivery(dnId);
+      setDn(data);
+      await refreshTimeline(dnId);
+      alert('Confirmed for delivery. Driver has been notified.');
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    }
+  };
+
+  const handleViewPod = async () => {
+    if (!dnId) return;
+    try {
+      const blob = await deliveryNotesApi.downloadPod(dnId);
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    }
+  };
+
+  const runAdminClose = async () => {
+    if (!dnId) return;
+    const hasPod = Boolean(String(dn?.pod_file_path || '').trim());
+    if (!hasPod && !adminCloseOverride) {
+      alert('Add POD on the task or check Admin override.');
+      return;
+    }
+    try {
+      const data = await deliveryNotesApi.closeAdmin(dnId, { admin_override: adminCloseOverride && !hasPod });
+      setDn(data);
+      await refreshTimeline(dnId);
+      setShowAdminCloseDialog(false);
+      setAdminCloseOverride(false);
+      alert('Order closed and locked.');
     } catch (e) {
       alert(e?.response?.data?.error || e.message);
     }
@@ -386,9 +523,29 @@ export default function DeliveryNote() {
     volume_cbm: 0,
   };
 
+  const invoiceForPrint = trim(view?.invoice_number) || trim(view?.outbound_invoice_number) || '';
+
   /** Only real line items (no blank filler rows); footer total = sum of qty. */
-  const displayItems = (view?.items || []).filter((it) => it != null);
-  const totalDnQty = displayItems.reduce((sum, it) => sum + (Number(it?.qty) || 0), 0);
+  const lineItems = useMemo(() => (view?.items || []).filter((it) => it != null), [view?.items]);
+
+  const dnItemSortValue = useCallback((it, k) => {
+    if (k === 'qty') return Number(it?.qty) || 0;
+    if (k === 'part_number') return String(it?.part_number || '');
+    if (k === 'description') return String(it?.description || '');
+    if (k === 'uom') return String(it?.uom || '');
+    if (k === 'serial_no') return String(it?.serial_no || '');
+    if (k === 'condition') return String(it?.condition_text || it?.condition || '');
+    return it?.[k];
+  }, []);
+
+  const {
+    displayRows: displayItems,
+    sortKey: dnItemSortKey,
+    direction: dnItemDir,
+    requestSort: dnItemRequestSort,
+  } = useTableSort(lineItems, dnItemSortValue);
+
+  const totalDnQty = lineItems.reduce((sum, it) => sum + (Number(it?.qty) || 0), 0);
 
   const packageText = useMemo(() => {
     const pt = String(view?.package_type || '').toLowerCase();
@@ -403,11 +560,39 @@ export default function DeliveryNote() {
     return '';
   }, [view?.package_type, view?.pallet_qty, view?.box_qty]);
 
+  const handlePrintA4 = () => {
+    const prevTitle = document.title;
+    const base = buildDeliveryNoteFilename(view, '.pdf').replace(/\.pdf$/i, '');
+    document.title = base;
+    const restore = () => {
+      document.title = prevTitle;
+    };
+    window.addEventListener('afterprint', restore, { once: true });
+    window.print();
+    setTimeout(restore, 3000);
+  };
+
+  const handleExportExcel = () => {
+    if (!dn) return;
+    try {
+      downloadDeliveryNoteExcel({
+        view,
+        displayItems,
+        packageText,
+        transportRenderLines,
+      });
+    } catch (e) {
+      alert(e?.message || 'Export failed');
+    }
+  };
+
   return (
     <div>
       <div className="mb-2 dn-no-print">
         <h2 className="text-base font-bold text-gray-900 leading-tight">Delivery Note (DN)</h2>
-        <p className="text-[11px] text-gray-600">A4 print layout (strict structure, Excel-like borders)</p>
+        <p className="text-[11px] text-gray-600">
+          A4 print / Save as PDF, and Excel export (same structure). File names: RG_Invoice_Outbound_CustomerPO_CustomerName_GappPO
+        </p>
       </div>
 
       {/* Search bar (required on screens) */}
@@ -455,27 +640,92 @@ export default function DeliveryNote() {
               className="btn-secondary"
               type="button"
               onClick={openTransport}
-              disabled={!dn}
-              title={!dn ? 'Load a delivery note first' : ''}
+              disabled={!dn || dnLocked}
+              title={!dn ? 'Load a delivery note first' : dnLocked ? 'Closed — no changes' : ''}
             >
               Transportation Method
             </button>
-            <button className="btn-secondary flex items-center gap-1" type="button" onClick={() => window.print()}>
+            <button className="btn-secondary flex items-center gap-1" type="button" onClick={handlePrintA4}>
               <Printer size={14} />
-              Print A4
-            </button>
-            <button className="btn-secondary" type="button" disabled={!dn} onClick={openDeliveryTo}>
-              Delivery To
-            </button>
-            <button className="btn-secondary" type="button" onClick={toggleHold} disabled={!dn}>
-              {String(dn?.status || '').toLowerCase() === 'on hold' ? 'Resume from Hold' : 'Hold'}
+              Print / Save PDF
             </button>
             <button
               className="btn-secondary flex items-center gap-1"
               type="button"
+              onClick={handleExportExcel}
+              disabled={!dn}
+              title={!dn ? 'Load a delivery note first' : 'Download Excel in the same structure as the delivery note'}
+            >
+              <FileSpreadsheet size={14} />
+              Export Excel
+            </button>
+            <button
+              className="btn-secondary"
+              type="button"
+              disabled={!dn || dnLocked}
+              onClick={openDeliveryTo}
+              title={dnLocked ? 'Closed — no changes' : ''}
+            >
+              Delivery To
+            </button>
+            <button
+              className="btn-secondary"
+              type="button"
+              onClick={toggleHold}
+              disabled={!dn || dnLocked}
+              title={dnLocked ? 'Closed — no changes' : ''}
+            >
+              {String(dn?.status || '').toLowerCase() === 'on hold' ? 'Resume from Hold' : 'Hold'}
+            </button>
+            {isGapp && canUploadOutbound ? (
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!dn || dnLocked || !gappCanConfirm}
+                onClick={handleConfirmForDelivery}
+                title={
+                  dnLocked
+                    ? 'Closed'
+                    : !gappCanConfirm
+                      ? 'Complete Delivery To, GAPP driver/vehicle, and package info'
+                      : 'Send confirmation to driver'
+                }
+              >
+                Confirm for Delivery
+              </button>
+            ) : null}
+            {isAdmin ? (
+              <button
+                type="button"
+                className="btn-secondary border-amber-300"
+                disabled={!dn || dnLocked}
+                onClick={() => {
+                  if (dnLocked) return;
+                  setShowAdminCloseDialog(true);
+                }}
+                title="Admin: lock order (POD or override)"
+              >
+                Close Order (Admin)
+              </button>
+            ) : null}
+            <button
+              className="btn-secondary flex items-center gap-1"
+              type="button"
               onClick={deliver}
-              disabled={!dn || !hasInvoice}
-              title={!dn ? 'Load a delivery note first' : !hasInvoice ? 'Add an invoice number before marking delivered' : ''}
+              disabled={!dn || !hasInvoice || !hasPackageType || !hasTransportation || gappMarkDeliveredBlocked}
+              title={
+                !dn
+                  ? 'Load a delivery note first'
+                  : !hasInvoice
+                    ? 'Add an invoice number before marking delivered'
+                    : !hasPackageType
+                      ? 'Package type is required'
+                      : !hasTransportation
+                        ? 'Save transportation method first'
+                        : gappMarkDeliveredBlocked
+                          ? 'GAPP: Confirm for delivery → driver uploads POD → driver closes (or Admin close). Then Mark Delivered.'
+                          : ''
+              }
             >
               <CheckCircle2 size={14} />
               Mark Delivered
@@ -503,12 +753,53 @@ export default function DeliveryNote() {
             </button>
           </div>
         ) : null}
-        {dn && hasInvoice ? (
+        {dn && hasInvoice && !dnLocked ? (
           <div className="mt-2">
-            <button type="button" className="text-sm text-gray-600 underline" onClick={() => { setInvoiceDraft(dn.header?.invoice_number || ''); setShowInvoicePrompt(true); }}>
+            <button
+              type="button"
+              className="text-sm text-gray-600 underline"
+              onClick={() => {
+                setInvoiceDraft(trim(dn.invoice_number) || trim(dn.outbound_invoice_number));
+                setShowInvoicePrompt(true);
+              }}
+            >
               Change invoice number
             </button>
           </div>
+        ) : null}
+        {dn ? (
+          <>
+            <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50/80 p-3 text-[11px] text-gray-800">
+              <div className="font-bold text-gray-900 mb-1.5">Delivery status</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+                <span>
+                  <span className="text-gray-500">Workflow: </span>
+                  <strong>{String(dn.delivery_status || 'Draft')}</strong>
+                  {Number(dn.is_closed) ? <span className="ml-1 text-amber-800">(locked)</span> : null}
+                </span>
+                {isGapp && !dn.confirmed_at ? (
+                  <span className="text-amber-800">GAPP requires Confirm before driver flow and Mark Delivered.</span>
+                ) : null}
+              </div>
+              {timeline ? (
+                <div className="mt-2 pt-2 border-t border-gray-200">
+                  <div className="font-semibold text-gray-800 mb-1">Timeline</div>
+                  <ul className="space-y-0.5 list-disc list-inside text-gray-700">
+                    <li>Confirmed: {fmtDt(timeline.confirmed_at)}</li>
+                    <li>Opened by driver: {fmtDt(timeline.driver_opened_at)}</li>
+                    <li>Pickup: {fmtDt(timeline.pickup_confirmed_at)}</li>
+                    <li>POD uploaded: {fmtDt(timeline.pod_uploaded_at)}</li>
+                    <li>Closed: {fmtDt(timeline.closed_at)}</li>
+                  </ul>
+                  {timeline.pod_file_path ? (
+                    <button type="button" className="mt-1 text-blue-700 underline" onClick={handleViewPod}>
+                      View POD
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </>
         ) : null}
       </div>
 
@@ -781,6 +1072,61 @@ export default function DeliveryNote() {
               </button>
               <button type="button" className="btn-primary" onClick={saveTransport}>
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showAdminCloseDialog && dn ? (
+        <div
+          className="dn-no-print fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="bg-white rounded-xl shadow-lg max-w-md w-full p-5 border">
+            <h3 className="text-sm font-bold text-gray-900">Close order (admin)</h3>
+            <p className="text-sm text-gray-600 mt-2">
+              Closing will lock the order permanently. Stock is not adjusted until you use Mark Delivered. Continue only if
+              the delivery workflow is complete or you intentionally override.
+            </p>
+            {String(dn.pod_file_path || '').trim() ? (
+              <p className="text-xs text-green-800 mt-2">POD is on file — you may close.</p>
+            ) : (
+              <label className="flex items-center gap-2 mt-3 text-sm">
+                <input
+                  type="checkbox"
+                  checked={adminCloseOverride}
+                  onChange={(e) => setAdminCloseOverride(e.target.checked)}
+                />
+                Admin override (close without POD)
+              </label>
+            )}
+            <div className="flex flex-wrap gap-2 mt-4 justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setShowAdminCloseDialog(false);
+                  setAdminCloseOverride(false);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary bg-amber-700 hover:bg-amber-800 border-amber-800"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      'Closing will lock the order permanently. Continue?'
+                    )
+                  ) {
+                    runAdminClose();
+                  }
+                }}
+              >
+                Close order
               </button>
             </div>
           </div>
@@ -1221,7 +1567,7 @@ export default function DeliveryNote() {
                   ['GAPP PO', view?.gapp_po || ''],
                   ['CUSTOMER PO', view?.customer_po || ''],
                   ['OUTBOUND', view?.outbound_number || ''],
-                  ['INVOICE', view?.invoice_number || ''],
+                  ['INVOICE', invoiceForPrint],
                 ].map(([k, v]) => (
                   <div className="dn-headrow" role="row" key={k}>
                     <div className="dn-headkey" role="cell">
@@ -1304,12 +1650,59 @@ export default function DeliveryNote() {
             <thead>
               <tr>
                 <th style={{ width: '6%' }}>Item #</th>
-                <th style={{ width: '18%' }}>Part Number</th>
-                <th>Description</th>
-                <th style={{ width: '8%' }}>Qty</th>
-                <th style={{ width: '8%' }}>UOM</th>
-                <th style={{ width: '14%' }}>Serial No.</th>
-                <th style={{ width: '12%' }}>Condition</th>
+                <SortTh
+                  bare
+                  columnKey="part_number"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '18%' }}
+                >
+                  Part Number
+                </SortTh>
+                <SortTh bare columnKey="description" sortKey={dnItemSortKey} direction={dnItemDir} onSort={dnItemRequestSort}>
+                  Description
+                </SortTh>
+                <SortTh
+                  bare
+                  columnKey="qty"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '8%' }}
+                >
+                  Qty
+                </SortTh>
+                <SortTh
+                  bare
+                  columnKey="uom"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '8%' }}
+                >
+                  UOM
+                </SortTh>
+                <SortTh
+                  bare
+                  columnKey="serial_no"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '14%' }}
+                >
+                  Serial No.
+                </SortTh>
+                <SortTh
+                  bare
+                  columnKey="condition"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '12%' }}
+                >
+                  Condition
+                </SortTh>
               </tr>
             </thead>
             <tbody>
@@ -1383,7 +1776,9 @@ export default function DeliveryNote() {
       {/* Print CSS */}
       <style>{`
         .dn-wrap { overflow: hidden; }
+        /* border-box: padding counts inside width/height so 297mm page is truly one A4 sheet */
         .dn-page {
+          box-sizing: border-box;
           width: 210mm;
           min-height: 297mm;
           margin: 0 auto;
@@ -1486,11 +1881,46 @@ export default function DeliveryNote() {
           pointer-events: none;
         }
 
-        @page { size: A4; margin: 0; }
+        /* A4: let the browser apply sheet margins; content then fits the printable area */
+        @page {
+          size: A4;
+          margin: 10mm;
+        }
         @media print {
-          body { background: #fff !important; }
-          .dn-wrap { border: none !important; box-shadow: none !important; padding: 0 !important; }
-          .dn-page { margin: 0; box-shadow: none; border: none; }
+          html, body {
+            background: #fff !important;
+            height: auto !important;
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+          body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+          .dn-wrap {
+            border: none !important;
+            box-shadow: none !important;
+            padding: 0 !important;
+            overflow: visible !important;
+            max-width: none !important;
+          }
+          /* Single page when content fits: no forced full-page min-height (that caused a blank 2nd page) */
+          .dn-page {
+            box-sizing: border-box !important;
+            width: 100% !important;
+            min-height: auto !important;
+            height: auto !important;
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            box-shadow: none !important;
+            border: none !important;
+            page-break-after: auto;
+          }
+          /* Long tables: continue on additional sheets only when needed */
+          .dn-grid {
+            page-break-inside: auto;
+          }
+          .dn-grid thead {
+            display: table-header-group;
+          }
           .btn-primary, .btn-secondary, header, aside, .dn-screen-toolbar, .dn-no-print { display: none !important; }
         }
       `}</style>

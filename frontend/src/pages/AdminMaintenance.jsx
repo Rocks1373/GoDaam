@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Database, RefreshCw, Trash2 } from 'lucide-react';
 import { maintenanceApi } from '../services/api';
+import { useTableSort } from '../hooks/useTableSort';
+import SortTh from '../components/SortTh';
 
 const CONFIRM_PHRASE = 'DELETE ALL OUTBOUND DATA';
 
@@ -82,6 +84,9 @@ export default function AdminMaintenance() {
     browseRows.forEach((r) => Object.keys(r).forEach((k) => keys.add(k)));
     return [...keys].sort();
   }, [browseRows]);
+
+  const { displayRows: browseDisplayRows, sortKey: browseSortKey, direction: browseDir, requestSort: browseRequestSort } =
+    useTableSort(Array.isArray(browseRows) ? browseRows : []);
 
   return (
     <div className="max-w-6xl mx-auto px-3 py-4">
@@ -200,14 +205,22 @@ export default function AdminMaintenance() {
               <thead className="bg-gray-100 sticky top-0">
                 <tr>
                   {browseColumns.map((c) => (
-                    <th key={c} className="text-left px-2 py-1 font-bold border-b border-gray-200 whitespace-nowrap">
+                    <SortTh
+                      key={c}
+                      bare
+                      columnKey={c}
+                      sortKey={browseSortKey}
+                      direction={browseDir}
+                      onSort={browseRequestSort}
+                      className="text-left px-2 py-1 font-bold border-b border-gray-200 whitespace-nowrap"
+                    >
                       {c}
-                    </th>
+                    </SortTh>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {browseRows.map((row, i) => (
+                {browseDisplayRows.map((row, i) => (
                   <tr key={i} className="odd:bg-white even:bg-gray-50">
                     {browseColumns.map((c) => (
                       <td key={c} className="px-2 py-1 border-b border-gray-100 align-top max-w-[200px] truncate" title={String(row[c])}>
