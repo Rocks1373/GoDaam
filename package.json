@@ -9,7 +9,9 @@
     "dev": "concurrently -n backend,frontend -c green,cyan \"npm:dev --workspace backend\" \"npm:dev --workspace frontend\"",
     "build": "npm run build --workspace frontend",
     "start": "npm run start --workspace backend",
-    "android:emu": "bash scripts/run-android-emulator.sh"
+    "android:emu": "bash scripts/run-android-emulator.sh",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d --build"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

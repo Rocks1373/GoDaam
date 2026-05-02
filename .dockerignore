@@ -1,0 +1,8 @@
+.git
+godam-mobile
+node_modules
+**/.env
+**/warehouse.db
+**/uploads
+*.md
+.claude
