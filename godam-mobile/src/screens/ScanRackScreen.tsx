@@ -24,7 +24,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { extractTextFromImageSafe, getOcrUnavailableHint, isOcrNativeUsable } from '../utils/ocrOptional';
 import { extractTextRemote } from '../api/ocrApi';
-import { API_ORIGIN } from '../api/client';
+import { getDisplayApiOrigin } from '../api/client';
 import { ScanRoiOverlay } from '../components/ScanRoiOverlay';
 import { ScanRoiToolbar } from '../components/ScanRoiToolbar';
 import {
@@ -208,7 +208,7 @@ export default function ScanRackScreen() {
           const detail = err.response?.data?.error || err.message || 'Request failed';
           Alert.alert(
             'Server OCR failed',
-            `Check that the warehouse backend is running and this device can reach your API (${API_ORIGIN}). On a physical phone use your computer's LAN IP in EXPO_PUBLIC_API_URL, not localhost. You can also build the app with on-device OCR: npx expo run:ios or expo run:android.\n\n${detail}`
+            `Check that the warehouse backend is running and this device can reach your API (${getDisplayApiOrigin()}). Set Server setup / Profile if the URL changed.\n\n${detail}`
           );
           return;
         }
@@ -291,7 +291,7 @@ export default function ScanRackScreen() {
   const ocrEnabled = Platform.OS !== 'web';
   const ocrServerHint =
     Platform.OS !== 'web' && !isOcrNativeUsable()
-      ? `OCR via server (${API_ORIGIN}) — backend must be running; phone cannot use localhost.`
+      ? `OCR via server (${getDisplayApiOrigin()}) — backend must be running.`
       : null;
 
   return (

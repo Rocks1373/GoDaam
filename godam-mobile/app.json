@@ -2,21 +2,25 @@
   "expo": {
     "name": "GoDaam",
     "slug": "godam-mobile",
-    "version": "1.0.0",
-    "extra": {
-      "apiUrl": "http://localhost:3001"
-    },
+    "version": "1.0.1",
+    "extra": {},
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anonymous.godammobile",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
     },
     "android": {
       "adaptiveIcon": {

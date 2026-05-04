@@ -4,7 +4,7 @@ import { outboundGodamApi, stockByRackApi } from '../services/api';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
-export default function OutboundUpload() {
+export default function OutboundUpload({ currentUser }) {
   const fileRef = useRef(null);
   const [uploadedOrders, setUploadedOrders] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -16,6 +16,8 @@ export default function OutboundUpload() {
   const [editQty, setEditQty] = useState({});
   const [editFifoQty, setEditFifoQty] = useState({});
   const [rackPicker, setRackPicker] = useState({ open: false, fifoId: null, rows: [], q: '' });
+  const [manualPick, setManualPick] = useState({ override: false, reason: '' });
+  const isAdmin = String(currentUser?.role || '').toLowerCase() === 'admin';
 
   const loadOrders = async () => {
     setLoading(true);
@@ -268,6 +270,36 @@ export default function OutboundUpload() {
     }
   };
 
+  const confirmManualPick = async () => {
+    if (!detail?.id) return;
+    if (!isAdmin) {
+      setMsg('Manual Pick is Admin only.');
+      return;
+    }
+    const reason = manualPick.reason.trim();
+    if (manualPick.override && !reason) {
+      setMsg('Override reason is required.');
+      return;
+    }
+    if (!confirm('Confirm manual pick for this outbound using the FIFO suggestions shown?')) return;
+    setLoading(true);
+    setMsg('');
+    try {
+      const res = await outboundGodamApi.manualPick(detail.id, {
+        override: manualPick.override,
+        reason: manualPick.override ? reason : '',
+      });
+      setDetail(res.order || (await outboundGodamApi.get(detail.id)));
+      setMsg(`Manual pick completed. Status: ${res.status}`);
+      setManualPick({ override: false, reason: '' });
+      await loadOrders();
+    } catch (e) {
+      setMsg(e.response?.data?.error || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const markDelivered = async () => {
     if (!detail?.id) return;
     if (
@@ -417,7 +449,7 @@ export default function OutboundUpload() {
                     <button type="button" className="btn-secondary !py-1 !px-2" onClick={() => loadDetail(o.id)}>
                       Edit / workflow
                     </button>
-                    {String(o.status || '').toLowerCase() === 'uploaded' ? (
+                    {isAdmin && String(o.status || '').toLowerCase() === 'uploaded' ? (
                       <button
                         type="button"
                         className="btn-primary !py-1 !px-2 flex items-center gap-1"
@@ -487,10 +519,24 @@ export default function OutboundUpload() {
                 <Wand2 size={14} />
                 Generate FIFO
               </button>
-              <button type="button" className="btn-primary flex items-center gap-1" onClick={sendForPick} disabled={loading}>
-                <Send size={14} />
-                Send for pick
-              </button>
+              {isAdmin ? (
+                <button type="button" className="btn-primary flex items-center gap-1" onClick={sendForPick} disabled={loading}>
+                  <Send size={14} />
+                  Send for pick
+                </button>
+              ) : null}
+              {isAdmin ? (
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center gap-1 border-blue-200"
+                  onClick={confirmManualPick}
+                  disabled={loading || String(detail.status || '').toLowerCase() === 'picked'}
+                  title="Admin-only pick without mobile scanning"
+                >
+                  <PackageCheck size={14} />
+                  Manual Pick
+                </button>
+              ) : null}
               {String(detail.status || '').toLowerCase() === 'delivered' ? (
                 <button
                   type="button"
@@ -515,6 +561,27 @@ export default function OutboundUpload() {
                 </button>
               )}
             </div>
+
+            {isAdmin ? (
+              <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 p-3">
+                <label className="flex items-center gap-2 text-[11px] font-bold text-blue-900">
+                  <input
+                    type="checkbox"
+                    checked={manualPick.override}
+                    onChange={(e) => setManualPick((s) => ({ ...s, override: e.target.checked }))}
+                  />
+                  Admin override
+                </label>
+                {manualPick.override ? (
+                  <input
+                    className="input-field mt-2"
+                    placeholder="Override reason"
+                    value={manualPick.reason}
+                    onChange={(e) => setManualPick((s) => ({ ...s, reason: e.target.value }))}
+                  />
+                ) : null}
+              </div>
+            ) : null}
 
             {(detail.items || []).some((it) => Number(it.shortage_qty || 0) > 0) ? (
               <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-[11px] text-red-800">

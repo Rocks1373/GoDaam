@@ -893,7 +893,19 @@ export default function DeliveryNote() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3">
               <label className="text-[11px] font-semibold">
                 Transportation Type
-                <select className="input-field mt-1" value={transportType} onChange={(e) => { setTransportType(e.target.value); }}>
+                <select
+                  className="input-field mt-1"
+                  value={transportType}
+                  onChange={(e) => {
+                    setTransportType(e.target.value);
+                    setTransportCarrierId('');
+                    setTransportCarrierName('');
+                    setTransportDriverId('');
+                    setTransportDriverName('');
+                    setTransportDriverMobile('');
+                    setTransportVehicle('');
+                  }}
+                >
                   <option value="">Select…</option>
                   <option value="GAPP">GAPP</option>
                   <option value="Rental">Rental</option>
@@ -990,11 +1002,16 @@ export default function DeliveryNote() {
                         const d = drivers.find((x) => String(x.id) === String(id));
                         setTransportDriverName(d?.driver_name || '');
                         setTransportDriverMobile(d?.phone_number || '');
-                        setTransportVehicle(d?.vehicle || '');
+                        const vt = d?.vehicle_type || '';
+                        const vn = d?.vehicle_number || '';
+                        setTransportVehicle([vt, vn].filter(Boolean).join(' / ') || d?.vehicle || '');
                       }}
                     >
                       <option value="">Select…</option>
-                      {drivers.filter((d) => d.is_active).map((d) => (
+                      {drivers
+                        .filter((d) => d.is_active)
+                        .filter((d) => !transportCarrierId || String(d.carrier_id) === String(transportCarrierId))
+                        .map((d) => (
                         <option key={d.id} value={d.id}>
                           {d.driver_name}
                         </option>
@@ -1029,6 +1046,33 @@ export default function DeliveryNote() {
                     Truck Quantity
                     <input className="input-field mt-1" value={truckQty} onChange={(e) => setTruckQty(e.target.value)} />
                   </label>
+                  <label className="text-[11px] font-semibold sm:col-span-2">
+                    Driver from master (optional)
+                    <select
+                      className="input-field mt-1"
+                      value={transportDriverId}
+                      onChange={(e) => {
+                        const id = e.target.value;
+                        setTransportDriverId(id);
+                        const d = drivers.find((x) => String(x.id) === String(id));
+                        setTransportDriverName(d?.driver_name || '');
+                        setTransportDriverMobile(d?.phone_number || '');
+                        const vt = d?.vehicle_type || '';
+                        const vn = d?.vehicle_number || '';
+                        setTransportVehicle([vt, vn].filter(Boolean).join(' / ') || d?.vehicle || '');
+                      }}
+                    >
+                      <option value="">—</option>
+                      {drivers
+                        .filter((d) => d.is_active)
+                        .filter((d) => !transportCarrierId || String(d.carrier_id) === String(transportCarrierId))
+                        .map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.driver_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <label className="text-[11px] font-semibold">
                     Driver Name (optional)
                     <input className="input-field mt-1" value={transportDriverName} onChange={(e) => setTransportDriverName(e.target.value)} />
@@ -1049,6 +1093,55 @@ export default function DeliveryNote() {
 
               {transportType === 'Self Collection' ? (
                 <>
+                  <label className="text-[11px] font-semibold">
+                    Carrier (optional)
+                    <select
+                      className="input-field mt-1"
+                      value={transportCarrierId}
+                      onChange={(e) => {
+                        const id = e.target.value;
+                        setTransportCarrierId(id);
+                        const c = carriers.find((x) => String(x.id) === String(id));
+                        setTransportCarrierName(c?.carrier_name || '');
+                      }}
+                    >
+                      <option value="">—</option>
+                      {carriers
+                        .filter((c) => String(c.carrier_type || '').toLowerCase() === 'self collection')
+                        .map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.carrier_name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label className="text-[11px] font-semibold">
+                    Driver from master (optional)
+                    <select
+                      className="input-field mt-1"
+                      value={transportDriverId}
+                      onChange={(e) => {
+                        const id = e.target.value;
+                        setTransportDriverId(id);
+                        const d = drivers.find((x) => String(x.id) === String(id));
+                        setTransportDriverName(d?.driver_name || '');
+                        setTransportDriverMobile(d?.phone_number || '');
+                        const vt = d?.vehicle_type || '';
+                        const vn = d?.vehicle_number || '';
+                        setTransportVehicle([vt, vn].filter(Boolean).join(' / ') || d?.vehicle || '');
+                      }}
+                    >
+                      <option value="">—</option>
+                      {drivers
+                        .filter((d) => d.is_active)
+                        .filter((d) => !transportCarrierId || String(d.carrier_id) === String(transportCarrierId))
+                        .map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.driver_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <label className="text-[11px] font-semibold">
                     Collector Name (optional)
                     <input className="input-field mt-1" value={collectorName} onChange={(e) => setCollectorName(e.target.value)} />

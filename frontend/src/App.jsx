@@ -34,7 +34,7 @@ import Notifications from './pages/Notifications';
 import PodInbox from './pages/PodInbox';
 import AdminMaintenance from './pages/AdminMaintenance';
 import Login from './pages/Login';
-import CarrierMaster from './pages/CarrierMaster';
+import TransportationDetails from './pages/TransportationDetails';
 import VendorMaster from './pages/VendorMaster';
 import VendorItems from './pages/VendorItems';
 import InboundReport from './pages/InboundReport';
@@ -528,14 +528,16 @@ function App() {
                         <span className="truncate">SAP Stock Report</span>
                       </NavLink>
 
-                      {user?.role === 'admin' && (
+                      {(user?.role === 'admin' ||
+                        user?.permissions?.can_view_transportation ||
+                        user?.permissions?.can_manage_transportation) && (
                         <>
                           <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
                             <ShieldCheck className="w-3 h-3" />
                             Admin
                           </div>
                           <NavLink
-                            to="/carrier-master"
+                            to="/transportation-details"
                             className={({ isActive }) =>
                               `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
                                 isActive
@@ -545,8 +547,12 @@ function App() {
                             }
                           >
                             <Truck className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Carrier Master</span>
+                            <span className="truncate">Transportation Details</span>
                           </NavLink>
+                        </>
+                      )}
+                      {user?.role === 'admin' && (
+                        <>
                           <NavLink
                             to="/vendor-master"
                             className={({ isActive }) =>
@@ -676,12 +682,13 @@ function App() {
                       <Route path="/main-stock" element={<MainStock />} />
                       <Route path="/stock-by-rack/*" element={<StockByRack />} />
                       <Route path="/pick-suggestion" element={<Navigate to="/dashboard" replace />} />
-                      <Route path="/outbound-upload" element={<OutboundUpload />} />
+                      <Route path="/outbound-upload" element={<OutboundUpload currentUser={user} />} />
                       <Route path="/picked-orders" element={<PickedOrdersAdmin />} />
                       <Route path="/customers" element={<Customers />} />
                       <Route path="/delivery-note" element={<DeliveryNote />} />
                       <Route path="/pod-inbox" element={<PodInbox />} />
-                      <Route path="/carrier-master" element={<CarrierMaster />} />
+                      <Route path="/carrier-master" element={<Navigate to="/transportation-details" replace />} />
+                      <Route path="/transportation-details" element={<TransportationDetails user={user} />} />
                       <Route path="/vendor-master" element={<VendorMaster />} />
                       <Route path="/vendor-items" element={<VendorItems />} />
                       <Route path="/users" element={<UsersAdmin />} />

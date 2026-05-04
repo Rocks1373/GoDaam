@@ -1,13 +1,10 @@
-import axios from 'axios';
+import axios, { type AxiosError } from 'axios';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
-import Constants from 'expo-constants';
 
-/**
- * Some AVD / Play Store images report `Device.isDevice === true` even on emulators.
- * Heuristics match standard Android Studio device names (sdk_gphone*, "Android SDK built for*").
- * Physical devices: use a LAN IP in EXPO_PUBLIC_API_URL — never rely on localhost.
- */
+import { normalizeToApiBase } from '../config/apiConfig';
+import { getSavedBackendApiUrl, saveBackendApiUrl } from '../storage/backendUrlStorage';
+
 function isAndroidEmulatorForLocalhostRewrite(): boolean {
   if (Platform.OS !== 'android') return false;
   if (!Device.isDevice) return true;
@@ -23,39 +20,82 @@ function isAndroidEmulatorForLocalhostRewrite(): boolean {
   return false;
 }
 
-function resolveApiOrigin(raw: string): string {
-  const trimmed = raw.replace(/\/$/, '');
+/** Map localhost → 10.0.2.2 for Android emulator; `apiBase` ends with `/api`. */
+function resolveAndroidLocalhost(apiBase: string): string {
+  const trimmed = apiBase.replace(/\/$/, '');
   if (Platform.OS !== 'android') return trimmed;
-
-  let url: URL;
   try {
-    url = new URL(trimmed);
+    const u = new URL(trimmed);
+    const loopback = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    if (loopback && isAndroidEmulatorForLocalhostRewrite()) {
+      u.hostname = '10.0.2.2';
+      return `${u.origin}/api`;
+    }
   } catch {
     return trimmed;
   }
-
-  const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-  if (loopback && isAndroidEmulatorForLocalhostRewrite()) {
-    url.hostname = '10.0.2.2';
-    return url.origin;
-  }
-
   return trimmed;
 }
 
-const raw =
-  process.env.EXPO_PUBLIC_API_URL ||
-  (Constants.expoConfig?.extra as { apiUrl?: string } | undefined)?.apiUrl ||
-  'http://localhost:3001';
-
-export const API_ORIGIN = resolveApiOrigin(raw);
+const DEFAULT_TIMEOUT_MS = 30000;
 
 export const api = axios.create({
-  baseURL: `${API_ORIGIN}/api`,
-  timeout: 45000,
+  baseURL: 'http://127.0.0.1:9',
+  timeout: DEFAULT_TIMEOUT_MS,
 });
 
-/** Same value as server MOBILE_APP_API_KEY (optional). Set in EAS/env when building APK/IPA. */
+const CELLULAR_PORT_HINT =
+  'Many mobile networks block non-standard ports (e.g. :8080) on cellular data — try Wi‑Fi first. For reliable access everywhere, put the API behind HTTPS on port 443.';
+
+api.interceptors.response.use(
+  (r) => r,
+  (err: AxiosError) => {
+    const noResponse = !err.response;
+    if (noResponse) {
+      if (err.code === 'ECONNABORTED') {
+        err.message = `Request timed out (${DEFAULT_TIMEOUT_MS / 1000}s). ${CELLULAR_PORT_HINT}`;
+      } else {
+        err.message = `Cannot reach server (${err.code || 'network'}). ${CELLULAR_PORT_HINT}`;
+      }
+    }
+    return Promise.reject(err);
+  }
+);
+
+/** Apply saved or normalized URL to axios (full path ending in `/api`). */
+export function configureApiBaseUrl(apiBaseRaw: string): void {
+  const normalized = normalizeToApiBase(apiBaseRaw);
+  if (!normalized) return;
+  api.defaults.baseURL = resolveAndroidLocalhost(normalized);
+}
+
+/**
+ * Configure axios from AsyncStorage. First install has no URL — show Configuration
+ * before Login; user saves Backend API Base URL (…/api) once.
+ */
+export async function initApiClientFromStorage(): Promise<boolean> {
+  const saved = await getSavedBackendApiUrl();
+  if (!saved) return false;
+  configureApiBaseUrl(saved);
+  return true;
+}
+
+/** Apply a URL already validated by Configuration / Profile (includes `/api`). */
+export async function persistAndConfigureApiBase(urlEndingWithApi: string): Promise<void> {
+  await saveBackendApiUrl(urlEndingWithApi);
+  configureApiBaseUrl(urlEndingWithApi);
+}
+
+export function getApiBaseUrl(): string {
+  return (api.defaults.baseURL || '').replace(/\/$/, '');
+}
+
+/** Human-readable origin (no `/api`) for error hints */
+export function getDisplayApiOrigin(): string {
+  const b = getApiBaseUrl();
+  return b.replace(/\/api$/i, '') || b;
+}
+
 const mobileApiKey = process.env.EXPO_PUBLIC_MOBILE_API_KEY;
 if (mobileApiKey && String(mobileApiKey).trim()) {
   api.defaults.headers.common['X-Mobile-Api-Key'] = String(mobileApiKey).trim();

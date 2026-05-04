@@ -9,6 +9,8 @@
     "db": "node db.js",
     "clear-outbound": "node scripts/clear-outbound-data.js",
     "clear-outbound:exec": "node scripts/clear-outbound-data.js --yes",
+    "seed:sample": "node scripts/seed-sample-data.js",
+    "seed:test-data": "node scripts/seed-test-data.js",
     "wipe-db": "node scripts/wipe-all-data.js",
     "wipe-db:yes": "node scripts/wipe-all-data.js --yes",
     "ensure-admin": "node scripts/ensure-admin.js"
@@ -21,8 +23,10 @@
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
-    "sqlite3": "^5.1.7",
+    "pdf-lib": "^1.17.1",
+    "sqlite3": "^6.0.1",
     "tesseract.js": "^5.1.1",
+    "vite": "8.0.10",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

@@ -260,6 +260,56 @@ export const driversApi = {
   remove: async (id) => (await api.delete(`/drivers/${id}`)).data,
 };
 
+const CARRIER_TYPES_TD = ['GAPP', 'Rental', 'Courier', 'Self Collection'];
+const VEHICLE_TYPES_TD = ['Pickup', 'Dyna', 'Trailer', 'Lorry', 'Boom Truck', 'Car'];
+const ATTACHMENT_TYPES_TD = [
+  'Iqama',
+  'Driving License',
+  'Insurance',
+  'Fahas / Vehicle Inspection',
+  'Vehicle Document / Istimara',
+  'Gate Pass',
+  'Other',
+];
+
+export const transportationApi = {
+  carrierTypes: CARRIER_TYPES_TD,
+  vehicleTypes: VEHICLE_TYPES_TD,
+  attachmentTypes: ATTACHMENT_TYPES_TD,
+  listCarriers: async (params = {}) => (await api.get('/transportation/carriers', { params })).data,
+  createCarrier: async (payload) => (await api.post('/transportation/carriers', payload)).data,
+  updateCarrier: async (id, payload) => (await api.put(`/transportation/carriers/${id}`, payload)).data,
+  deleteCarrier: async (id) => (await api.delete(`/transportation/carriers/${id}`)).data,
+  listDrivers: async (params = {}) => (await api.get('/transportation/drivers', { params })).data,
+  getDriver: async (id) => (await api.get(`/transportation/drivers/${id}`)).data,
+  createDriver: async (payload) => (await api.post('/transportation/drivers', payload)).data,
+  updateDriver: async (id, payload) => (await api.put(`/transportation/drivers/${id}`, payload)).data,
+  deleteDriver: async (id) => (await api.delete(`/transportation/drivers/${id}`)).data,
+  listDriverAttachments: async (driverId) => (await api.get(`/transportation/drivers/${driverId}/attachments`)).data,
+  uploadAttachment: async (driverId, file, attachment_type) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('attachment_type', attachment_type);
+    const res = await api.post(`/transportation/drivers/${driverId}/attachments`, fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return res.data;
+  },
+  deleteAttachment: async (id) => (await api.delete(`/transportation/attachments/${id}`)).data,
+  downloadAttachment: async (id) => {
+    const res = await api.get(`/transportation/attachments/${id}/download`, { responseType: 'blob' });
+    return res.data;
+  },
+  exportDriversExcel: async (params = {}) => {
+    const res = await api.get('/transportation/drivers/export/excel', { params, responseType: 'blob' });
+    downloadBlob(res.data, 'driver-details.xlsx');
+  },
+  exportDriverPdf: async (driverId, filename) => {
+    const res = await api.get(`/transportation/drivers/${driverId}/export/pdf`, { responseType: 'blob' });
+    downloadBlob(res.data, filename || `driver_${driverId}.pdf`);
+  },
+};
+
 export const vendorsApi = {
   list: async (search = '') => (await api.get('/vendors', { params: { search, limit: 1000 } })).data,
   get: async (id) => (await api.get(`/vendors/${id}`)).data,
@@ -317,6 +367,7 @@ export const outboundGodamApi = {
   checkStock: async (id) => (await api.post(`/outbound/${id}/check-stock`)).data,
   generateFifo: async (id) => (await api.post(`/outbound/${id}/generate-fifo`)).data,
   sendForPick: async (id) => (await api.post(`/outbound/${id}/send-for-pick`)).data,
+  manualPick: async (id, payload = {}) => (await api.post(`/outbound/${id}/manual-pick`, payload)).data,
   markDelivered: async (id) => (await api.post(`/outbound/${id}/mark-delivered`)).data,
   /** Alias for spec path POST /api/orders/:id/mark-delivered */
   markDeliveredOrdersPath: async (id) => (await api.post(`/orders/${id}/mark-delivered`)).data,

@@ -550,8 +550,9 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
     await dbRun(
       `INSERT INTO picked_transactions (
         outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
-        material, sap_part_number, description, rack_location, picked_qty, device_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        material, sap_part_number, description, rack_location, picked_qty, device_id,
+        picked_method, is_manual_pick, manual_pick_reason, picked_by_role
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Mobile', 0, NULL, ?)`,
       [
         outbound_order_id,
         outbound_item_id,
@@ -564,6 +565,7 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
         sug.rack_location,
         picked_qty,
         device_id,
+        String(req.user.role || '').toLowerCase(),
       ]
     );
 

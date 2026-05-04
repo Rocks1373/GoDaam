@@ -1,0 +1,35 @@
+# Example: expose GoDaam on https://godam.<your-domain> via Traefik (HTTPS on 443).
+#
+# TLS: If `openssl` shows issuer `TRAEFIK DEFAULT CERT`, Traefik is using a self-signed
+# default cert — curl and browsers will fail verification (curl exit 60) until you use
+# a real CA (Let's Encrypt via certresolver below). Do not rely on curl -k in production.
+#
+# If https://godam... returns "404 page not found", no Host router matches yet — use
+# http://godam...:8080 until labels + network attach this service to Traefik.
+#
+# Prerequisites:
+#   1. DNS A record: godam → your VPS public IP (already done in Hostinger).
+#   2. Traefik on the same host with Let's Encrypt (certresolver name below must match yours).
+#   3. Put Traefik and `web` on a shared Docker network (often named `traefik` or `web`).
+#
+# Usage (on server, after adjusting labels/network names):
+#   docker compose -f docker-compose.yml -f docker-compose.hostinger.yml -f docker-compose.godam-domain.yml up -d --build
+#
+# Then open: https://godam.divadivya.cloud  and  https://godam.divadivya.cloud/api/health
+
+services:
+  web:
+    networks:
+      - default
+      - traefik_public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik_public
+      - traefik.http.routers.godam.rule=Host(`godam.divadivya.cloud`)
+      - traefik.http.routers.godam.entrypoints=websecure
+      - traefik.http.routers.godam.tls.certresolver=letsencrypt
+      - traefik.http.services.godam.loadbalancer.server.port=80
+
+networks:
+  traefik_public:
+    external: true

@@ -1,11 +1,12 @@
 {
   "name": "godam-mobile",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "index.ts",
   "scripts": {
     "start": "expo start --port 8090",
     "start:emu-android": "expo start --android --port 8090",
     "android": "expo run:android",
+    "android:release-apk": "NODE_ENV=production EXPO_PUBLIC_API_URL=${EXPO_PUBLIC_API_URL:-https://godam.divadivya.cloud} bash -c 'cd android && ./gradlew assembleRelease'",
     "ios": "expo run:ios",
     "web": "expo start --web"
   },
@@ -35,6 +36,7 @@
   "devDependencies": {
     "@types/react": "~19.1.0",
     "babel-plugin-module-resolver": "^5.0.3",
+    "babel-preset-expo": "^55.0.19",
     "typescript": "~5.9.2"
   },
   "private": true

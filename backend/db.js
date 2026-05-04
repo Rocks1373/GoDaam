@@ -126,34 +126,33 @@ function runGodamSeeds(db) {
     });
   }
 
-  // Carrier/Driver seed (for DN transportation dropdowns)
-  db.get('SELECT COUNT(1) as c FROM carriers', (err, row) => {
+  // Transportation carriers/drivers seed (for DN dropdowns + Transportation Details)
+  db.get('SELECT COUNT(1) as c FROM transportation_carriers', (err, row) => {
     if (err) return;
-    // Seed only if carriers table exists (migrate runs before seeds)
     const existingCount = row?.c || 0;
-    // Ensure at least one GAPP carrier + drivers exist (required for Type=GAPP)
-    db.get(`SELECT id FROM carriers WHERE lower(carrier_type) = 'gapp' LIMIT 1`, (err2, gappRow) => {
+    db.get(`SELECT id FROM transportation_carriers WHERE lower(carrier_type) = 'gapp' LIMIT 1`, (err2, gappRow) => {
       if (err2) return;
       if (gappRow?.id) return;
 
       db.run(
-        `INSERT INTO carriers (carrier_name, carrier_type, is_active, created_at, updated_at)
-         VALUES ('GAPP', 'GAPP', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        `INSERT INTO transportation_carriers (carrier_name, carrier_type, status, created_at, updated_at)
+         VALUES ('GAPP', 'GAPP', 'Active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
         function (err3) {
           if (err3) return;
           const carrierId = this.lastID;
           const stmt = db.prepare(
-            `INSERT INTO carrier_drivers (carrier_id, driver_name, phone_number, vehicle, is_active, created_at, updated_at)
-             VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+            `INSERT INTO transportation_drivers (
+              carrier_id, carrier_type, carrier_name, driver_name, driver_phone,
+              vehicle_type, vehicle_number, status, auto_warning, created_at, updated_at
+            ) VALUES (?, 'GAPP', 'GAPP', ?, ?, ?, ?, 'Active', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
           );
-          stmt.run([carrierId, 'Amjad', '+966562143424', 'Pick up']);
-          stmt.run([carrierId, 'Mohammed Naser', '+966561896893', 'Dyna']);
+          stmt.run([carrierId, 'Amjad', '+966562143424', 'Pickup', '']);
+          stmt.run([carrierId, 'Mohammed Naser', '+966561896893', 'Dyna', '']);
           stmt.finalize();
         }
       );
     });
 
-    // If the table is empty, also seed Rental/Courier masters (demo convenience only)
     if (!seedDemoDataEnabled() || existingCount > 0) return;
     const seedCarriers = [
       ['EAYN ALWIFAQ Transportation & Logistics services', 'Rental'],
@@ -163,8 +162,8 @@ function runGodamSeeds(db) {
       ['Self collection', 'Self Collection'],
     ];
     const stmtC = db.prepare(
-      `INSERT INTO carriers (carrier_name, carrier_type, is_active, created_at, updated_at)
-       VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      `INSERT INTO transportation_carriers (carrier_name, carrier_type, status, created_at, updated_at)
+       VALUES (?, ?, 'Active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
     );
     for (const c2 of seedCarriers) stmtC.run(c2);
     stmtC.finalize();

@@ -22,6 +22,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 
 const dbRun = promisify(db.run.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const dbAll = promisify(db.all.bind(db));
+const QTY_EPS = 1e-6;
 
 function pick(row, ...names) {
   for (const n of names) {
@@ -274,11 +275,14 @@ router.post('/:id/generate-fifo', requirePermission('can_upload_outbound'), asyn
   }
 });
 
-router.post('/:id/send-for-pick', requirePermission('can_upload_outbound'), async (req, res) => {
+router.post('/:id/send-for-pick', requireAdmin, async (req, res) => {
   try {
     const orderId = Number(req.params.id);
     const order = await dbGet('SELECT * FROM outbound_orders WHERE id = ?', [orderId]);
     if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (!['Uploaded', 'Stock Checked'].includes(String(order.status || ''))) {
+      return res.status(400).json({ error: 'Only Uploaded or Stock Checked orders can be sent for pick' });
+    }
 
     await dbRun(`UPDATE outbound_orders SET status = 'Sent For Pick', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
       orderId,
@@ -293,6 +297,192 @@ router.post('/:id/send-for-pick', requirePermission('can_upload_outbound'), asyn
 
     res.json({ ok: true, status: 'Sent For Pick', notification_preview: { title: 'New Pick Order', body } });
   } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
+  const orderId = Number(req.params.id);
+  const override = !!req.body?.override;
+  const reason = String(req.body?.reason || '').trim();
+  if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+  if (override && !reason) return res.status(400).json({ error: 'Override reason is required' });
+
+  try {
+    const adminRow = await dbGet(`SELECT id, full_name, username FROM users WHERE id = ?`, [req.user.sub]);
+    const adminName = adminRow?.full_name || adminRow?.username || req.user.username || 'Admin';
+
+    await dbRun('BEGIN IMMEDIATE');
+
+    const order = await dbGet(`SELECT * FROM outbound_orders WHERE id = ?`, [orderId]);
+    if (!order) throw new Error('Order not found');
+    if (['Picked', 'Delivered', 'Cancelled'].includes(String(order.status || ''))) {
+      throw new Error(`Manual pick is closed for status ${order.status}`);
+    }
+
+    const existingPick = await dbGet(
+      `SELECT COUNT(1) AS c FROM picked_transactions WHERE outbound_order_id = ?`,
+      [orderId]
+    );
+    await dbRun('COMMIT');
+
+    if (!override && !(Number(existingPick?.c) > 0)) {
+      await generateFifoForOutboundOrder(orderId);
+    }
+
+    await dbRun('BEGIN IMMEDIATE');
+
+    const orderFresh = await dbGet(`SELECT * FROM outbound_orders WHERE id = ?`, [orderId]);
+    const items = await dbAll(
+      `SELECT i.*,
+        (SELECT COALESCE(SUM(picked_qty), 0) FROM picked_transactions WHERE outbound_item_id = i.id) AS picked_from_tx
+       FROM outbound_items i
+       WHERE i.outbound_id = ?
+       ORDER BY i.id`,
+      [orderId]
+    );
+
+    if (!items.length) throw new Error('Order has no items');
+
+    const pickedLines = [];
+    for (const item of items) {
+      const already = Math.max(Number(item.picked_qty) || 0, Number(item.picked_from_tx) || 0);
+      const required = Number(item.required_qty) || 0;
+      let remaining = Math.max(0, required - already);
+      if (remaining <= QTY_EPS) continue;
+
+      const fifoRows = await dbAll(
+        `SELECT f.*,
+          (SELECT COALESCE(SUM(picked_qty), 0) FROM picked_transactions WHERE fifo_suggestion_id = f.id) AS fifo_picked_qty
+         FROM fifo_suggestions f
+         WHERE f.outbound_order_id = ? AND f.outbound_item_id = ?
+         ORDER BY date(COALESCE(f.entry_date, '1970-01-01')) ASC, f.id ASC`,
+        [orderId, item.id]
+      );
+
+      const fifoAvailable = fifoRows.reduce(
+        (sum, f) => sum + Math.max(0, (Number(f.suggested_qty) || 0) - (Number(f.fifo_picked_qty) || 0)),
+        0
+      );
+      if (fifoAvailable + QTY_EPS < remaining) {
+        throw new Error(
+          `Insufficient FIFO suggestion for ${item.material || item.part_number}: need ${remaining}, suggested ${fifoAvailable}`
+        );
+      }
+
+      let itemPickedNow = 0;
+      for (const f of fifoRows) {
+        if (remaining <= QTY_EPS) break;
+        const fifoRemaining = Math.max(0, (Number(f.suggested_qty) || 0) - (Number(f.fifo_picked_qty) || 0));
+        if (fifoRemaining <= QTY_EPS) continue;
+        const pickQty = Math.min(remaining, fifoRemaining);
+
+        const rack = await dbGet(`SELECT * FROM stock_by_rack WHERE id = ?`, [f.stock_by_rack_id]);
+        if (!rack) throw new Error(`Rack row missing for FIFO line ${f.id}`);
+        const rackAvail = Number(rack.available_qty) || 0;
+        if (pickQty > rackAvail + QTY_EPS) {
+          throw new Error(`Insufficient rack qty at ${f.rack_location}: need ${pickQty}, available ${rackAvail}`);
+        }
+
+        await dbRun(
+          `INSERT INTO picked_transactions (
+            outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
+            material, sap_part_number, description, rack_location, picked_qty, device_id,
+            picked_method, is_manual_pick, manual_pick_reason, picked_by_role
+          ) VALUES (?, ?, ?, ?, 'Admin Manual', ?, ?, ?, ?, ?, NULL, 'Manual Admin', 1, ?, ?)`,
+          [
+            orderId,
+            item.id,
+            f.id,
+            req.user.sub,
+            item.material || item.part_number,
+            item.sap_part_number,
+            item.description,
+            f.rack_location,
+            pickQty,
+            override ? reason : null,
+            String(req.user.role || 'admin').toLowerCase(),
+          ]
+        );
+
+        await dbRun(
+          `UPDATE stock_by_rack
+           SET available_qty = ?, total_out_qty = ?, last_updated = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [rackAvail - pickQty, (Number(rack.total_out_qty) || 0) + pickQty, rack.id]
+        );
+
+        const today = new Date().toISOString().slice(0, 10);
+        await dbRun(
+          `INSERT INTO stock_out (
+            transaction_date, part_number, sap_part_number, description, rack_location,
+            qty_out, outbound_number, reference_no, remarks
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            today,
+            item.part_number,
+            item.sap_part_number,
+            item.description,
+            f.rack_location,
+            pickQty,
+            orderFresh.delivery || orderFresh.outbound_number || String(orderId),
+            `manual_pick_fifo_${f.id}`,
+            override ? `Admin Manual override:${reason}` : `Admin Manual:${adminName}`,
+          ]
+        );
+
+        remaining -= pickQty;
+        itemPickedNow += pickQty;
+        pickedLines.push({
+          outbound_item_id: item.id,
+          fifo_suggestion_id: f.id,
+          rack_location: f.rack_location,
+          entry_date: f.entry_date,
+          picked_qty: pickQty,
+        });
+      }
+
+      await dbRun(`UPDATE outbound_items SET picked_qty = ? WHERE id = ?`, [already + itemPickedNow, item.id]);
+    }
+
+    const shortfalls = await dbAll(
+      `SELECT i.id, i.part_number, i.required_qty,
+        MAX(COALESCE(i.picked_qty, 0), COALESCE((SELECT SUM(picked_qty) FROM picked_transactions WHERE outbound_item_id = i.id), 0)) AS picked_qty
+       FROM outbound_items i
+       WHERE i.outbound_id = ?
+         AND COALESCE(i.required_qty, 0) >
+             MAX(COALESCE(i.picked_qty, 0), COALESCE((SELECT SUM(picked_qty) FROM picked_transactions WHERE outbound_item_id = i.id), 0)) + ?`,
+      [orderId, QTY_EPS]
+    );
+
+    if (shortfalls.length) {
+      await dbRun(`UPDATE outbound_orders SET status = 'Picking', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [orderId]);
+    } else {
+      await dbRun(
+        `INSERT OR IGNORE INTO picked_orders (
+          outbound_order_id, delivery, sales_doc, customer_reference, sold_to, name_1,
+          confirmed_by_user_id, confirmed_by_user_name, confirmed_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Admin Manual', CURRENT_TIMESTAMP, 'Picked')`,
+        [
+          orderId,
+          orderFresh.delivery || orderFresh.outbound_number,
+          orderFresh.sales_doc || orderFresh.sales_order_number,
+          orderFresh.customer_reference || orderFresh.customer_po_number,
+          orderFresh.sold_to || orderFresh.vendor_name,
+          orderFresh.name_1 || orderFresh.customer_name,
+          req.user.sub,
+        ]
+      );
+      await dbRun(`UPDATE outbound_orders SET status = 'Picked', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [orderId]);
+    }
+
+    await dbRun('COMMIT');
+
+    const updated = await outboundOrder.findById(orderId);
+    const fifo = await listFifoForOrder(orderId);
+    res.json({ ok: true, status: shortfalls.length ? 'Picking' : 'Picked', picked_lines: pickedLines, order: { ...updated, fifo_suggestions: fifo } });
+  } catch (e) {
+    await dbRun('ROLLBACK').catch(() => {});
     res.status(400).json({ error: e.message });
   }
 });

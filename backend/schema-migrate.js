@@ -27,6 +27,8 @@ const PERMISSION_DEFS = [
   ['can_change_pick_location', 'Change pick location'],
   ['can_access_web', 'Access web'],
   ['can_access_mobile', 'Access mobile'],
+  ['can_view_transportation', 'View transportation details'],
+  ['can_manage_transportation', 'Manage transportation (carriers, drivers, attachments)'],
 ];
 
 const ROLES_SEED = ['admin', 'picker', 'checker', 'viewer', 'driver'];
@@ -39,10 +41,13 @@ async function seedDefaultRolePermissions(db) {
 
   for (const role of ROLES_SEED) {
     for (const [permission_key, permission_label] of PERMISSION_DEFS) {
+      const transportPerm =
+        permission_key === 'can_view_transportation' || permission_key === 'can_manage_transportation';
+      const isEnabled = role === 'admin' ? 1 : transportPerm ? 0 : 1;
       await run(
         `INSERT INTO role_permissions (role, permission_key, permission_label, is_enabled, created_at, updated_at)
-         VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [role, permission_key, permission_label]
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [role, permission_key, permission_label, isEnabled]
       );
     }
   }
@@ -146,6 +151,13 @@ async function migrateGodamSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_picked_tx_order
     ON picked_transactions(outbound_order_id, outbound_item_id)
   `);
+
+  await ensureColumn(db, 'picked_transactions', 'picked_method', 'TEXT');
+  await ensureColumn(db, 'picked_transactions', 'is_manual_pick', 'INTEGER DEFAULT 0');
+  await ensureColumn(db, 'picked_transactions', 'manual_pick_reason', 'TEXT');
+  await ensureColumn(db, 'picked_transactions', 'picked_by_role', 'TEXT');
+  await run(`UPDATE picked_transactions SET picked_method = 'Mobile' WHERE picked_method IS NULL`);
+  await run(`UPDATE picked_transactions SET is_manual_pick = 0 WHERE is_manual_pick IS NULL`);
 
   await run(`UPDATE users SET can_access_web = 1 WHERE can_access_web IS NULL`);
   await run(`UPDATE users SET can_access_mobile = 1 WHERE can_access_mobile IS NULL`);
@@ -500,7 +512,126 @@ async function migrateGodamSchema(db) {
   await run(`CREATE INDEX IF NOT EXISTS idx_driver_tasks_dn ON driver_delivery_tasks(dn_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_driver_tasks_driver ON driver_delivery_tasks(driver_user_id)`);
 
+  // --- Transportation Details (replaces legacy carriers / carrier_drivers master data) ---
+  await run(`
+    CREATE TABLE IF NOT EXISTS transportation_carriers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      carrier_type TEXT NOT NULL,
+      carrier_name TEXT NOT NULL,
+      contact_person TEXT,
+      phone_number TEXT,
+      email TEXT,
+      remarks TEXT,
+      status TEXT NOT NULL DEFAULT 'Active',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS transportation_drivers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      carrier_id INTEGER NOT NULL,
+      carrier_type TEXT NOT NULL,
+      carrier_name TEXT NOT NULL,
+      driver_name TEXT NOT NULL,
+      driver_phone TEXT NOT NULL,
+      iqama_number TEXT,
+      iqama_expiry TEXT,
+      license_number TEXT,
+      license_expiry TEXT,
+      national_id TEXT,
+      vehicle_number TEXT,
+      vehicle_type TEXT,
+      vehicle_document_number TEXT,
+      vehicle_document_expiry TEXT,
+      insurance_number TEXT,
+      insurance_expiry TEXT,
+      fahas_number TEXT,
+      fahas_expiry TEXT,
+      remarks TEXT,
+      status TEXT NOT NULL DEFAULT 'Active',
+      auto_warning TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (carrier_id) REFERENCES transportation_carriers(id)
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS transportation_driver_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      driver_id INTEGER NOT NULL,
+      attachment_type TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_mime_type TEXT,
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      uploaded_by INTEGER,
+      FOREIGN KEY (driver_id) REFERENCES transportation_drivers(id),
+      FOREIGN KEY (uploaded_by) REFERENCES users(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tdrivers_carrier ON transportation_drivers(carrier_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tdrivers_type ON transportation_drivers(carrier_type)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tattach_driver ON transportation_driver_attachments(driver_id)`);
+
+  const get = promisify(db.get.bind(db));
+  const nNew = await get(`SELECT COUNT(1) as c FROM transportation_carriers`);
+  const nOld = await get(`SELECT COUNT(1) as c FROM carriers`);
+  if ((nNew?.c || 0) === 0 && (nOld?.c || 0) > 0) {
+    await run(`
+      INSERT INTO transportation_carriers (id, carrier_type, carrier_name, contact_person, phone_number, email, remarks, status, created_at, updated_at)
+      SELECT id, carrier_type, carrier_name, NULL, NULL, NULL, NULL,
+             CASE WHEN COALESCE(is_active,1) = 1 THEN 'Active' ELSE 'Inactive' END,
+             COALESCE(created_at, CURRENT_TIMESTAMP), COALESCE(updated_at, CURRENT_TIMESTAMP)
+      FROM carriers
+    `);
+    await run(`
+      INSERT INTO transportation_drivers (
+        id, carrier_id, carrier_type, carrier_name, driver_name, driver_phone,
+        iqama_number, iqama_expiry, license_number, license_expiry, national_id,
+        vehicle_number, vehicle_type, vehicle_document_number, vehicle_document_expiry,
+        insurance_number, insurance_expiry, fahas_number, fahas_expiry,
+        remarks, status, auto_warning, created_at, updated_at
+      )
+      SELECT
+        d.id, d.carrier_id, c.carrier_type, c.carrier_name, d.driver_name, COALESCE(d.phone_number, ''),
+        NULL, NULL, NULL, NULL, NULL,
+        NULLIF(TRIM(COALESCE(d.vehicle, '')), ''), NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL,
+        CASE WHEN COALESCE(d.is_active,1) = 1 THEN 'Active' ELSE 'Inactive' END,
+        '',
+        COALESCE(d.created_at, CURRENT_TIMESTAMP), COALESCE(d.updated_at, CURRENT_TIMESTAMP)
+      FROM carrier_drivers d
+      JOIN carriers c ON c.id = d.carrier_id
+    `);
+    await run(`DELETE FROM carrier_drivers`);
+    await run(`DELETE FROM carriers`);
+  }
+
   await seedDefaultRolePermissions(db);
+  await ensureTransportationPermissionRows(db);
+}
+
+/** Additive permissions for existing DBs (seedDefaultRolePermissions only runs on empty table). */
+async function ensureTransportationPermissionRows(db) {
+  const get = promisify(db.get.bind(db));
+  const run = promisify(db.run.bind(db));
+  const extra = [
+    ['can_view_transportation', 'View transportation details'],
+    ['can_manage_transportation', 'Manage transportation (carriers, drivers, attachments)'],
+  ];
+  for (const role of ROLES_SEED) {
+    for (const [key, label] of extra) {
+      const row = await get(`SELECT id FROM role_permissions WHERE role = ? AND permission_key = ?`, [role, key]);
+      if (row) continue;
+      const enabled = role === 'admin' ? 1 : 0;
+      await run(
+        `INSERT INTO role_permissions (role, permission_key, permission_label, is_enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [role, key, label, enabled]
+      );
+    }
+  }
 }
 
 module.exports = { migrateGodamSchema, seedDefaultRolePermissions, PERMISSION_DEFS, ROLES_SEED };

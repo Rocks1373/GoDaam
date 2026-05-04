@@ -9,7 +9,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://72.61.245.23:8080"
+        "EXPO_PUBLIC_API_URL": "https://godam.divadivya.cloud"
       }
     },
     "preview": {
@@ -18,7 +18,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://72.61.245.23:8080"
+        "EXPO_PUBLIC_API_URL": "https://godam.divadivya.cloud"
       }
     }
   },

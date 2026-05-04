@@ -26,8 +26,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     restart: unless-stopped
+    # Hostinger / Traefik: set WEB_HOST_PORT=8080 in .env so port 80 stays free for ACME/Traefik.
     ports:
-      - "80:80"
+      - "${WEB_HOST_PORT:-80}:80"
     depends_on:
       - api
 

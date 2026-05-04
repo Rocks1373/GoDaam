@@ -3,9 +3,10 @@ import { View, Text, TextInput, Pressable, StyleSheet, Alert, Image } from 'reac
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { login } from '../api/authApi';
 import { saveAuth } from '../storage/tokenStorage';
-import { API_ORIGIN, setAuthHeader } from '../api/client';
+import { getDisplayApiOrigin, setAuthHeader } from '../api/client';
 
 export type RootStackParamList = {
+  ApiConfiguration: undefined;
   Login: undefined;
   Home: undefined;
   Notifications: undefined;
@@ -24,6 +25,16 @@ export type RootStackParamList = {
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Login'>;
 
+function loginErrorExtra(e: unknown, apiOrigin: string): string {
+  const ax = e as { response?: unknown; message?: string };
+  const networkFailure = !ax.response;
+  if (networkFailure) {
+    return `\n\nConnecting to:\n${apiOrigin}\n\nTip: On cellular data, operators sometimes block port 8080. Use Wi‑Fi or open Configuration / Server settings and use HTTPS on port 443.`;
+  }
+  if (__DEV__) return `\n\nAPI base: ${apiOrigin}`;
+  return '';
+}
+
 export default function LoginScreen({ navigation }: Props) {
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('admin123');
@@ -38,8 +49,12 @@ export default function LoginScreen({ navigation }: Props) {
       navigation.reset({ index: 0, routes: [{ name: 'Home' }] });
     } catch (e: unknown) {
       const err = e as { response?: { data?: { error?: string } }; message?: string };
-      const base = err.response?.data?.error || err.message || 'Error';
-      const hint = __DEV__ ? `\n\nAPI base: ${API_ORIGIN}` : '';
+      const base =
+        err.response?.data?.error ||
+        (err as { message?: string }).message ||
+        'Error';
+      const origin = getDisplayApiOrigin();
+      const hint = loginErrorExtra(e, origin);
       Alert.alert('Login failed', `${base}${hint}`);
     } finally {
       setLoading(false);
@@ -61,6 +76,9 @@ export default function LoginScreen({ navigation }: Props) {
       <Pressable style={styles.btn} onPress={submit} disabled={loading}>
         <Text style={styles.btnText}>{loading ? 'Signing in…' : 'Sign in'}</Text>
       </Pressable>
+      <Pressable style={styles.linkBtn} onPress={() => navigation.navigate('ApiConfiguration')} disabled={loading}>
+        <Text style={styles.linkText}>Server settings — Backend API URL</Text>
+      </Pressable>
     </View>
   );
 }
@@ -79,4 +97,6 @@ const styles = StyleSheet.create({
   },
   btn: { backgroundColor: '#2563eb', padding: 14, borderRadius: 10, alignItems: 'center' },
   btnText: { color: '#fff', fontWeight: '700' },
+  linkBtn: { marginTop: 18, padding: 10, alignItems: 'center' },
+  linkText: { color: '#2563eb', fontWeight: '600', fontSize: 14 },
 });

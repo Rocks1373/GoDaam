@@ -22,10 +22,21 @@ const DEFAULT_CORS_ORIGINS = [
 ];
 
 function buildCorsOptions() {
-  const raw = process.env.CORS_ORIGIN;
-  if (raw === '*') {
-    return { origin: true, credentials: true };
+  const allowAll =
+    process.env.CORS_ALLOW_ALL === '1' || process.env.CORS_ORIGIN === '*';
+  if (allowAll) {
+    return {
+      origin: '*',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'X-Mobile-Api-Key',
+        'X-Requested-With',
+      ],
+    };
   }
+  const raw = process.env.CORS_ORIGIN;
   const list = raw
     ? raw.split(',').map((s) => s.trim()).filter(Boolean)
     : DEFAULT_CORS_ORIGINS;
@@ -44,7 +55,10 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Public routes
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'warehouse-backend' });
+  res.json({
+    status: 'ok',
+    message: 'GoDam API running',
+  });
 });
 app.use('/api/auth', require('./routes/auth'));
 
@@ -76,11 +90,15 @@ app.use('/api/pick-suggestion', ...webAuth, require('./routes/pick-suggestion'))
 app.use('/api/customers', ...webAuth, require('./routes/customers'));
 app.use('/api/delivery-note', ...webAuth, require('./routes/delivery-note'));
 app.use('/api/delivery-notes', ...webAuth, require('./routes/delivery-notes'));
+app.use('/api/mobile', require('./routes/mobile'));
+app.use('/api/mobile/ocr', requireMobileAppKey, requireAuth, requireMobileAccess, require('./routes/ocr'));
 app.use('/api', ...webAuth, require('./routes/customer-locations'));
 app.use('/api/vendors', ...webAuth, require('./routes/vendors'));
 app.use('/api/vendor-items', ...webAuth, require('./routes/vendor-items'));
 app.use('/api/carriers', ...webAuth, require('./routes/carriers'));
 app.use('/api/drivers', ...webAuth, require('./routes/drivers'));
+app.use('/api/transportation', ...webAuth, require('./routes/transportation'));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api/users', ...webAuth, require('./routes/users'));
 app.use('/api/roles', ...webAuth, require('./routes/roles'));
@@ -88,8 +106,6 @@ app.use('/api/admin/picked-orders', ...webAuth, requireAdmin, require('./routes/
 app.use('/api/admin/maintenance', ...webAuth, requireAdmin, require('./routes/admin-maintenance'));
 app.use('/api/pick-change-requests', ...webAuth, requireAdmin, require('./routes/pick-change-requests'));
 
-app.use('/api/mobile', require('./routes/mobile'));
-app.use('/api/mobile/ocr', requireMobileAppKey, requireAuth, requireMobileAccess, require('./routes/ocr'));
 app.use('/api/notifications', requireAuth, require('./routes/notifications'));
 
 app.post(
@@ -138,8 +154,8 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`✅ Backend running on http://localhost:${PORT}`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Backend listening on 0.0.0.0:${PORT}`);
 });
 
 server.on('error', (err) => {

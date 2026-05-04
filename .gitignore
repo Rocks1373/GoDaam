@@ -19,6 +19,7 @@ coverage/
 
 # Large APK hosted next to web app but not stored in Git (deploy via rsync/scp)
 frontend/public/downloads/*.apk
+releases/*.apk
 
 # Local tooling / logs
 .godam/

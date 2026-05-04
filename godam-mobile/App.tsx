@@ -5,6 +5,7 @@ import { ActivityIndicator, View, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import LoginScreen, { type RootStackParamList } from './src/screens/LoginScreen';
+import ApiConfigurationScreen from './src/screens/ApiConfigurationScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import OrdersScreen from './src/screens/OrdersScreen';
 import OrderDetailScreen from './src/screens/OrderDetailScreen';
@@ -19,43 +20,62 @@ import NotificationsScreen from './src/screens/NotificationsScreen';
 import DeliveryListScreen from './src/screens/DeliveryListScreen';
 import DeliveryDetailScreen from './src/screens/DeliveryDetailScreen';
 import { loadAuth, isExpiredIso, clearAuth } from './src/storage/tokenStorage';
-import { setAuthHeader } from './src/api/client';
+import { initApiClientFromStorage, setAuthHeader } from './src/api/client';
+import { AppErrorBoundary } from './src/components/AppErrorBoundary';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
+type BootRoute = 'ApiConfiguration' | 'Login' | 'Home';
+
 export default function App() {
-  const [ready, setReady] = useState(false);
-  const [initial, setInitial] = useState<'Login' | 'Home'>('Login');
+  const [boot, setBoot] = useState<{ ready: boolean; initial: BootRoute }>({
+    ready: false,
+    initial: 'ApiConfiguration',
+  });
 
   useEffect(() => {
     (async () => {
+      const hasSavedUrl = await initApiClientFromStorage();
+      if (!hasSavedUrl) {
+        await clearAuth();
+        setAuthHeader(null);
+        setBoot({ ready: true, initial: 'ApiConfiguration' });
+        return;
+      }
       const { token, expiresAt } = await loadAuth();
       if (!token || isExpiredIso(expiresAt)) {
         await clearAuth();
         setAuthHeader(null);
-        setInitial('Login');
+        setBoot({ ready: true, initial: 'Login' });
       } else {
         setAuthHeader(token);
-        setInitial('Home');
+        setBoot({ ready: true, initial: 'Home' });
       }
-      setReady(true);
     })();
   }, []);
 
-  if (!ready) {
+  if (!boot.ready) {
     return (
       <SafeAreaProvider>
-        <View style={styles.boot}>
-          <ActivityIndicator size="large" color="#2563eb" />
-        </View>
+        <AppErrorBoundary>
+          <View style={styles.boot}>
+            <ActivityIndicator size="large" color="#2563eb" />
+          </View>
+        </AppErrorBoundary>
       </SafeAreaProvider>
     );
   }
 
   return (
     <SafeAreaProvider>
+      <AppErrorBoundary>
       <NavigationContainer>
-        <Stack.Navigator initialRouteName={initial} screenOptions={{ headerShown: true }}>
+        <Stack.Navigator initialRouteName={boot.initial} screenOptions={{ headerShown: true }}>
+          <Stack.Screen
+            name="ApiConfiguration"
+            component={ApiConfigurationScreen}
+            options={{ title: 'Configuration' }}
+          />
           <Stack.Screen name="Login" component={LoginScreen} options={{ title: 'GoDaam Login' }} />
           <Stack.Screen
             name="Home"
@@ -92,6 +112,7 @@ export default function App() {
           <Stack.Screen name="Profile" component={ProfileScreen} />
         </Stack.Navigator>
       </NavigationContainer>
+      </AppErrorBoundary>
     </SafeAreaProvider>
   );
 }
