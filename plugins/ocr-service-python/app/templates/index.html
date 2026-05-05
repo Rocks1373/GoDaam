@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GoDaam — OCR Tool</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background: #f4f6f8; color: #1a1a1a; }
+    header { background: #0f172a; color: #fff; padding: 12px 20px; font-weight: 700; font-size: 1.1rem; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; display: grid; grid-template-columns: 1fr 1.2fr; gap: 20px; }
+    @media (max-width: 800px) { .wrap { grid-template-columns: 1fr; } }
+    .card { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    h2 { margin: 0 0 12px; font-size: 0.95rem; color: #334155; }
+    label { display: block; font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 4px; }
+    input[type="text"], input[type="file"] { width: 100%; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.85rem; }
+    button { cursor: pointer; border: none; border-radius: 6px; padding: 10px 14px; font-weight: 600; font-size: 0.85rem; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-secondary { background: #e2e8f0; color: #1e293b; margin-right: 8px; margin-top: 8px; }
+    .btn-danger { background: #fee2e2; color: #991b1b; }
+    .btn-green { background: #059669; color: #fff; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-top: 8px; }
+    th, td { border: 1px solid #e2e8f0; padding: 6px; text-align: left; }
+    th { background: #f1f5f9; }
+    td input { border: none; width: 100%; padding: 4px; font-size: 0.8rem; }
+    .msg { font-size: 0.8rem; margin-top: 10px; padding: 8px; border-radius: 6px; background: #eff6ff; color: #1e40af; }
+    .err { background: #fef2f2; color: #991b1b; }
+    .hint { font-size: 0.72rem; color: #64748b; margin-top: 8px; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <header>GoDaam — Simple OCR Tool</header>
+  <div class="wrap">
+    <div class="card">
+      <h2>1. Upload</h2>
+      <label for="file">PDF or image</label>
+      <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.tif,.tiff" />
+      <button type="button" class="btn-primary" id="btnUpload" style="margin-top:12px;width:100%">Upload</button>
+      <button type="button" class="btn-primary" id="btnExtract" style="margin-top:8px;width:100%" disabled>Extract Data</button>
+      <p class="hint" id="uploadHint">Upload first, then extract. Heuristics only — always check values before exporting.</p>
+      <div id="msg" class="msg" style="display:none"></div>
+    </div>
+    <div class="card">
+      <h2>2. Header (editable)</h2>
+      <label>Invoice Number</label><input type="text" id="h_invoice" />
+      <label style="margin-top:8px">Date</label><input type="text" id="h_date" />
+      <label style="margin-top:8px">PO Number</label><input type="text" id="h_po" />
+      <label style="margin-top:8px">Vendor</label><input type="text" id="h_vendor" />
+      <label style="margin-top:8px">Customer</label><input type="text" id="h_customer" />
+      <h2 style="margin-top:16px">3. Line items</h2>
+      <table>
+        <thead><tr><th>Part Number</th><th>Description</th><th>Qty</th><th style="width:48px"></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <button type="button" class="btn-secondary" id="btnAdd">Add Row</button>
+      <button type="button" class="btn-green" id="btnExcel">Export Excel</button>
+      <button type="button" class="btn-secondary" id="btnJson">Copy JSON</button>
+    </div>
+  </div>
+  <script>
+    const API = "{{ api_base }}";
+    let fileId = null;
+
+    function showMsg(text, isErr) {
+      const el = document.getElementById("msg");
+      el.style.display = "block";
+      el.textContent = text;
+      el.className = "msg" + (isErr ? " err" : "");
+    }
+
+    function headerObj() {
+      return {
+        invoice_number: document.getElementById("h_invoice").value.trim(),
+        date: document.getElementById("h_date").value.trim(),
+        po_number: document.getElementById("h_po").value.trim(),
+        vendor: document.getElementById("h_vendor").value.trim(),
+        customer: document.getElementById("h_customer").value.trim(),
+      };
+    }
+
+    function itemsFromTable() {
+      const tbody = document.getElementById("rows");
+      const out = [];
+      tbody.querySelectorAll("tr").forEach((tr) => {
+        const ins = tr.querySelectorAll("input");
+        if (ins.length >= 3) {
+          out.push({
+            part_number: ins[0].value.trim(),
+            description: ins[1].value.trim(),
+            qty: ins[2].value.trim(),
+          });
+        }
+      });
+      return out;
+    }
+
+    function applyData(data) {
+      const h = data.header || {};
+      document.getElementById("h_invoice").value = h.invoice_number || "";
+      document.getElementById("h_date").value = h.date || "";
+      document.getElementById("h_po").value = h.po_number || "";
+      document.getElementById("h_vendor").value = h.vendor || "";
+      document.getElementById("h_customer").value = h.customer || "";
+      const tbody = document.getElementById("rows");
+      tbody.innerHTML = "";
+      const items = data.items || [];
+      if (!items.length) {
+        addRow("", "", "");
+        return;
+      }
+      items.forEach((r) => addRow(r.part_number || "", r.description || "", r.qty || ""));
+    }
+
+    function addRow(p, d, q) {
+      const tbody = document.getElementById("rows");
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td><input type=\"text\" value=\"" +
+        escapeAttr(p) +
+        "\" /></td><td><input type=\"text\" value=\"" +
+        escapeAttr(d) +
+        "\" /></td><td><input type=\"text\" value=\"" +
+        escapeAttr(q) +
+        "\" /></td><td><button type=\"button\" class=\"btn-danger\" style=\"padding:4px 8px;font-size:0.75rem\">Del</button></td>";
+      tr.querySelector("button").onclick = () => tr.remove();
+      tbody.appendChild(tr);
+    }
+
+    function escapeAttr(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;");
+    }
+
+    document.getElementById("btnAdd").onclick = () => addRow("", "", "");
+
+    document.getElementById("btnUpload").onclick = async () => {
+      const f = document.getElementById("file").files[0];
+      if (!f) {
+        showMsg("Choose a file first.", true);
+        return;
+      }
+      const fd = new FormData();
+      fd.append("file", f);
+      try {
+        const res = await fetch(API + "/upload", { method: "POST", body: fd });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j.detail || JSON.stringify(j));
+        fileId = j.file_id;
+        document.getElementById("btnExtract").disabled = false;
+        showMsg("Uploaded. Click Extract Data.");
+      } catch (e) {
+        showMsg(e.message, true);
+      }
+    };
+
+    document.getElementById("btnExtract").onclick = async () => {
+      if (!fileId) return;
+      try {
+        const res = await fetch(API + "/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file_id: fileId }),
+        });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j.detail || JSON.stringify(j));
+        applyData(j);
+        showMsg("Extracted — review and edit if needed.");
+      } catch (e) {
+        showMsg(e.message, true);
+      }
+    };
+
+    document.getElementById("btnExcel").onclick = async () => {
+      try {
+        const res = await fetch(API + "/export-excel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ header: headerObj(), items: itemsFromTable() }),
+        });
+        if (!res.ok) {
+          const t = await res.text();
+          throw new Error(t);
+        }
+        const blob = await res.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "ocr-export.xlsx";
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showMsg("Excel downloaded.");
+      } catch (e) {
+        showMsg(e.message, true);
+      }
+    };
+
+    document.getElementById("btnJson").onclick = async () => {
+      const payload = { header: headerObj(), items: itemsFromTable() };
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      showMsg("JSON copied to clipboard.");
+    };
+
+    addRow("", "", "");
+  </script>
+</body>
+</html>

@@ -18,6 +18,9 @@ import {
   LineChart,
   FileSpreadsheet,
   Image,
+  ScanLine,
+  GitCompare,
+  ExternalLink,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Dashboard from './pages/Dashboard';
@@ -41,6 +44,9 @@ import InboundReport from './pages/InboundReport';
 import OutboundReport from './pages/OutboundReport';
 import DeliveryReport from './pages/DeliveryReport';
 import ReportExportPage from './pages/ReportExportPage';
+import OcrCenter from './pages/OcrCenter';
+import SapStock from './pages/SapStock';
+import StockComparisonReport from './pages/StockComparisonReport';
 import { authApi, notificationsApi } from './services/api';
 import './index.css';
 
@@ -515,7 +521,47 @@ function App() {
                         <span className="truncate">Main Stock Report</span>
                       </NavLink>
                       <NavLink
-                        to="/reports/sap-stock"
+                        to="/reports/stock-comparison"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <GitCompare className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Stock Comparison Report</span>
+                      </NavLink>
+                      <NavLink
+                        to="/ocr-center"
+                        className={({ isActive }) =>
+                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
+                            isActive
+                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
+                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
+                          }`
+                        }
+                      >
+                        <ScanLine className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">OCR Center</span>
+                      </NavLink>
+                      <a
+                        href={import.meta.env.VITE_OCR_TOOL_URL || 'https://godam.divadivya.cloud/ocr'}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all text-gray-700 hover:bg-gray-50 border border-transparent"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">OCR Tool</span>
+                      </a>
+
+                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
+                        <FileSpreadsheet className="w-3 h-3" />
+                        SAP Stock
+                      </div>
+                      <NavLink
+                        to="/sap-stock"
                         className={({ isActive }) =>
                           `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
                             isActive
@@ -525,7 +571,7 @@ function App() {
                         }
                       >
                         <Database className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">SAP Stock Report</span>
+                        <span className="truncate">SAP Stock</span>
                       </NavLink>
 
                       {(user?.role === 'admin' ||
@@ -679,6 +725,9 @@ function App() {
                           />
                         }
                       />
+                      <Route path="/reports/stock-comparison" element={<StockComparisonReport />} />
+                      <Route path="/sap-stock" element={<SapStock />} />
+                      <Route path="/ocr-center" element={<OcrCenter />} />
                       <Route path="/main-stock" element={<MainStock />} />
                       <Route path="/stock-by-rack/*" element={<StockByRack />} />
                       <Route path="/pick-suggestion" element={<Navigate to="/dashboard" replace />} />
