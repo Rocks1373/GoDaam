@@ -19,6 +19,7 @@ import ProfileScreen from './src/screens/ProfileScreen';
 import NotificationsScreen from './src/screens/NotificationsScreen';
 import DeliveryListScreen from './src/screens/DeliveryListScreen';
 import DeliveryDetailScreen from './src/screens/DeliveryDetailScreen';
+import RoutePlannerScreen from './src/screens/RoutePlannerScreen';
 import { loadAuth, isExpiredIso, clearAuth } from './src/storage/tokenStorage';
 import { initApiClientFromStorage, setAuthHeader } from './src/api/client';
 import { AppErrorBoundary } from './src/components/AppErrorBoundary';
@@ -109,6 +110,7 @@ export default function App() {
           <Stack.Screen name="Upcoming" component={UpcomingOrdersScreen} />
           <Stack.Screen name="DeliveryList" component={DeliveryListScreen} options={{ title: 'Delivery' }} />
           <Stack.Screen name="DeliveryDetail" component={DeliveryDetailScreen} />
+          <Stack.Screen name="RoutePlanner" component={RoutePlannerScreen} options={{ title: 'Route planner' }} />
           <Stack.Screen name="Profile" component={ProfileScreen} />
         </Stack.Navigator>
       </NavigationContainer>

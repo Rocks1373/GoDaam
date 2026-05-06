@@ -41,13 +41,11 @@ export default function VendorMaster() {
 
   useEffect(() => {
     fetchRows('');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     const t = setTimeout(() => fetchRows(search), 250);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
   const tableRows = useMemo(() => rows || [], [rows]);

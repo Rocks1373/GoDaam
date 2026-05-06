@@ -21,6 +21,7 @@ export type RootStackParamList = {
   Profile: undefined;
   DeliveryList: undefined;
   DeliveryDetail: { taskId: number };
+  RoutePlanner: undefined;
 };
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Login'>;

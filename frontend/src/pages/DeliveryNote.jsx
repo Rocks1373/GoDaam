@@ -354,17 +354,44 @@ export default function DeliveryNote() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
 
+  /** Load drivers: for GAPP with no carrier selected, merge all GAPP carriers' drivers (default "GAPP" option has empty id). */
   useEffect(() => {
-    const cId = transportCarrierId ? Number(transportCarrierId) : null;
-    if (!cId) {
-      setDrivers([]);
-      return;
-    }
-    carriersApi
-      .listDrivers(cId)
-      .then((rows) => setDrivers(rows || []))
-      .catch(() => setDrivers([]));
-  }, [transportCarrierId]);
+    let cancelled = false;
+    (async () => {
+      try {
+        if (String(transportType || '').toLowerCase() === 'gapp') {
+          if (transportCarrierId) {
+            const rows = await carriersApi.listDrivers(Number(transportCarrierId));
+            if (!cancelled) setDrivers(rows || []);
+            return;
+          }
+          const gappIds = (carriers || [])
+            .filter((c) => String(c.carrier_type || '').toLowerCase() === 'gapp')
+            .map((c) => c.id);
+          if (!gappIds.length) {
+            if (!cancelled) setDrivers([]);
+            return;
+          }
+          const parts = await Promise.all(
+            gappIds.map((id) => carriersApi.listDrivers(id).catch(() => []))
+          );
+          if (!cancelled) setDrivers(parts.flat());
+          return;
+        }
+        if (!transportCarrierId) {
+          if (!cancelled) setDrivers([]);
+          return;
+        }
+        const rows = await carriersApi.listDrivers(Number(transportCarrierId));
+        if (!cancelled) setDrivers(rows || []);
+      } catch {
+        if (!cancelled) setDrivers([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [transportCarrierId, carriers, transportType]);
 
   const openTransport = () => {
     if (!dn) return;

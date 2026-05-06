@@ -3,7 +3,11 @@
     "name": "GoDaam",
     "slug": "godam-mobile",
     "version": "1.0.1",
-    "extra": {},
+    "extra": {
+      "eas": {
+        "projectId": "1667da6d-66c4-474e-b7d5-0a7c3c2ccd0f"
+      }
+    },
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",

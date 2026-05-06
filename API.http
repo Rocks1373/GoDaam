@@ -1,0 +1,18 @@
+### GoDaam local API — use with VS Code "REST Client" or similar extensions
+### Start stack: npm run dev (repo root GoDaam) — API :3001; web UI is usually http://localhost:5173/
+### If Vite says "Port 5173 is in use", open the printed URL (e.g. http://localhost:5175/).
+@base = http://localhost:3001
+@token = REPLACE_WITH_TOKEN_FROM_LOGIN
+
+### Health (no auth)
+GET {{base}}/api/health
+
+### Login — default local admin matches backend/.env (admin / admin123)
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{"username":"admin","password":"admin123"}
+
+### Example authenticated call (paste token from login response)
+GET {{base}}/api/dashboard/summary
+Authorization: Bearer {{token}}

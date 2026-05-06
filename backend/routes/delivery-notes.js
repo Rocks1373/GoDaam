@@ -639,28 +639,32 @@ router.post('/:id/confirm', requirePermission('can_upload_outbound'), async (req
       const mapsHint = gpsLink ? `\nMaps: ${gpsLink}` : '';
       const bodyDriver = `Outbound: ${outboundNum}\nCustomer: ${customerName}\nAddress: ${address}\nDriver: ${driverName}${mapsHint}`;
 
-      if (driverUserId) {
-        await sendExpoPushToUserIds(
-          [driverUserId],
-          'Order Confirmed for Delivery',
-          bodyDriver,
-          {
-            type: 'delivery_confirmed',
-            dn_id: id,
-            task_id: taskRow.id,
-            outbound_number: outboundNum,
-            open_action: 'delivery_open',
-          }
-        );
-      }
+      try {
+        if (driverUserId) {
+          await sendExpoPushToUserIds(
+            [driverUserId],
+            'Order Confirmed for Delivery',
+            bodyDriver,
+            {
+              type: 'delivery_confirmed',
+              dn_id: id,
+              task_id: taskRow.id,
+              outbound_number: outboundNum,
+              open_action: 'delivery_open',
+            }
+          );
+        }
 
-      const city = trimStr(dn.city_name);
-      const webTitle = `Outbound ${outboundNum} confirmed for delivery`;
-      const webBody =
-        city && customerName
-          ? `${webTitle} – ${customerName.split(/\s+/).slice(0, 2).join(' ')} ${city}`
-          : webTitle;
-      await notifyWebDeliveryStaff(webTitle, webBody, { dn_id: id, outbound_number: outboundNum });
+        const city = trimStr(dn.city_name);
+        const webTitle = `Outbound ${outboundNum} confirmed for delivery`;
+        const webBody =
+          city && customerName
+            ? `${webTitle} – ${customerName.split(/\s+/).slice(0, 2).join(' ')} ${city}`
+            : webTitle;
+        await notifyWebDeliveryStaff(webTitle, webBody, { dn_id: id, outbound_number: outboundNum });
+      } catch (notifyErr) {
+        console.error('delivery-notes confirm: notifications failed after commit', notifyErr?.message || notifyErr);
+      }
 
       return res.json(await getDnView(id));
     } catch (e) {

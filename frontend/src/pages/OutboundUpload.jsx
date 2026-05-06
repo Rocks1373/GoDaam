@@ -34,7 +34,6 @@ export default function OutboundUpload({ currentUser }) {
 
   useEffect(() => {
     loadOrders();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filteredOrders = useMemo(() => {

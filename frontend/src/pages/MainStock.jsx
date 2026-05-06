@@ -274,7 +274,6 @@ export default function MainStock() {
       if (tab === 'stock') loadStock(search);
     }, 300);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, tab]);
 
   useEffect(() => {

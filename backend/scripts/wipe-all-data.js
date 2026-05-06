@@ -4,8 +4,9 @@
  * Uses a standalone SQLite connection so it does not race db.js seeding.
  *
  * Usage (from backend/):
- *   node scripts/wipe-all-data.js           # dry run / instructions
- *   node scripts/wipe-all-data.js --yes     # wipe
+ *   node scripts/wipe-all-data.js                    # dry run / instructions
+ *   node scripts/wipe-all-data.js --yes              # wipe everything (including users)
+ *   node scripts/wipe-all-data.js --yes --keep-admin # wipe all data but keep user rows where role is admin
  *
  * Stop the API/dev server first if you see "database is locked".
  */
@@ -16,13 +17,43 @@ const { promisify } = require('util');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'warehouse.db');
 
+async function getUserColumnNames(all) {
+  const cols = await all(`PRAGMA table_info(users)`);
+  return cols.sort((a, b) => a.cid - b.cid).map((c) => c.name);
+}
+
+async function restoreAdminUsers(run, all, adminRows) {
+  if (!adminRows.length) return;
+  const colNames = await getUserColumnNames(all);
+  const quoted = colNames.map((n) => `"${String(n).replace(/"/g, '""')}"`).join(', ');
+  const placeholders = colNames.map(() => '?').join(', ');
+  const sql = `INSERT INTO users (${quoted}) VALUES (${placeholders})`;
+  for (const row of adminRows) {
+    const values = colNames.map((name) =>
+      Object.prototype.hasOwnProperty.call(row, name) ? row[name] : null
+    );
+    await run(sql, values);
+  }
+}
+
+async function refreshUsersSequence(run, get) {
+  const maxRow = await get(`SELECT MAX(id) AS m FROM users`);
+  const m = maxRow?.m;
+  if (m == null) return;
+  await run(`DELETE FROM sqlite_sequence WHERE name = 'users'`);
+  await run(`INSERT INTO sqlite_sequence (name, seq) VALUES ('users', ?)`, [m]);
+}
+
 async function main() {
   const yes = process.argv.includes('--yes');
+  const keepAdmin = process.argv.includes('--keep-admin');
   if (!yes) {
     console.log(`Database file: ${path.resolve(DB_PATH)}`);
     console.log('This removes ALL rows from ALL tables (users, stock, orders, carriers, etc.).');
+    console.log('With --yes --keep-admin, only user rows where role is admin are preserved (everything else cleared).');
     console.log('Schema and migrations stay intact.');
-    console.log('\nRe-run with --yes to execute.');
+    console.log('\nRe-run with --yes to wipe everything.');
+    console.log('Re-run with --yes --keep-admin to wipe except admin user rows.');
     console.log('Tip: stop ./dev.sh or any process using this DB if you get SQLITE_BUSY.');
     process.exit(0);
   }
@@ -30,9 +61,21 @@ async function main() {
   const db = new sqlite3.Database(DB_PATH);
   const run = promisify(db.run.bind(db));
   const all = promisify(db.all.bind(db));
+  const get = promisify(db.get.bind(db));
   const close = promisify(db.close.bind(db));
 
   try {
+    let adminBackup = [];
+    if (keepAdmin) {
+      adminBackup = await all(
+        `SELECT * FROM users WHERE lower(trim(coalesce(role,''))) = 'admin'`
+      );
+      console.log(`--keep-admin: backing up ${adminBackup.length} admin user row(s)`);
+      if (!adminBackup.length) {
+        console.warn('No admin users found before wipe; users table will be empty. Run: node scripts/ensure-admin.js');
+      }
+    }
+
     await run('PRAGMA foreign_keys = OFF');
     const tables = await all(
       `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
@@ -47,11 +90,20 @@ async function main() {
     const seq = await all(`SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'`);
     if (seq.length) await run('DELETE FROM sqlite_sequence');
 
+    if (keepAdmin && adminBackup.length) {
+      await restoreAdminUsers(run, all, adminBackup);
+      await refreshUsersSequence(run, get);
+    }
+
     await run('PRAGMA foreign_keys = ON');
     await run('VACUUM');
 
     console.log(`Wiped ${tables.length} tables in ${path.resolve(DB_PATH)}`);
-    console.log('Restart the API: default admin user is re-created if missing (ADMIN_USERNAME / ADMIN_PASSWORD env).');
+    if (keepAdmin && adminBackup.length) {
+      console.log(`Restored ${adminBackup.length} admin user(s).`);
+    } else if (!keepAdmin) {
+      console.log('Restart the API: default admin user is re-created if missing (ADMIN_USERNAME / ADMIN_PASSWORD env).');
+    }
     console.log('Demo stock/customer/FIFO seed runs only when GODAM_SEED_DEMO_DATA=1 (see db.js).');
   } finally {
     await close().catch(() => {});

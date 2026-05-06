@@ -58,13 +58,11 @@ export default function VendorItems() {
   useEffect(() => {
     refreshVendors();
     fetchRows('', '');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     const t = setTimeout(() => fetchRows(search, vendorId), 250);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, vendorId]);
 
   const tableRows = useMemo(() => rows || [], [rows]);

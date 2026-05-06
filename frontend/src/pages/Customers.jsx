@@ -82,7 +82,6 @@ export default function Customers() {
 
   useEffect(() => {
     fetchRows('');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Debounce search so you can type full values smoothly.
@@ -91,7 +90,6 @@ export default function Customers() {
       fetchRows(search);
     }, 300);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
 
   const parseBulk = () => {

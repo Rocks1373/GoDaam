@@ -28,6 +28,8 @@ router.use(requireAuth);
 router.use(requireMobileAccess);
 
 router.use('/deliveries', require('./mobile-deliveries'));
+router.use('/driver-deliveries', require('./mobile-driver-deliveries'));
+router.use('/driver-routes', require('./mobile-driver-routes'));
 
 /** One round-trip for home badges: unread notifications + unseen pick orders (for pickers). */
 router.get('/summary', async (req, res) => {

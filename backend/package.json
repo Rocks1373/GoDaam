@@ -13,7 +13,9 @@
     "seed:test-data": "node scripts/seed-test-data.js",
     "wipe-db": "node scripts/wipe-all-data.js",
     "wipe-db:yes": "node scripts/wipe-all-data.js --yes",
-    "ensure-admin": "node scripts/ensure-admin.js"
+    "wipe-db:keep-admin": "node scripts/wipe-all-data.js --yes --keep-admin",
+    "ensure-admin": "node scripts/ensure-admin.js",
+    "generate:customer-address-book": "node scripts/generate-customer-address-book-from-sample-outbounds.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

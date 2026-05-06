@@ -11,6 +11,7 @@ import {
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
 import { listDeliveries, type DriverDeliveryTask } from '../api/deliveriesApi';
+import { listActiveDriverDeliveries } from '../api/driverRoutesApi';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DeliveryList'>;
 
@@ -19,18 +20,24 @@ export default function DeliveryListScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState('');
+  const [activeCount, setActiveCount] = useState<number | null>(null);
 
   const load = useCallback(async (isPull = false) => {
     setErr('');
     if (isPull) setRefreshing(true);
     else setLoading(true);
     try {
-      const data = await listDeliveries();
+      const [data, active] = await Promise.all([
+        listDeliveries(),
+        listActiveDriverDeliveries().catch(() => []),
+      ]);
       setRows(Array.isArray(data) ? data : []);
+      setActiveCount(Array.isArray(active) ? active.length : 0);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { error?: string } }; message?: string })?.response?.data?.error;
       setErr(msg || (e as Error).message || 'Failed to load');
       setRows([]);
+      setActiveCount(null);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -44,6 +51,19 @@ export default function DeliveryListScreen({ navigation }: Props) {
   return (
     <View style={styles.screen}>
       {err ? <Text style={styles.err}>{err}</Text> : null}
+      <View style={styles.topPad}>
+        <Pressable
+          style={({ pressed }) => [styles.routeBtn, pressed && { opacity: 0.92 }]}
+          onPress={() => navigation.navigate('RoutePlanner')}
+        >
+          <Text style={styles.routeBtnText}>
+            Show Route{activeCount != null ? ` (${activeCount})` : ''}
+          </Text>
+        </Pressable>
+        <Text style={styles.hint}>
+          If you have one active delivery, open it to navigate. If you have multiple, use Route Planner.
+        </Text>
+      </View>
       {loading && !rows.length ? (
         <ActivityIndicator style={{ marginTop: 24 }} />
       ) : (
@@ -78,6 +98,15 @@ export default function DeliveryListScreen({ navigation }: Props) {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#f1f5f9' },
+  topPad: { padding: 16, paddingBottom: 0 },
+  routeBtn: {
+    backgroundColor: '#2563eb',
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  routeBtnText: { color: '#fff', fontWeight: '900' },
+  hint: { marginTop: 8, fontSize: 12, color: '#64748b' },
   listPad: { padding: 16, paddingBottom: 32 },
   err: { color: '#b91c1c', padding: 16, fontSize: 13 },
   empty: { textAlign: 'center', color: '#64748b', marginTop: 40 },

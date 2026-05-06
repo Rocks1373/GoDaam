@@ -429,7 +429,7 @@ export default function TransportationDetails({ user }) {
         </button>
       </div>
     ),
-    [driverFilters]
+    [driverFilters, loadDrivers]
   );
 
   if (!canAccessPage(user)) {

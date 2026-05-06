@@ -491,6 +491,9 @@ async function migrateGodamSchema(db) {
       delivery_address TEXT,
       city_name TEXT,
       gps_link TEXT,
+      latitude REAL,
+      longitude REAL,
+      sequence_no INTEGER,
       contact_person TEXT,
       contact_number TEXT,
       driver_user_id INTEGER,
@@ -511,6 +514,39 @@ async function migrateGodamSchema(db) {
   `);
   await run(`CREATE INDEX IF NOT EXISTS idx_driver_tasks_dn ON driver_delivery_tasks(dn_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_driver_tasks_driver ON driver_delivery_tasks(driver_user_id)`);
+  await ensureColumn(db, 'driver_delivery_tasks', 'latitude', 'REAL');
+  await ensureColumn(db, 'driver_delivery_tasks', 'longitude', 'REAL');
+  await ensureColumn(db, 'driver_delivery_tasks', 'sequence_no', 'INTEGER');
+
+  // --- Driver route planner (manual order + auto-sort) ---
+  await run(`
+    CREATE TABLE IF NOT EXISTS driver_route_stops (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      driver_user_id INTEGER NOT NULL,
+      driver_delivery_task_id INTEGER NOT NULL,
+      outbound_number TEXT,
+      customer_name TEXT,
+      city_name TEXT,
+      gps_link TEXT,
+      latitude REAL,
+      longitude REAL,
+      sequence_no INTEGER,
+      route_status TEXT DEFAULT 'Active',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(driver_user_id, driver_delivery_task_id),
+      FOREIGN KEY (driver_user_id) REFERENCES users(id),
+      FOREIGN KEY (driver_delivery_task_id) REFERENCES driver_delivery_tasks(id)
+    )
+  `);
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_driver_route_stops_driver_status
+     ON driver_route_stops(driver_user_id, route_status, sequence_no, id)`
+  );
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_driver_route_stops_task
+     ON driver_route_stops(driver_delivery_task_id)`
+  );
 
   // --- Transportation Details (replaces legacy carriers / carrier_drivers master data) ---
   await run(`

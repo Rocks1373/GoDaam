@@ -6,7 +6,8 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c green,cyan \"npm:dev --workspace backend\" \"npm:dev --workspace frontend\"",
+    "dev": "concurrently -n backend,frontend -c green,cyan \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\"",
+    "dev:all": "concurrently -n backend,frontend,mobile -c green,cyan,magenta \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\" \"npm run start --prefix godam-mobile\"",
     "build": "npm run build --workspace frontend",
     "start": "npm run start --workspace backend",
     "seed:sample": "npm run seed:sample --workspace backend",

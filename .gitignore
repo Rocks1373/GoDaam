@@ -8,6 +8,8 @@ build
 .expo
 .expo-shared
 *.log
+# MS Office Excel temp lock files (never commit)
+~$*
 *.sqlite
 *.db
 uploads/
