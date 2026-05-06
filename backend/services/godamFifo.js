@@ -80,8 +80,12 @@ async function generateFifoForOutboundOrder(outboundOrderId) {
     [outboundOrderId]
   );
   for (const item of items) {
+    const picked = Number(item.picked_qty) || 0;
+    const req = Number(item.required_qty) || 0;
+    const remaining = Math.max(0, req - picked);
+    if (remaining <= 0) continue;
     const rows = await loadStockByRackRowsForKeys(item.material || item.part_number, item.sap_part_number);
-    const suggestions = allocateSuggestions(item.required_qty, rows);
+    const suggestions = allocateSuggestions(remaining, rows);
     await insertFifoRows(outboundOrderId, item, suggestions);
   }
   return dbAll(

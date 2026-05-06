@@ -24,15 +24,25 @@ Full-stack warehouse operations: web admin, APIs, and mobile field app.
 
 Do **not** commit `.env` files or production databases. Copy `.env.example` where provided and set secrets locally.
 
-## Run from repo root (web + API)
+## Run from repo root (backend + web + mobile)
+
+First time, install dependencies for workspaces and the Expo app:
 
 ```bash
-npm install
+npm run install:all
+```
+
+Then start everything (API, Vite, Expo Metro on port 8090):
+
+```bash
 npm run dev
 ```
 
 - Backend API: http://localhost:3001  
 - Frontend UI: http://localhost:5173  
+- Mobile: Metro at http://localhost:8090 — open in Expo Go or press `a` / `i` in the terminal  
+
+Web + API only (no Expo): `npm run dev:web` (after `npm install` at the root).
 
 ## Run backend only
 
@@ -61,10 +71,14 @@ npm run dev
 
 ### Run the app
 
+From the repo root (with `npm run install:all` already done), use **`npm run dev`** — it starts Metro on port **8090**.
+
+Or run only the mobile pack:
+
 ```bash
 cd godam-mobile
 npm install
-npx expo start
+npm start
 ```
 
 Press **a** to open on the Android emulator.
@@ -86,6 +100,14 @@ Configure API base URL via the mobile app’s env / config (see `godam-mobile/.e
 - Never push `.env` or secrets.  
 - Keep `JWT_SECRET`, DB paths, and credentials in environment variables.  
 - `*.db` / `*.sqlite` are ignored by Git by default.
+
+## Production deployment (no Docker)
+
+Run Node and a static web server on your VPS (or PaaS):
+
+1. **Backend:** `cd backend && npm ci && npm run start` (or use pm2/systemd). Point `JWT_SECRET` and DB path at persistent storage.  
+2. **Frontend:** `npm run build` at repo root (or `frontend`), then serve `frontend/dist` with nginx/Caddy and **proxy `/api`** to the backend (e.g. `http://127.0.0.1:3001`).  
+3. **SQLite & uploads:** keep `warehouse.db` and `backend/uploads` on durable disk with backups.
 
 ## Publish to GitHub
 

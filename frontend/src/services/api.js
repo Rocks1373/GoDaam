@@ -131,6 +131,8 @@ export const reportsApi = {
   stockByRackReport: async (params = {}) => (await api.get('/reports/stock-by-rack', { params })).data,
   mainStockReport: async (params = {}) => (await api.get('/reports/main-stock', { params })).data,
   sapStock: async (params = {}) => (await api.get('/reports/sap-stock', { params })).data,
+  stockComparison: async (params = {}) => (await api.get('/reports/stock-comparison', { params })).data,
+  rackBalanceAdjustments: async (params = {}) => (await api.get('/reports/rack-balance-adjustments', { params })).data,
 };
 
 export const dashboardApi = {
@@ -158,9 +160,35 @@ export const stockComparisonApi = {
   report: async (params = {}) => (await api.get('/stock-comparison-report', { params })).data,
 };
 
+export const sapStockApi = {
+  list: async (params = {}) => (await api.get('/sap-stock', { params })).data,
+  summary: async (params = {}) => (await api.get('/sap-stock/summary', { params })).data,
+  details: async (material) =>
+    (await api.get(`/sap-stock/${encodeURIComponent(material)}/details`)).data,
+  uploadHistory: async () => (await api.get('/sap-stock/upload-history')).data,
+  upload: async (file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await api.post('/sap-stock/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    return res.data;
+  },
+  updateMainStockSapQty: async (batch_id) =>
+    (await api.post('/sap-stock/update-main-stock-sap-qty', { batch_id })).data,
+  clearLatestUpload: async () => (await api.post('/sap-stock/clear-latest-upload')).data,
+  downloadTemplate: async () => {
+    const res = await api.get('/sap-stock/template', { responseType: 'blob' });
+    downloadBlob(res.data, 'sap-stock-upload-template.xlsx');
+  },
+  exportExcel: async () => {
+    const res = await api.get('/sap-stock/export', { responseType: 'blob' });
+    downloadBlob(res.data, 'sap-stock-export.xlsx');
+  },
+};
+
 export const stockByRackApi = {
   list: async (params = {}) => (await api.get('/stock-by-rack', { params: { limit: 500, ...params } })).data,
   search: async (params = {}) => (await api.get('/stock-by-rack/search', { params: { limit: 500, ...params } })).data,
+  adjust: async (payload) => (await api.post('/stock-by-rack/adjust', payload)).data,
 };
 
 export const stockInApi = {
@@ -409,6 +437,96 @@ export const maintenanceApi = {
     (await api.get(`/admin/maintenance/browse/${encodeURIComponent(table)}`, { params: { limit } })).data,
   clearOutboundDomain: async (confirmPhrase) =>
     (await api.post('/admin/maintenance/clear-outbound-domain', { confirmPhrase })).data,
+};
+
+/** Web OCR Center — templates, uploads, results (does not auto-post to stock). */
+export const ocrCenterApi = {
+  listTemplates: async (params = {}) => (await api.get('/ocr/templates', { params })).data,
+  createTemplate: async (payload) => (await api.post('/ocr/templates', payload)).data,
+  updateTemplate: async (id, payload) => (await api.put(`/ocr/templates/${id}`, payload)).data,
+  deleteTemplate: async (id) => (await api.delete(`/ocr/templates/${id}`)).data,
+  getSettings: async () => (await api.get('/ocr/settings')).data,
+  updateSettings: async (payload) => (await api.put('/ocr/settings', payload)).data,
+  upload: async (file, { document_type, template_id } = {}) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (document_type) fd.append('document_type', document_type);
+    if (template_id) fd.append('template_id', String(template_id));
+    const res = await api.post('/ocr/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    return res.data;
+  },
+  run: async (payload) => (await api.post('/ocr/run', payload)).data,
+  saveResult: async (payload) => (await api.post('/ocr/save-result', payload)).data,
+  listResults: async (limit = 100) => (await api.get('/ocr/results', { params: { limit } })).data,
+  getResult: async (id) => (await api.get(`/ocr/results/${id}`)).data,
+  exportExcel: async (id) => {
+    const res = await api.post(`/ocr/results/${id}/export-excel`, {}, { responseType: 'blob' });
+    downloadBlob(res.data, `ocr-result-${id}.xlsx`);
+  },
+  sendInbound: async (id) => (await api.post(`/ocr/results/${id}/send-to-inbound`)).data,
+  sendOutbound: async (id) => (await api.post(`/ocr/results/${id}/send-to-outbound`)).data,
+};
+
+/** Huawei GoDam batches → SQLite huawei_godam.db (server-side matcher + importer) */
+export const huaweiGodamApi = {
+  health: async () => (await api.get('/huawei-godam/health')).data,
+  listBatches: async (limit = 50) => (await api.get('/huawei-godam/batches', { params: { limit } })).data,
+  getBatch: async (id) => (await api.get(`/huawei-godam/batches/${id}`)).data,
+  createBatch: async (masters, dnFiles, rulesFile = null) => {
+    const fd = new FormData();
+    const keys = ['summary', 'po', 'so', 'vcust', 'contracts', 'accessories'];
+    for (const k of keys) {
+      const f = masters[k];
+      if (f) fd.append(k, f);
+    }
+    if (rulesFile) fd.append('rules', rulesFile);
+    for (const f of dnFiles || []) fd.append('dn', f);
+    const res = await api.post('/huawei-godam/batches', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return res.data;
+  },
+};
+
+/** Huawei module — opens GoDam-1.0 URL from DB (huawei_godam_settings); logs opens */
+export const huaweiModuleApi = {
+  getGodamUrl: async () => (await api.get('/huawei-module/godam-url')).data,
+  recordGodamOpen: async () => (await api.post('/huawei-module/godam-open')).data,
+  /** Admin: set Streamlit / hosted GoDam URL */
+  updateGodamUrl: async (external_url) =>
+    (await api.put('/huawei-module/godam-url', { external_url })).data,
+};
+
+/** GoDam-1.0 Excel plugin (DN/SO/PO matching) — see plugins/godam-excel */
+export const godamExcelApi = {
+  health: async () => (await api.get('/godam-excel/health')).data,
+  /**
+   * @param {Record<string, File>} masters — summary, po, so, vcust, contracts, accessories
+   * @param {File[]} dnFiles — one or more DN workbooks (saved under DSA/)
+   */
+  match: async (masters, dnFiles) => {
+    const fd = new FormData();
+    const keys = ['summary', 'po', 'so', 'vcust', 'contracts', 'accessories'];
+    for (const k of keys) {
+      const f = masters[k];
+      if (f) fd.append(k, f);
+    }
+    for (const f of dnFiles || []) fd.append('dn', f);
+    const res = await api.post('/godam-excel/match', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      responseType: 'blob',
+    });
+    const metaB64 = res.headers?.['x-godam-excel-meta'];
+    let meta = null;
+    if (metaB64) {
+      try {
+        meta = JSON.parse(atob(metaB64));
+      } catch {
+        meta = null;
+      }
+    }
+    return { blob: res.data, meta };
+  },
 };
 
 export default api;

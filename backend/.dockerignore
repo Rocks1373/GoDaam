@@ -1,7 +1,0 @@
-node_modules
-warehouse.db
-uploads
-npm-debug.log
-.git
-.env
-*.md

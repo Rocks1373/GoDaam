@@ -8,6 +8,7 @@ const PORT = process.env.PORT || 3001;
 
 // Initialize DB (creates tables if missing)
 require('./db');
+require('./huaweiGodamDb');
 
 // Middleware — browser clients only; native apps often omit Origin (allowed below).
 const DEFAULT_CORS_ORIGINS = [
@@ -79,9 +80,14 @@ const webAuth = [requireAuth, requireWebAccess];
 app.use('/api/main-stock', ...webAuth, require('./routes/main-stock'));
 app.use('/api/inbound', ...webAuth, require('./routes/inbound'));
 app.use('/api/reports', ...webAuth, require('./routes/reports'));
+app.use('/api/ocr', ...webAuth, require('./routes/ocr-center'));
 app.use('/api/dashboard', ...webAuth, require('./routes/dashboard'));
 app.use('/api/sold-out', ...webAuth, require('./routes/sold-out'));
 app.use('/api/stock-comparison-report', ...webAuth, require('./routes/stock-comparison-report'));
+app.use('/api/sap-stock', ...webAuth, require('./routes/sap-stock'));
+app.use('/api/huawei-module', ...webAuth, require('./routes/huawei-module'));
+app.use('/api/huawei-godam', ...webAuth, require('./routes/huawei-godam'));
+app.use('/api/godam-excel', ...webAuth, require('./routes/godam-excel'));
 app.use('/api/stock-by-rack', ...webAuth, require('./routes/stock-by-rack'));
 app.use('/api/stock-in', ...webAuth, require('./routes/stock-in'));
 app.use('/api/stock-out', ...webAuth, require('./routes/stock-out'));

@@ -2,6 +2,7 @@ const express = require('express');
 const { promisify } = require('util');
 
 const db = require('../db');
+const { getStockComparison } = require('../services/stockComparisonService');
 
 const router = express.Router();
 const dbAll = promisify(db.all.bind(db));
@@ -307,6 +308,89 @@ router.get('/sap-stock', async (req, res) => {
       [limit]
     );
     res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/stock-comparison', async (req, res) => {
+  try {
+    const data = await getStockComparison(db, req.query);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Rack admin ± adjustments with FIFO refresh audit; expanded one row per related open order. */
+router.get('/rack-balance-adjustments', async (req, res) => {
+  try {
+    const { from, to, part_number, deductions_only } = req.query;
+    const params = [];
+    let sql = `SELECT * FROM rack_balance_adjustments WHERE 1=1`;
+    if (from) {
+      sql += ` AND date(created_at) >= date(?)`;
+      params.push(from);
+    }
+    if (to) {
+      sql += ` AND date(created_at) <= date(?)`;
+      params.push(to);
+    }
+    if (part_number) {
+      sql += ` AND part_number LIKE ?`;
+      params.push(`%${String(part_number).trim()}%`);
+    }
+    if (deductions_only === 'true' || deductions_only === '1') {
+      sql += ` AND delta_qty < 0`;
+    }
+    sql += ` ORDER BY created_at DESC LIMIT 5000`;
+    const rows = await dbAll(sql, params);
+
+    const expanded = [];
+    for (const r of rows) {
+      let orders = [];
+      try {
+        orders = JSON.parse(r.affected_orders_json || '[]');
+      } catch {
+        orders = [];
+      }
+      const base = {
+        adjustment_id: r.id,
+        created_at: r.created_at,
+        part_number: r.part_number,
+        rack_location: r.rack_location,
+        delta_qty: r.delta_qty,
+        deduction_qty: r.delta_qty < 0 ? Math.abs(r.delta_qty) : null,
+        add_qty: r.delta_qty > 0 ? r.delta_qty : null,
+        balance_after_available: r.balance_after_available,
+        balance_after_total_in: r.balance_after_total_in,
+        balance_after_total_out: r.balance_after_total_out,
+        first_entry_date_before: r.first_entry_date_before,
+        first_entry_date_after: r.first_entry_date_after,
+        remarks: r.remarks,
+        created_by_user_id: r.created_by_user_id,
+      };
+      if (!Array.isArray(orders) || orders.length === 0) {
+        expanded.push({
+          ...base,
+          related_order_id: null,
+          related_outbound_number: null,
+          related_delivery: null,
+          related_order_status: null,
+        });
+      } else {
+        for (const o of orders) {
+          expanded.push({
+            ...base,
+            related_order_id: o.id ?? null,
+            related_outbound_number: o.outbound_number ?? null,
+            related_delivery: o.delivery ?? null,
+            related_order_status: o.status ?? null,
+          });
+        }
+      }
+    }
+    res.json(expanded);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

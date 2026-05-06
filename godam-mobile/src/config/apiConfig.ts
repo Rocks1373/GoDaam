@@ -23,6 +23,7 @@ export function normalizeToApiBase(input: string): string {
   try {
     const withScheme = t.includes('://') ? t : `http://${t}`;
     const u = new URL(withScheme);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
     return `${u.origin}/api`;
   } catch {
     return '';

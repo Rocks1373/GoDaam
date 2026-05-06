@@ -93,7 +93,7 @@ export default function ReportExportPage({ title, fileSlug, endpoint, hint }) {
       {err ? <div className="mb-2 text-[11px] text-red-700">{err}</div> : null}
       {loading ? <div className="text-[11px] text-gray-500 py-6">Loading…</div> : null}
 
-      <div ref={printRef} className="bg-white border rounded-lg overflow-x-auto print:shadow-none">
+      <div ref={printRef} className="display-card bg-white border rounded-lg overflow-x-auto print:shadow-none border-gray-200 shadow-sm">
         <table className="min-w-full text-[10px] border-collapse">
           <thead>
             <tr className="bg-gray-50 border-b">

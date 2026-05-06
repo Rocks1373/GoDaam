@@ -9,7 +9,7 @@ const tabClass = ({ isActive }) =>
     isActive ? 'bg-primary-50 text-primary-700 border-primary-200' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
   }`;
 
-const StockByRack = () => {
+const StockByRack = ({ currentUser }) => {
   return (
     <div>
       <div className="flex flex-col md:flex-row md:items-start justify-between mb-2 gap-2">
@@ -38,7 +38,7 @@ const StockByRack = () => {
 
       <Routes>
         <Route path="/" element={<Navigate to="summary" replace />} />
-        <Route path="summary" element={<StockByRackSummary />} />
+        <Route path="summary" element={<StockByRackSummary currentUser={currentUser} />} />
         <Route path="stock-in" element={<StockIn />} />
         <Route path="stock-out" element={<StockOut />} />
       </Routes>

@@ -21,13 +21,13 @@ function StatCard({ title, value, icon: Icon, tone = 'slate' }) {
     red: 'bg-rose-50 text-rose-900 border-rose-200',
   };
   return (
-    <div className={`rounded-lg border p-2.5 ${tones[tone] || tones.slate}`}>
+    <div className={`display-stat-card rounded-lg border ${tones[tone] || tones.slate}`}>
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <p className="text-[9px] font-bold uppercase tracking-wide opacity-80">{title}</p>
-          <p className="text-lg font-extrabold leading-tight mt-0.5">{value}</p>
+          <p className="ds-title font-bold uppercase tracking-wide opacity-80">{title}</p>
+          <p className="ds-value font-extrabold mt-0.5">{value}</p>
         </div>
-        {Icon ? <Icon className="w-5 h-5 flex-shrink-0 opacity-80" /> : null}
+        {Icon ? <Icon className="ds-icon flex-shrink-0 opacity-80" /> : null}
       </div>
     </div>
   );
@@ -90,7 +90,7 @@ export default function Dashboard() {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-2 mb-3">
+      <div className="display-stat-grid grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 mb-3">
         <StatCard title="Total Orders Uploaded" value={s.total_orders_uploaded ?? '—'} icon={Package} tone="slate" />
         <StatCard title="Orders Pending" value={s.orders_pending ?? '—'} icon={Clock} tone="amber" />
         <StatCard title="Under Picking" value={s.orders_under_picking ?? '—'} icon={Truck} tone="blue" />
@@ -101,12 +101,12 @@ export default function Dashboard() {
         <StatCard title="Today Delivered" value={s.today_delivered_orders ?? '—'} icon={CheckCircle2} tone="green" />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 mb-3">
-        <div className="bg-white rounded-lg border border-gray-200 p-3 shadow-sm">
-          <h3 className="text-xs font-bold text-gray-900 mb-2 flex items-center gap-1">
-            <ClipboardList size={14} /> Order activity (latest)
+      <div className="display-stat-grid grid grid-cols-1 lg:grid-cols-2 mb-3">
+        <div className="display-card bg-white rounded-lg border border-gray-200 shadow-sm text-gray-700">
+          <h3 className="dc-head font-bold text-gray-900 flex items-center gap-1">
+            <ClipboardList className="dc-ic flex-shrink-0" /> Order activity (latest)
           </h3>
-          <ul className="space-y-1.5 text-[11px] text-gray-700">
+          <ul className="dc-body space-y-0">
             <li>
               <span className="font-semibold text-gray-900">Last uploaded:</span> {fmtAct(activity?.last_uploaded_order)}
             </li>
@@ -122,11 +122,11 @@ export default function Dashboard() {
           </ul>
         </div>
 
-        <div className="bg-white rounded-lg border border-gray-200 p-3 shadow-sm">
-          <h3 className="text-xs font-bold text-gray-900 mb-2 flex items-center gap-1">
-            <Bell size={14} /> Notifications summary (today)
+        <div className="display-card bg-white rounded-lg border border-gray-200 shadow-sm text-gray-700">
+          <h3 className="dc-head font-bold text-gray-900 flex items-center gap-1">
+            <Bell className="dc-ic flex-shrink-0" /> Notifications summary (today)
           </h3>
-          <ul className="space-y-1.5 text-[11px] text-gray-700">
+          <ul className="dc-body space-y-0">
             <li>
               <span className="font-semibold">Order uploaded:</span> {dn?.order_uploaded?.today_count ?? 0}
             </li>
@@ -143,7 +143,7 @@ export default function Dashboard() {
               <span className="font-semibold">Driver / POD (DN delivered today):</span> {dn?.driver_pod_uploaded?.today_count ?? 0}
             </li>
             {dn?.driver_pod_uploaded?.note ? (
-              <li className="text-[10px] text-gray-500">{dn.driver_pod_uploaded.note}</li>
+              <li className="opacity-80 text-gray-500">Note: {dn.driver_pod_uploaded.note}</li>
             ) : null}
           </ul>
         </div>

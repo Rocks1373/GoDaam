@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distLogo = path.join(__dirname, '..', 'dist', 'LOGO.png');
-// Repo .cursor exists only on dev host (Docker build context is frontend/ only — no ../../.cursor).
+// Repo .cursor exists only on dev host (`frontend/` subtree — no ../../.cursor in CI).
 const logDir = path.join(__dirname, '..', '..', '.cursor');
 const logPath = fs.existsSync(logDir) ? path.join(logDir, 'debug-4a59d0.log') : null;
 

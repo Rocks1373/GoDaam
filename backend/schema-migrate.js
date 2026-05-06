@@ -613,6 +613,145 @@ async function migrateGodamSchema(db) {
   const get = promisify(db.get.bind(db));
   const nNew = await get(`SELECT COUNT(1) as c FROM transportation_carriers`);
   const nOld = await get(`SELECT COUNT(1) as c FROM carriers`);
+  // --- OCR Center (web) — templates + results; does not touch stock/DN/picking ---
+  await run(`
+    CREATE TABLE IF NOT EXISTS ocr_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      template_name TEXT NOT NULL,
+      party_name TEXT,
+      document_type TEXT NOT NULL,
+      description TEXT,
+      field_mappings_json TEXT NOT NULL DEFAULT '{}',
+      table_mappings_json TEXT NOT NULL DEFAULT '{}',
+      split_rules_json TEXT,
+      sample_file_path TEXT,
+      is_active INTEGER DEFAULT 1,
+      created_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_ocr_templates_doc_type ON ocr_templates(document_type, is_active)`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS ocr_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      template_id INTEGER,
+      document_type TEXT NOT NULL,
+      original_file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      extracted_header_json TEXT,
+      extracted_items_json TEXT,
+      raw_ocr_json TEXT,
+      confidence_score REAL,
+      status TEXT NOT NULL DEFAULT 'Draft',
+      created_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (template_id) REFERENCES ocr_templates(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_ocr_results_created ON ocr_results(created_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_ocr_results_status ON ocr_results(status)`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS ocr_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      settings_json TEXT NOT NULL DEFAULT '{}',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`INSERT OR IGNORE INTO ocr_settings (id, settings_json) VALUES (1, '{}')`);
+
+  // Huawei module — GoDam-1.0 Streamlit/tool URL + launch audit (same SQLite DB as warehouse).
+  await run(`
+    CREATE TABLE IF NOT EXISTS huawei_godam_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      external_url TEXT NOT NULL DEFAULT 'http://127.0.0.1:8501',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  const defaultHuaweiGodamUrl =
+    process.env.HUAWEI_GODAM_URL || process.env.GODAM_10_URL || 'http://127.0.0.1:8501';
+  await run(`INSERT OR IGNORE INTO huawei_godam_settings (id, external_url) VALUES (1, ?)`, [
+    defaultHuaweiGodamUrl,
+  ]);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS huawei_godam_launch_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      target_url TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_huawei_godam_launch_created ON huawei_godam_launch_log(created_at DESC)`);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS sap_stock_upload_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_name TEXT NOT NULL,
+      upload_date TEXT NOT NULL,
+      uploaded_by INTEGER,
+      total_rows INTEGER DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'Uploaded',
+      remarks TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (uploaded_by) REFERENCES users(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_sap_upload_batches_created ON sap_stock_upload_batches(created_at DESC)`);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS sap_stock (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      upload_batch_id INTEGER NOT NULL,
+      vendor_number TEXT,
+      material TEXT,
+      sap_part_number TEXT,
+      description TEXT,
+      storage_location TEXT,
+      storage_location_description TEXT,
+      stock_qty REAL,
+      storage_document TEXT,
+      batch TEXT,
+      unrestricted_qty REAL,
+      base_uom TEXT,
+      value_amount REAL,
+      material_group TEXT,
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      uploaded_by INTEGER,
+      FOREIGN KEY (upload_batch_id) REFERENCES sap_stock_upload_batches(id) ON DELETE CASCADE,
+      FOREIGN KEY (uploaded_by) REFERENCES users(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_sap_stock_batch ON sap_stock(upload_batch_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_sap_stock_material ON sap_stock(material)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_sap_stock_sl ON sap_stock(storage_location)`);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS rack_balance_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      stock_by_rack_id INTEGER NOT NULL,
+      part_number TEXT NOT NULL,
+      rack_location TEXT NOT NULL,
+      delta_qty REAL NOT NULL,
+      balance_after_available REAL,
+      balance_after_total_in REAL,
+      balance_after_total_out REAL,
+      first_entry_date_before TEXT,
+      first_entry_date_after TEXT,
+      remarks TEXT,
+      affected_orders_json TEXT,
+      created_by_user_id INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (stock_by_rack_id) REFERENCES stock_by_rack(id),
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_rack_adj_created ON rack_balance_adjustments(created_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_rack_adj_part ON rack_balance_adjustments(part_number)`);
+
   if ((nNew?.c || 0) === 0 && (nOld?.c || 0) > 0) {
     await run(`
       INSERT INTO transportation_carriers (id, carrier_type, carrier_name, contact_person, phone_number, email, remarks, status, created_at, updated_at)

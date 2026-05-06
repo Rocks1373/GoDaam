@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -15,9 +15,11 @@ import {
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
 import { persistAndConfigureApiBase, setAuthHeader } from '../api/client';
-import { normalizeToApiBase } from '../config/apiConfig';
+import { getDefaultApiBaseUrl, normalizeToApiBase } from '../config/apiConfig';
 import { clearAuth } from '../storage/tokenStorage';
 import { getSavedBackendApiUrl } from '../storage/backendUrlStorage';
+import { useTheme } from '../theme/ThemeContext';
+import type { ThemeDefinition } from '../theme/palettes';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ApiConfiguration'>;
 
@@ -27,14 +29,59 @@ function healthLooksOk(data: Record<string, unknown>): boolean {
   return data?.ok === true || data?.service === 'warehouse-backend';
 }
 
+function createApiConfigStyles(c: ThemeDefinition) {
+  return StyleSheet.create({
+    flex: { flex: 1, backgroundColor: c.background },
+    scroll: { padding: 24, paddingTop: 48 },
+    h: { fontSize: 22, fontWeight: '800', color: c.text },
+    sub: { marginTop: 10, marginBottom: 14, fontSize: 14, color: c.textMuted, lineHeight: 20 },
+    mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13 },
+    label: { fontSize: 13, fontWeight: '700', color: c.textSecondary, marginBottom: 6 },
+    hint: { fontSize: 12, color: c.textMuted, marginBottom: 14 },
+    input: {
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 10,
+      padding: 14,
+      fontSize: 15,
+      backgroundColor: c.inputBg,
+      color: c.text,
+      marginBottom: 6,
+    },
+    btn: {
+      backgroundColor: c.primary,
+      padding: 16,
+      borderRadius: 10,
+      alignItems: 'center',
+      marginTop: 8,
+    },
+    btnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+    btnSecondary: {
+      borderWidth: 1,
+      borderColor: c.primaryBorder,
+      padding: 14,
+      borderRadius: 10,
+      alignItems: 'center',
+      backgroundColor: c.primarySoft,
+      marginBottom: 8,
+      minHeight: 48,
+      justifyContent: 'center',
+    },
+    btnSecondaryText: { color: c.primaryHover, fontWeight: '700' },
+  });
+}
+
 export default function ApiConfigurationScreen({ navigation }: Props) {
+  const { palette } = useTheme();
+  const styles = useMemo(() => createApiConfigStyles(palette), [palette]);
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     (async () => {
       const saved = await getSavedBackendApiUrl();
-      setUrl(saved || '');
+      const normalizedSaved = saved ? normalizeToApiBase(saved) : '';
+      setUrl(normalizedSaved || getDefaultApiBaseUrl() || 'http://localhost:3001/api');
     })();
   }, []);
 
@@ -107,12 +154,12 @@ export default function ApiConfigurationScreen({ navigation }: Props) {
           autoCorrect={false}
           keyboardType="url"
           placeholder="https://godam.divadivya.cloud/api"
-          placeholderTextColor="#94a3b8"
+          placeholderTextColor={palette.textMuted}
         />
         <Text style={styles.hint}>Example: https://godam.divadivya.cloud/api</Text>
         <Pressable style={styles.btnSecondary} onPress={testConnection} disabled={busy}>
           {busy ? (
-            <ActivityIndicator color="#1e40af" />
+            <ActivityIndicator color={palette.primaryHover} />
           ) : (
             <Text style={styles.btnSecondaryText}>Test Connection</Text>
           )}
@@ -124,42 +171,3 @@ export default function ApiConfigurationScreen({ navigation }: Props) {
     </KeyboardAvoidingView>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1, backgroundColor: '#f8fafc' },
-  scroll: { padding: 24, paddingTop: 48 },
-  h: { fontSize: 22, fontWeight: '800', color: '#0f172a' },
-  sub: { marginTop: 10, marginBottom: 14, fontSize: 14, color: '#64748b', lineHeight: 20 },
-  mono: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 13 },
-  label: { fontSize: 13, fontWeight: '700', color: '#334155', marginBottom: 6 },
-  hint: { fontSize: 12, color: '#94a3b8', marginBottom: 14 },
-  input: {
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 10,
-    padding: 14,
-    fontSize: 15,
-    backgroundColor: '#fff',
-    marginBottom: 6,
-  },
-  btn: {
-    backgroundColor: '#2563eb',
-    padding: 16,
-    borderRadius: 10,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  btnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  btnSecondary: {
-    borderWidth: 1,
-    borderColor: '#93c5fd',
-    padding: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    backgroundColor: '#eff6ff',
-    marginBottom: 8,
-    minHeight: 48,
-    justifyContent: 'center',
-  },
-  btnSecondaryText: { color: '#1d4ed8', fontWeight: '700' },
-});

@@ -2,6 +2,76 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+  Display card scale (XS–XL): set on <html data-card-scale="0..4"> via CardDisplayContext.
+  Use .display-stat-card / .display-card / .display-card-grid on dashboard & panels.
+*/
+html[data-card-scale='0'] {
+  --ds-pad: 0.25rem;
+  --ds-title: 0.4375rem;
+  --ds-value: 0.75rem;
+  --ds-icon: 0.875rem;
+  --dc-pad: 0.375rem;
+  --dc-title: 0.625rem;
+  --dc-body: 0.5625rem;
+  --dc-icon: 0.75rem;
+  --dc-gap: 0.25rem;
+  --display-grid-gap: 0.25rem;
+  --toolbar-pad: 0.375rem;
+}
+html[data-card-scale='1'] {
+  --ds-pad: 0.375rem;
+  --ds-title: 0.5rem;
+  --ds-value: 0.875rem;
+  --ds-icon: 1rem;
+  --dc-pad: 0.5rem;
+  --dc-title: 0.625rem;
+  --dc-body: 0.625rem;
+  --dc-icon: 0.875rem;
+  --dc-gap: 0.375rem;
+  --display-grid-gap: 0.375rem;
+  --toolbar-pad: 0.45rem;
+}
+html[data-card-scale='2'] {
+  --ds-pad: 0.625rem;
+  --ds-title: 0.5625rem;
+  --ds-value: 1.125rem;
+  --ds-icon: 1.25rem;
+  --dc-pad: 0.75rem;
+  --dc-title: 0.75rem;
+  --dc-body: 0.6875rem;
+  --dc-icon: 0.875rem;
+  --dc-gap: 0.5rem;
+  --display-grid-gap: 0.5rem;
+  --toolbar-pad: 0.5rem;
+}
+html[data-card-scale='3'] {
+  --ds-pad: 0.875rem;
+  --ds-title: 0.6875rem;
+  --ds-value: 1.375rem;
+  --ds-icon: 1.5rem;
+  --dc-pad: 1rem;
+  --dc-title: 0.875rem;
+  --dc-body: 0.8125rem;
+  --dc-icon: 1rem;
+  --dc-gap: 0.625rem;
+  --display-grid-gap: 0.625rem;
+  --toolbar-pad: 0.65rem;
+}
+html[data-card-scale='4'] {
+  --ds-pad: 1.125rem;
+  --ds-title: 0.8125rem;
+  --ds-value: 1.625rem;
+  --ds-icon: 1.75rem;
+  --dc-pad: 1.25rem;
+  --dc-title: 1rem;
+  --dc-body: 0.875rem;
+  --dc-icon: 1.125rem;
+  --dc-gap: 0.75rem;
+  --display-grid-gap: 0.75rem;
+  --toolbar-pad: 0.75rem;
+}
+
 /* Dense UI: more rows per screen (tables, nav, chrome). */
 @layer base {
   html {
@@ -10,57 +80,123 @@
   }
 
   body {
-    @apply bg-warehouse-gray text-gray-900 text-xs antialiased;
+    background-color: var(--surface-page);
+    color: var(--text-primary);
+    @apply text-xs antialiased;
   }
 }
 
 @layer components {
+  .nav-sidebar-link {
+    @apply flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all border border-transparent;
+    color: var(--nav-inactive-text);
+  }
+
+  .nav-sidebar-link:hover {
+    background-color: var(--nav-hover-bg);
+  }
+
+  .nav-sidebar-link-active {
+    background-color: var(--nav-active-bg);
+    color: var(--nav-active-text);
+    border-color: var(--nav-active-border);
+  }
+
   .btn-primary {
-    @apply bg-primary-600 hover:bg-primary-700 text-white font-semibold text-xs
-           py-1.5 px-2.5 rounded-md border border-transparent
+    @apply text-white font-semibold text-xs py-1.5 px-2.5 rounded-md border border-transparent
            transition-all duration-150 shadow-sm
-           focus:outline-none focus:ring-1 focus:ring-primary-500 focus:ring-offset-1;
+           focus:outline-none focus:ring-1 focus:ring-offset-1;
+    background-color: var(--color-primary);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+  }
+
+  .btn-primary:hover {
+    background-color: var(--color-primary-hover);
+  }
+
+  .btn-primary:focus {
+    --tw-ring-color: var(--ring-primary);
   }
 
   .btn-secondary {
-    @apply bg-white hover:bg-gray-50 text-gray-800 font-semibold text-xs
-           py-1.5 px-2.5 rounded-md border border-gray-200
-           transition-all duration-150 shadow-sm;
+    @apply font-semibold text-xs py-1.5 px-2.5 rounded-md transition-all duration-150 shadow-sm;
+    background-color: var(--surface-card);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-default);
+  }
+
+  .btn-secondary:hover {
+    background-color: var(--surface-muted);
   }
 
   .btn-success {
-    @apply bg-warehouse-green hover:bg-green-600 text-white font-semibold text-xs
-           py-1.5 px-2.5 rounded-md border border-transparent
+    @apply text-white font-semibold text-xs py-1.5 px-2.5 rounded-md border border-transparent
            transition-all duration-150 shadow-sm;
+    background-color: var(--btn-success-bg);
+  }
+
+  .btn-success:hover {
+    background-color: var(--btn-success-hover);
   }
 
   .btn-danger {
-    @apply bg-warehouse-red hover:bg-red-600 text-white font-semibold text-xs
-           py-1.5 px-2.5 rounded-md border border-transparent
+    @apply text-white font-semibold text-xs py-1.5 px-2.5 rounded-md border border-transparent
            transition-all duration-150 shadow-sm;
+    background-color: var(--btn-danger-bg);
+  }
+
+  .btn-danger:hover {
+    background-color: var(--btn-danger-hover);
   }
 
   .table-container {
-    @apply overflow-x-auto rounded-lg border border-gray-200 bg-white w-full text-xs;
+    @apply overflow-x-auto rounded-lg border w-full text-xs;
+    background-color: var(--surface-card);
+    border-color: var(--border-default);
+    color: var(--text-primary);
+  }
+
+  /* Beat Tailwind `hover:bg-gray-50` on rows: themed hover + readable text (fixes dark mode). */
+  .table-container tbody tr {
+    transition: background-color 0.12s ease, color 0.12s ease;
+  }
+
+  .table-container tbody tr:hover {
+    background-color: var(--table-row-hover-bg) !important;
+  }
+
+  .table-container tbody tr:hover :is(.tbl-td, .tbl-td-nowrap) {
+    color: var(--table-row-hover-text) !important;
   }
 
   .input-field {
-    @apply w-full px-2 py-1.5 border border-gray-300 rounded-md
-           focus:outline-none focus:ring-1 focus:ring-primary-500
-           focus:border-transparent transition-all text-xs;
+    @apply w-full px-2 py-1.5 rounded-md transition-all text-xs;
+    border: 1px solid var(--border-strong);
+    background-color: var(--surface-card);
+    color: var(--text-primary);
+  }
+
+  .input-field:focus {
+    outline: none;
+    box-shadow: 0 0 0 1px var(--ring-primary);
+    border-color: var(--color-primary);
   }
 
   /* Shared dense table cells (used across list pages). */
   .tbl-th {
-    @apply px-2 py-1.5 text-left text-[10px] font-bold text-gray-600 uppercase tracking-wide;
+    @apply px-2 py-1.5 text-left text-[10px] font-bold uppercase tracking-wide;
+    color: var(--text-muted);
+    background-color: var(--surface-muted);
   }
 
   .tbl-td {
-    @apply px-2 py-1.5 text-xs text-gray-900 leading-snug;
+    @apply px-2 py-1.5 text-xs leading-snug;
+    color: var(--text-primary);
   }
 
   .tbl-td-nowrap {
-    @apply px-2 py-1.5 whitespace-nowrap text-xs text-gray-900 leading-tight;
+    @apply px-2 py-1.5 whitespace-nowrap text-xs leading-tight;
+    color: var(--text-primary);
   }
 
   .badge {
@@ -72,6 +208,274 @@
   .badge-red { @apply bg-red-100 text-red-800; }
 
   .app-page-toolbar {
-    @apply bg-white p-2 rounded-lg shadow-sm border border-gray-200 mb-2;
+    @apply rounded-lg shadow-sm border mb-2;
+    background-color: var(--surface-card);
+    border-color: var(--border-default);
+    padding: var(--toolbar-pad, 0.5rem);
+  }
+
+  .display-stat-grid {
+    gap: var(--display-grid-gap, 0.5rem);
+  }
+
+  .display-stat-card {
+    padding: var(--ds-pad, 0.625rem);
+  }
+
+  .display-stat-card .ds-title {
+    font-size: var(--ds-title, 0.5625rem);
+  }
+
+  .display-stat-card .ds-value {
+    font-size: var(--ds-value, 1.125rem);
+    line-height: 1.15;
+  }
+
+  .display-stat-card .ds-icon {
+    width: var(--ds-icon, 1.25rem);
+    height: var(--ds-icon, 1.25rem);
+  }
+
+  .display-card {
+    padding: var(--dc-pad, 0.75rem);
+  }
+
+  .display-card .dc-head {
+    font-size: var(--dc-title, 0.75rem);
+    margin-bottom: var(--dc-gap, 0.5rem);
+  }
+
+  .display-card .dc-head .dc-ic {
+    width: var(--dc-icon, 0.875rem);
+    height: var(--dc-icon, 0.875rem);
+  }
+
+  .display-card .dc-body {
+    font-size: var(--dc-body, 0.6875rem);
+    display: flex;
+    flex-direction: column;
+    gap: var(--dc-gap, 0.5rem);
+  }
+}
+
+/* ─── GoDam login (scoped dark / glass UI — UI only) ─── */
+@keyframes godam-star-drift {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate(-50%, -50%) translate3d(var(--dx, 3px), var(--dy, -2px), 0);
+  }
+}
+
+@keyframes godam-star-twinkle {
+  0%,
+  100% {
+    opacity: var(--base-op, 0.45);
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes godam-galaxy-drift {
+  0% {
+    transform: rotate(0deg) scale(1.08);
+  }
+  100% {
+    transform: rotate(360deg) scale(1.08);
+  }
+}
+
+@keyframes godam-login-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(28px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes godam-login-bg-shift {
+  0%,
+  100% {
+    background-position: 0% 40%;
+  }
+  50% {
+    background-position: 100% 60%;
+  }
+}
+
+@keyframes godam-login-grid-x {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-48px, 0, 0);
+  }
+}
+
+/*
+ * 200%-wide track [panel A | panel B]. Animating -50% → 0 moves stars slowly to the right on screen (seamless loop).
+ */
+@keyframes godam-login-star-marquee {
+  0% {
+    transform: translate3d(-50%, 0, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.godam-login-root {
+  isolation: isolate;
+}
+
+.godam-login-bg-shift {
+  animation: godam-login-bg-shift 22s ease-in-out infinite;
+}
+
+.godam-login-grid-x {
+  animation: godam-login-grid-x 38s linear infinite;
+}
+
+.godam-login-galaxy-spin {
+  animation: godam-galaxy-drift 140s linear infinite;
+  transform-origin: 50% 48%;
+  will-change: transform;
+}
+
+.godam-login-star-inner {
+  animation-name: godam-star-drift;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  will-change: transform;
+}
+
+.godam-login-star-dot {
+  animation-name: godam-star-twinkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  will-change: opacity;
+}
+
+.godam-login-star-host {
+  will-change: transform;
+}
+
+.godam-login-star-marquee-motion {
+  animation: godam-login-star-marquee 260s linear infinite;
+  will-change: transform;
+}
+
+.godam-login-card-shell {
+  animation: godam-login-card-in 0.85s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  transition:
+    box-shadow 0.45s ease,
+    filter 0.35s ease;
+}
+
+.godam-login-card-shell:hover {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 80px -24px rgba(34, 211, 238, 0.35),
+    0 24px 60px -28px rgba(0, 0, 0, 0.85);
+}
+
+.godam-login-field {
+  width: 100%;
+  border-radius: 0.75rem;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  color: #f1f5f9;
+  padding: 0.68rem 0.9rem;
+  font-size: 0.8125rem;
+  transition:
+    border-color 0.28s ease,
+    box-shadow 0.28s ease,
+    background 0.28s ease;
+}
+
+.godam-login-field::placeholder {
+  color: rgba(148, 163, 184, 0.55);
+}
+
+.godam-login-field:focus {
+  outline: none;
+  border-color: rgba(34, 211, 238, 0.5);
+  box-shadow:
+    0 0 0 3px rgba(34, 211, 238, 0.12),
+    0 0 28px -10px rgba(34, 211, 238, 0.45);
+  background: rgba(15, 23, 42, 0.82);
+}
+
+.godam-login-field:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.godam-login-submit {
+  width: 100%;
+  border: none;
+  border-radius: 0.75rem;
+  padding: 0.72rem 1rem;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  color: #020617;
+  background: linear-gradient(135deg, #22d3ee 0%, #6366f1 52%, #a855f7 100%);
+  box-shadow:
+    0 4px 22px -8px rgba(34, 211, 238, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.28s ease,
+    filter 0.2s ease;
+}
+
+.godam-login-submit:hover:not(:disabled) {
+  filter: brightness(1.07);
+  box-shadow:
+    0 10px 36px -10px rgba(34, 211, 238, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.godam-login-submit:disabled {
+  opacity: 0.68;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .godam-login-star-marquee-motion {
+    animation: none !important;
+    transform: none !important;
+  }
+
+  .godam-login-star-inner,
+  .godam-login-star-dot,
+  .godam-login-galaxy-spin {
+    animation: none !important;
+  }
+
+  .godam-login-star-inner {
+    transform: translate(-50%, -50%) !important;
+  }
+
+  .godam-login-star-dot {
+    opacity: var(--base-op, 0.45) !important;
+  }
+
+  .godam-login-card-shell {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .godam-login-bg-shift,
+  .godam-login-grid-x {
+    animation: none !important;
   }
 }

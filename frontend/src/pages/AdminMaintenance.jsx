@@ -100,7 +100,7 @@ export default function AdminMaintenance() {
         </div>
       </div>
 
-      <div className="rounded-lg border border-gray-200 bg-white p-4 mb-4 shadow-sm">
+      <div className="display-card rounded-lg border border-gray-200 bg-white mb-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <div className="text-[11px] text-gray-700">
             {loading ? (
@@ -165,7 +165,7 @@ export default function AdminMaintenance() {
         </div>
       </div>
 
-      <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+      <div className="display-card rounded-lg border border-gray-200 bg-white shadow-sm">
         <h2 className="text-sm font-bold text-gray-900 mb-2">Browse tables (read-only)</h2>
         <p className="text-[11px] text-gray-600 mb-3">Whitelist only — outbound workflow tables.</p>
         <div className="flex flex-wrap gap-2 items-end mb-3">

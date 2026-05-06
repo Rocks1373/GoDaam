@@ -1,4 +1,8 @@
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate } from 'react-router-dom';
+import { CardDisplayProvider } from './context/CardDisplayContext';
+import { ThemeProvider } from './context/ThemeContext';
+import CardSizeControls from './components/CardSizeControls';
+import ThemeSwitcher from './components/ThemeSwitcher';
 import {
   Package,
   Layers,
@@ -21,6 +25,8 @@ import {
   ScanLine,
   GitCompare,
   ExternalLink,
+  ClipboardPenLine,
+  Boxes,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Dashboard from './pages/Dashboard';
@@ -47,7 +53,7 @@ import ReportExportPage from './pages/ReportExportPage';
 import OcrCenter from './pages/OcrCenter';
 import SapStock from './pages/SapStock';
 import StockComparisonReport from './pages/StockComparisonReport';
-import { authApi, notificationsApi } from './services/api';
+import { authApi, notificationsApi, huaweiModuleApi } from './services/api';
 import './index.css';
 
 const SIDEBAR_WIDTH_KEY = 'godam_sidebar_width_px';
@@ -234,6 +240,7 @@ function App() {
         v7_relativeSplatPath: true,
       }}
     >
+      <ThemeProvider>
       <Routes>
         <Route
           path="/login"
@@ -243,8 +250,9 @@ function App() {
           path="/*"
           element={
             <RequireAuth checking={checking} user={user}>
-              <div className="min-h-screen bg-warehouse-gray text-xs">
-                <header className="bg-white shadow-sm border-b border-gray-200">
+              <CardDisplayProvider>
+              <div className="min-h-screen bg-theme-page text-xs">
+                <header className="bg-theme-header shadow-sm border-b border-theme-border">
                   <div className="max-w-[1920px] mx-auto px-2 sm:px-3">
                     <div className="flex justify-between items-center py-1.5 gap-2">
                       <div className="flex items-center gap-2 min-w-0">
@@ -255,9 +263,11 @@ function App() {
                         />
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        <div className="text-[10px] font-semibold text-gray-600 hidden sm:block">
+                        <div className="text-[10px] font-semibold text-theme-fg-muted hidden sm:block">
                           {user?.username} ({user?.role})
                         </div>
+                        <ThemeSwitcher />
+                        <CardSizeControls />
                         <div className="relative">
                           <button
                             type="button"
@@ -273,9 +283,9 @@ function App() {
                             ) : null}
                           </button>
                           {notifOpen ? (
-                            <div className="absolute right-0 mt-2 w-[360px] max-w-[85vw] rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden z-50">
-                              <div className="px-3 py-2 flex items-center justify-between bg-gray-50">
-                                <div className="text-[11px] font-bold text-gray-700">Unread</div>
+                            <div className="absolute right-0 mt-2 w-[360px] max-w-[85vw] rounded-lg border border-theme-border bg-theme-card shadow-lg overflow-hidden z-50">
+                              <div className="px-3 py-2 flex items-center justify-between bg-theme-muted border-b border-theme-border">
+                                <div className="text-[11px] font-bold text-theme-fg-secondary">Unread</div>
                                 <NavLink
                                   to="/notifications"
                                   className="text-[11px] font-bold text-primary-700 hover:underline"
@@ -294,7 +304,7 @@ function App() {
                                           ? '/pick-change-requests'
                                           : '/notifications'
                                       }
-                                      className="block px-3 py-2 hover:bg-gray-50 border-t border-gray-100"
+                                      className="block px-3 py-2 hover:bg-theme-muted border-t border-theme-border"
                                       onClick={async () => {
                                         try {
                                           await notificationsApi.markRead(n.id);
@@ -308,12 +318,12 @@ function App() {
                                         }
                                       }}
                                     >
-                                      <div className="text-[11px] font-bold text-gray-900">{n.title}</div>
-                                      <div className="text-[11px] text-gray-600 line-clamp-2">{n.body}</div>
+                                      <div className="text-[11px] font-bold text-theme-fg">{n.title}</div>
+                                      <div className="text-[11px] text-theme-fg-muted line-clamp-2">{n.body}</div>
                                     </NavLink>
                                   ))
                                 ) : (
-                                  <div className="px-3 py-3 text-[11px] text-gray-500">No unread notifications.</div>
+                                  <div className="px-3 py-3 text-[11px] text-theme-fg-muted">No unread notifications.</div>
                                 )}
                               </div>
                             </div>
@@ -330,7 +340,7 @@ function App() {
 
                 <div className="flex w-full px-2 sm:px-3 py-2 gap-2 items-stretch">
                   <div
-                    className="hidden lg:flex shrink-0 sticky top-2 self-start max-h-[calc(100vh-2.75rem)] rounded-lg shadow-sm border border-gray-200 bg-white overflow-hidden"
+                    className="hidden lg:flex shrink-0 sticky top-2 self-start max-h-[calc(100vh-2.75rem)] rounded-lg shadow-sm border border-theme-border bg-theme-card overflow-hidden"
                     style={{ width: sidebarWidth }}
                   >
                     <aside className="flex-1 min-w-0 p-2 overflow-y-auto overflow-x-hidden">
@@ -338,11 +348,7 @@ function App() {
                       <NavLink
                         to="/dashboard"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <BarChart3 className="w-3.5 h-3.5 flex-shrink-0" />
@@ -352,11 +358,7 @@ function App() {
                       <NavLink
                         to="/main-stock"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <Package className="w-3.5 h-3.5 flex-shrink-0" />
@@ -366,11 +368,7 @@ function App() {
                       <NavLink
                         to="/stock-by-rack/summary"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <Layers className="w-3.5 h-3.5 flex-shrink-0" />
@@ -381,11 +379,7 @@ function App() {
                         <NavLink
                           to="/outbound-upload"
                           className={({ isActive }) =>
-                            `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                              isActive
-                                ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                            }`
+                            `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                           }
                         >
                           <UploadCloud className="w-3.5 h-3.5 flex-shrink-0" />
@@ -397,11 +391,7 @@ function App() {
                         <NavLink
                           to="/picked-orders"
                           className={({ isActive }) =>
-                            `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                              isActive
-                                ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                            }`
+                            `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                           }
                         >
                           <ClipboardList className="w-3.5 h-3.5 flex-shrink-0" />
@@ -412,11 +402,7 @@ function App() {
                       <NavLink
                         to="/customers"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <Users className="w-3.5 h-3.5 flex-shrink-0" />
@@ -426,11 +412,7 @@ function App() {
                       <NavLink
                         to="/delivery-note"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <FileText className="w-3.5 h-3.5 flex-shrink-0" />
@@ -440,29 +422,21 @@ function App() {
                       <NavLink
                         to="/pod-inbox"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <Image className="w-3.5 h-3.5 flex-shrink-0" />
                         <span className="truncate">POD inbox</span>
                       </NavLink>
 
-                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
+                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
                         <PieChart className="w-3 h-3" />
                         Reports
                       </div>
                       <NavLink
                         to="/reports/inbound"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <Truck className="w-3.5 h-3.5 flex-shrink-0" />
@@ -471,11 +445,7 @@ function App() {
                       <NavLink
                         to="/reports/outbound"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <LineChart className="w-3.5 h-3.5 flex-shrink-0" />
@@ -484,11 +454,7 @@ function App() {
                       <NavLink
                         to="/reports/delivery"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <FileSpreadsheet className="w-3.5 h-3.5 flex-shrink-0" />
@@ -497,24 +463,25 @@ function App() {
                       <NavLink
                         to="/reports/stock-by-rack-report"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <Layers className="w-3.5 h-3.5 flex-shrink-0" />
                         <span className="truncate">Stock By Rack Report</span>
                       </NavLink>
                       <NavLink
+                        to="/reports/rack-balance-adjustments"
+                        className={({ isActive }) =>
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
+                        }
+                      >
+                        <ClipboardPenLine className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Rack balance adjustments</span>
+                      </NavLink>
+                      <NavLink
                         to="/reports/main-stock-report"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <Package className="w-3.5 h-3.5 flex-shrink-0" />
@@ -523,11 +490,7 @@ function App() {
                       <NavLink
                         to="/reports/stock-comparison"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <GitCompare className="w-3.5 h-3.5 flex-shrink-0" />
@@ -536,11 +499,7 @@ function App() {
                       <NavLink
                         to="/ocr-center"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <ScanLine className="w-3.5 h-3.5 flex-shrink-0" />
@@ -550,46 +509,65 @@ function App() {
                         href={import.meta.env.VITE_OCR_TOOL_URL || 'https://godam.divadivya.cloud/ocr'}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all text-gray-700 hover:bg-gray-50 border border-transparent"
+                        className="nav-sidebar-link"
                       >
                         <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
                         <span className="truncate">OCR Tool</span>
                       </a>
 
-                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
+                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
                         <FileSpreadsheet className="w-3 h-3" />
                         SAP Stock
                       </div>
                       <NavLink
                         to="/sap-stock"
                         className={({ isActive }) =>
-                          `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                            isActive
-                              ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                              : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                          }`
+                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                         }
                       >
                         <Database className="w-3.5 h-3.5 flex-shrink-0" />
                         <span className="truncate">SAP Stock</span>
                       </NavLink>
 
+                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
+                        <Boxes className="w-3 h-3" />
+                        Modules
+                      </div>
+                      <button
+                        type="button"
+                        className="nav-sidebar-link w-full text-left cursor-pointer"
+                        title="Opens GoDam-1.0 in a new browser tab"
+                        onClick={async () => {
+                          try {
+                            const data = await huaweiModuleApi.recordGodamOpen();
+                            const url = data?.url;
+                            if (url) window.open(url, '_blank', 'noopener,noreferrer');
+                          } catch {
+                            try {
+                              const { url } = await huaweiModuleApi.getGodamUrl();
+                              if (url) window.open(url, '_blank', 'noopener,noreferrer');
+                            } catch {
+                              // ignore
+                            }
+                          }
+                        }}
+                      >
+                        <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">Huawei · GoDam-1.0</span>
+                      </button>
+
                       {(user?.role === 'admin' ||
                         user?.permissions?.can_view_transportation ||
                         user?.permissions?.can_manage_transportation) && (
                         <>
-                          <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-wide">
+                          <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
                             <ShieldCheck className="w-3 h-3" />
                             Admin
                           </div>
                           <NavLink
                             to="/transportation-details"
                             className={({ isActive }) =>
-                              `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                                isActive
-                                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                  : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                              }`
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                             }
                           >
                             <Truck className="w-3.5 h-3.5 flex-shrink-0" />
@@ -602,11 +580,7 @@ function App() {
                           <NavLink
                             to="/vendor-master"
                             className={({ isActive }) =>
-                              `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                                isActive
-                                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                  : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                              }`
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                             }
                           >
                             <Truck className="w-3.5 h-3.5 flex-shrink-0" />
@@ -615,11 +589,7 @@ function App() {
                           <NavLink
                             to="/vendor-items"
                             className={({ isActive }) =>
-                              `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                                isActive
-                                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                  : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                              }`
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                             }
                           >
                             <Truck className="w-3.5 h-3.5 flex-shrink-0" />
@@ -628,11 +598,7 @@ function App() {
                           <NavLink
                             to="/users"
                             className={({ isActive }) =>
-                              `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                                isActive
-                                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                  : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                              }`
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                             }
                           >
                             <UserCog className="w-3.5 h-3.5 flex-shrink-0" />
@@ -641,11 +607,7 @@ function App() {
                           <NavLink
                             to="/role-permissions"
                             className={({ isActive }) =>
-                              `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                                isActive
-                                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                  : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                              }`
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                             }
                           >
                             <KeySquare className="w-3.5 h-3.5 flex-shrink-0" />
@@ -654,11 +616,7 @@ function App() {
                           <NavLink
                             to="/pick-change-requests"
                             className={({ isActive }) =>
-                              `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                                isActive
-                                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                  : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                              }`
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                             }
                           >
                             <Truck className="w-3.5 h-3.5 flex-shrink-0" />
@@ -667,11 +625,7 @@ function App() {
                           <NavLink
                             to="/admin-maintenance"
                             className={({ isActive }) =>
-                              `flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all ${
-                                isActive
-                                  ? 'bg-primary-50 text-primary-700 border border-primary-200'
-                                  : 'text-gray-700 hover:bg-gray-50 border border-transparent'
-                              }`
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                             }
                           >
                             <Database className="w-3.5 h-3.5 flex-shrink-0" />
@@ -690,9 +644,9 @@ function App() {
                         e.preventDefault();
                         resetSidebarWidth();
                       }}
-                      className="group relative w-3 shrink-0 cursor-col-resize border-l border-gray-200 bg-gradient-to-b from-gray-50 to-gray-100 hover:from-primary-50 hover:to-primary-100 hover:border-primary-300 flex flex-col items-center justify-center gap-0.5 touch-none select-none outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-inset"
+                      className="group relative w-3 shrink-0 cursor-col-resize border-l border-theme-border bg-gradient-to-b from-theme-muted to-theme-page hover:opacity-90 flex flex-col items-center justify-center gap-0.5 touch-none select-none outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring-primary)] focus-visible:ring-inset"
                     >
-                      <span className="pointer-events-none flex flex-col items-center gap-0.5 text-[10px] leading-none font-bold text-gray-400 group-hover:text-primary-600" aria-hidden>
+                      <span className="pointer-events-none flex flex-col items-center gap-0.5 text-[10px] leading-none font-bold text-theme-fg-muted group-hover:text-theme-primary" aria-hidden>
                         <span className="opacity-70">+</span>
                         <GripVertical className="w-3 h-3" strokeWidth={2.5} />
                         <span className="opacity-70">+</span>
@@ -709,6 +663,17 @@ function App() {
                       <Route
                         path="/reports/stock-by-rack-report"
                         element={<ReportExportPage title="Stock By Rack Report" fileSlug="stock-by-rack" endpoint="/reports/stock-by-rack" />}
+                      />
+                      <Route
+                        path="/reports/rack-balance-adjustments"
+                        element={
+                          <ReportExportPage
+                            title="Rack balance adjustments"
+                            fileSlug="rack-balance-adjustments"
+                            endpoint="/reports/rack-balance-adjustments"
+                            hint="Admin +/− rack corrections; related outbound rows had FIFO refreshed at that time."
+                          />
+                        }
                       />
                       <Route
                         path="/reports/main-stock-report"
@@ -729,7 +694,7 @@ function App() {
                       <Route path="/sap-stock" element={<SapStock />} />
                       <Route path="/ocr-center" element={<OcrCenter />} />
                       <Route path="/main-stock" element={<MainStock />} />
-                      <Route path="/stock-by-rack/*" element={<StockByRack />} />
+                      <Route path="/stock-by-rack/*" element={<StockByRack currentUser={user} />} />
                       <Route path="/pick-suggestion" element={<Navigate to="/dashboard" replace />} />
                       <Route path="/outbound-upload" element={<OutboundUpload currentUser={user} />} />
                       <Route path="/picked-orders" element={<PickedOrdersAdmin />} />
@@ -750,10 +715,12 @@ function App() {
                   </main>
                 </div>
               </div>
+              </CardDisplayProvider>
             </RequireAuth>
           }
         />
       </Routes>
+      </ThemeProvider>
     </Router>
   );
 }

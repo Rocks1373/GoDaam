@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, Alert, Image } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { login } from '../api/authApi';
 import { saveAuth } from '../storage/tokenStorage';
 import { getDisplayApiOrigin, setAuthHeader } from '../api/client';
+import { useTheme } from '../theme/ThemeContext';
+import type { ThemeDefinition } from '../theme/palettes';
 
 export type RootStackParamList = {
   ApiConfiguration: undefined;
@@ -36,7 +38,30 @@ function loginErrorExtra(e: unknown, apiOrigin: string): string {
   return '';
 }
 
+function createLoginStyles(c: ThemeDefinition) {
+  return StyleSheet.create({
+    wrap: { flex: 1, padding: 24, justifyContent: 'center', backgroundColor: c.background },
+    brand: { width: 200, height: 120, alignSelf: 'center', marginBottom: 16 },
+    sub: { fontSize: 13, color: c.textMuted, marginBottom: 20, textAlign: 'center' },
+    input: {
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 10,
+      padding: 12,
+      marginBottom: 12,
+      backgroundColor: c.inputBg,
+      color: c.text,
+    },
+    btn: { backgroundColor: c.primary, padding: 14, borderRadius: 10, alignItems: 'center' },
+    btnText: { color: '#fff', fontWeight: '700' },
+    linkBtn: { marginTop: 18, padding: 10, alignItems: 'center' },
+    linkText: { color: c.link, fontWeight: '600', fontSize: 13 },
+  });
+}
+
 export default function LoginScreen({ navigation }: Props) {
+  const { palette } = useTheme();
+  const styles = useMemo(() => createLoginStyles(palette), [palette]);
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('admin123');
   const [loading, setLoading] = useState(false);
@@ -70,10 +95,18 @@ export default function LoginScreen({ navigation }: Props) {
         style={styles.input}
         autoCapitalize="none"
         placeholder="Username"
+        placeholderTextColor={palette.textMuted}
         value={username}
         onChangeText={setUsername}
       />
-      <TextInput style={styles.input} placeholder="Password" secureTextEntry value={password} onChangeText={setPassword} />
+      <TextInput
+        style={styles.input}
+        placeholder="Password"
+        placeholderTextColor={palette.textMuted}
+        secureTextEntry
+        value={password}
+        onChangeText={setPassword}
+      />
       <Pressable style={styles.btn} onPress={submit} disabled={loading}>
         <Text style={styles.btnText}>{loading ? 'Signing in…' : 'Sign in'}</Text>
       </Pressable>
@@ -83,21 +116,3 @@ export default function LoginScreen({ navigation }: Props) {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  wrap: { flex: 1, padding: 24, justifyContent: 'center', backgroundColor: '#f8fafc' },
-  brand: { width: 200, height: 120, alignSelf: 'center', marginBottom: 16 },
-  sub: { fontSize: 13, color: '#64748b', marginBottom: 20, textAlign: 'center' },
-  input: {
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 12,
-    backgroundColor: '#fff',
-  },
-  btn: { backgroundColor: '#2563eb', padding: 14, borderRadius: 10, alignItems: 'center' },
-  btnText: { color: '#fff', fontWeight: '700' },
-  linkBtn: { marginTop: 18, padding: 10, alignItems: 'center' },
-  linkText: { color: '#2563eb', fontWeight: '600', fontSize: 14 },
-});

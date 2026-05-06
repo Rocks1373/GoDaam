@@ -22,9 +22,8 @@ if echo "$ISSUER" | grep -qi 'TRAEFIK DEFAULT'; then
   echo ""
   echo "PROBLEM: Server is using Traefik's default self-signed certificate."
   echo "         Browsers and curl (correctly) will not trust it without -k."
-  echo "         Fix: add a Let's Encrypt (ACME) certificate in Traefik for this host"
-  echo "         and route Host(\`${HOST}\`) to the GoDaam \`web\` container."
-  echo "         See: docker-compose.godam-domain.example.yml in the repo root."
+  echo "         Fix: issue a Let's Encrypt (or trusted) certificate for this host in your"
+  echo "         reverse proxy (Traefik, Caddy, nginx, etc.) and route traffic to Node/nginx."
   echo ""
 fi
 

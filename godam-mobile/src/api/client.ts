@@ -2,7 +2,7 @@ import axios, { type AxiosError } from 'axios';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 
-import { normalizeToApiBase } from '../config/apiConfig';
+import { getDefaultApiBaseUrl, normalizeToApiBase } from '../config/apiConfig';
 import { getSavedBackendApiUrl, saveBackendApiUrl } from '../storage/backendUrlStorage';
 
 function isAndroidEmulatorForLocalhostRewrite(): boolean {
@@ -75,8 +75,21 @@ export function configureApiBaseUrl(apiBaseRaw: string): void {
  */
 export async function initApiClientFromStorage(): Promise<boolean> {
   const saved = await getSavedBackendApiUrl();
-  if (!saved) return false;
-  configureApiBaseUrl(saved);
+  if (saved) {
+    const normalizedSaved = normalizeToApiBase(saved);
+    if (normalizedSaved) {
+      configureApiBaseUrl(normalizedSaved);
+      return true;
+    }
+  }
+
+  // Hardcoded fallback for first install / emulator testing.
+  // - iOS simulator: localhost works
+  // - Android emulator: localhost is rewritten to 10.0.2.2 via resolveAndroidLocalhost()
+  const fallback = getDefaultApiBaseUrl() || normalizeToApiBase('http://localhost:3001');
+  if (!fallback) return false;
+  await saveBackendApiUrl(fallback);
+  configureApiBaseUrl(fallback);
   return true;
 }
 

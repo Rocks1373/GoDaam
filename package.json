@@ -6,15 +6,18 @@
     "frontend"
   ],
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c green,cyan \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\"",
-    "dev:all": "concurrently -n backend,frontend,mobile -c green,cyan,magenta \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\" \"npm run start --prefix godam-mobile\"",
+    "install:all": "npm install && npm install --prefix godam-mobile",
+    "dev": "concurrently -n backend,frontend,mobile -c green,cyan,magenta \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\" \"npm --prefix godam-mobile run start\"",
+    "dev:web": "concurrently -n backend,frontend -c green,cyan \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\"",
+    "stop:dev": "bash dev.sh stop",
+    "setup:huawei-godam": "bash scripts/setup-huawei-godam-venv.sh",
+    "dev:web:huawei": "concurrently -n backend,frontend,godam -c green,cyan,magenta \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\" \"bash scripts/run-huawei-godam-streamlit.sh\"",
+    "dev:all": "npm run dev:web:huawei",
     "build": "npm run build --workspace frontend",
     "start": "npm run start --workspace backend",
     "seed:sample": "npm run seed:sample --workspace backend",
     "seed:test-data": "npm run seed:test-data --workspace backend",
-    "android:emu": "bash scripts/run-android-emulator.sh",
-    "docker:build": "docker compose build",
-    "docker:up": "docker compose up -d --build"
+    "android:emu": "bash scripts/run-android-emulator.sh"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
