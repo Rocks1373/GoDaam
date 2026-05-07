@@ -110,6 +110,7 @@ export function PartSuggestInput({
         <TextInput
           style={[styles.input, style]}
           placeholder={placeholder}
+          placeholderTextColor="#94a3b8"
           value={value}
           onChangeText={onChangeText}
           autoCapitalize={autoCapitalize}
@@ -247,6 +248,7 @@ export function RackSuggestInput({
         <TextInput
           style={[styles.input, style]}
           placeholder={placeholder}
+          placeholderTextColor="#94a3b8"
           value={value}
           onChangeText={onChangeText}
           autoCapitalize="characters"
@@ -311,6 +313,7 @@ const styles = StyleSheet.create({
     paddingRight: 40,
     backgroundColor: '#fff',
     fontSize: 16,
+    color: '#0f172a',
   },
   inputTrail: {
     position: 'absolute',

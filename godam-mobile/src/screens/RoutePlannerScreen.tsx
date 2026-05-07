@@ -239,6 +239,7 @@ export default function RoutePlannerScreen({ navigation }: Props) {
                   onChangeText={(t) => setSeqDraft((s) => ({ ...s, [tid]: t }))}
                   style={styles.seqInput}
                   placeholder={String(item.sequence_no ?? index + 1)}
+                  placeholderTextColor="#94a3b8"
                 />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.ob}>{item.outbound_number || '—'}</Text>

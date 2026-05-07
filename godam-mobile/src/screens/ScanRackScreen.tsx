@@ -324,10 +324,10 @@ export default function ScanRackScreen() {
       </View>
       {ocrHint ? <Text style={styles.ocrInlineHint}>{ocrHint}</Text> : null}
       {ocrServerHint ? <Text style={styles.ocrInlineHint}>{ocrServerHint}</Text> : null}
-      <TextInput style={styles.input} value={part} onChangeText={setPart} placeholder="Scan or type part number" />
+      <TextInput style={styles.input} value={part} onChangeText={setPart} placeholder="Scan or type part number" placeholderTextColor="#94a3b8" />
 
       <Text style={styles.label}>SAP Part Number</Text>
-      <TextInput style={styles.input} value={sap} onChangeText={setSap} placeholder="Same as part if blank" />
+      <TextInput style={styles.input} value={sap} onChangeText={setSap} placeholder="Same as part if blank" placeholderTextColor="#94a3b8" />
 
       <Text style={styles.label}>Rack Location</Text>
       <TextInput
@@ -336,15 +336,16 @@ export default function ScanRackScreen() {
         value={rack}
         onChangeText={setRack}
         placeholder="Enter rack, press Next"
+        placeholderTextColor="#94a3b8"
         onSubmitEditing={() => refQty.current?.focus()}
         returnKeyType="next"
       />
 
       <Text style={styles.label}>Qty</Text>
-      <TextInput ref={refQty} style={styles.input} value={qty} onChangeText={setQty} keyboardType="decimal-pad" />
+      <TextInput ref={refQty} style={styles.input} value={qty} onChangeText={setQty} keyboardType="decimal-pad" placeholderTextColor="#94a3b8" />
 
       <Text style={styles.label}>Remarks</Text>
-      <TextInput style={styles.input} value={remarks} onChangeText={setRemarks} />
+      <TextInput style={styles.input} value={remarks} onChangeText={setRemarks} placeholderTextColor="#94a3b8" />
 
       {savedPreview ? (
         <View style={styles.previewBox}>
@@ -512,6 +513,7 @@ const styles = StyleSheet.create({
     padding: 10,
     marginTop: 4,
     backgroundColor: '#fff',
+    color: '#0f172a',
   },
   previewBox: {
     marginTop: 16,

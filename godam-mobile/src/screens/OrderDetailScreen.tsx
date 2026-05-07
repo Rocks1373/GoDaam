@@ -422,6 +422,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
           <TextInput
             style={styles.searchInput}
             placeholder="Filter by rack location (contains…)"
+            placeholderTextColor="#94a3b8"
             value={rackFilter}
             onChangeText={setRackFilter}
             autoCapitalize="none"
@@ -472,6 +473,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
         <TextInput
           style={[styles.input, { marginTop: 8 }]}
           placeholder="Reason (e.g. rack empty, damaged, wrong label...)"
+          placeholderTextColor="#94a3b8"
           value={changeReason}
           onChangeText={setChangeReason}
         />
@@ -567,7 +569,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
             </View>
 
             <Text style={[styles.smallLabel, { marginTop: 10 }]}>Quantity (must match suggested)</Text>
-            <TextInput style={styles.input} value={pickQty} onChangeText={setPickQty} keyboardType="decimal-pad" placeholder="Qty" />
+            <TextInput style={styles.input} value={pickQty} onChangeText={setPickQty} keyboardType="decimal-pad" placeholder="Qty" placeholderTextColor="#94a3b8" />
 
             <Pressable style={styles.btn} onPress={submitPickFromModal}>
               <Text style={styles.btnText}>Confirm pickup</Text>
@@ -589,9 +591,9 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Request change</Text>
             <Text style={styles.small}>Part: {String(selectedItem?.material || selectedItem?.part_number || '')}</Text>
-            <TextInput style={styles.input} placeholder="Requested rack (optional)" value={reqRack} onChangeText={setReqRack} autoCapitalize="characters" />
-            <TextInput style={styles.input} placeholder="Requested qty (optional)" value={reqQty} onChangeText={setReqQty} keyboardType="decimal-pad" />
-            <TextInput style={styles.input} placeholder="Reason" value={changeReason} onChangeText={setChangeReason} />
+            <TextInput style={styles.input} placeholder="Requested rack (optional)" placeholderTextColor="#94a3b8" value={reqRack} onChangeText={setReqRack} autoCapitalize="characters" />
+            <TextInput style={styles.input} placeholder="Requested qty (optional)" placeholderTextColor="#94a3b8" value={reqQty} onChangeText={setReqQty} keyboardType="decimal-pad" />
+            <TextInput style={styles.input} placeholder="Reason" placeholderTextColor="#94a3b8" value={changeReason} onChangeText={setChangeReason} />
             <Pressable style={styles.btn} onPress={submitRequestFromModal}>
               <Text style={styles.btnText}>Send request</Text>
             </Pressable>
@@ -629,6 +631,7 @@ const styles = StyleSheet.create({
     padding: 10,
     marginBottom: 8,
     backgroundColor: '#fff',
+    color: '#0f172a',
   },
   btn: { backgroundColor: '#2563eb', padding: 14, borderRadius: 10, alignItems: 'center', marginTop: 8 },
   btnDisabled: { opacity: 0.45 },

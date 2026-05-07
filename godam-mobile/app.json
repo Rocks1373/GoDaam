@@ -2,7 +2,7 @@
   "expo": {
     "name": "GoDaam",
     "slug": "godam-mobile",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "extra": {
       "eas": {
         "projectId": "1667da6d-66c4-474e-b7d5-0a7c3c2ccd0f"

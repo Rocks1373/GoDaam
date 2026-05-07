@@ -27,6 +27,7 @@ import {
   ExternalLink,
   ClipboardPenLine,
   Boxes,
+  Smartphone,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Dashboard from './pages/Dashboard';
@@ -53,7 +54,10 @@ import ReportExportPage from './pages/ReportExportPage';
 import OcrCenter from './pages/OcrCenter';
 import SapStock from './pages/SapStock';
 import StockComparisonReport from './pages/StockComparisonReport';
+import HuaweiGodamUpload from './pages/HuaweiGodamUpload';
+import MobileApps from './pages/MobileApps';
 import { authApi, notificationsApi, huaweiModuleApi } from './services/api';
+import FloatingAIAgent from './components/FloatingAIAgent';
 import './index.css';
 
 const SIDEBAR_WIDTH_KEY = 'godam_sidebar_width_px';
@@ -76,6 +80,14 @@ function readSidebarWidth() {
 function RequireAuth({ checking, user, children }) {
   if (checking) return <div className="p-4 text-xs">Loading…</div>;
   if (!user) return <Navigate to="/login" replace />;
+  return children;
+}
+
+function RequireAdmin({ user, children }) {
+  if (!user) return <Navigate to="/login" replace />;
+  if (String(user.role || '').toLowerCase() !== 'admin') {
+    return <Navigate to="/dashboard" replace />;
+  }
   return children;
 }
 
@@ -251,8 +263,8 @@ function App() {
           element={
             <RequireAuth checking={checking} user={user}>
               <CardDisplayProvider>
-              <div className="min-h-screen bg-theme-page text-xs">
-                <header className="bg-theme-header shadow-sm border-b border-theme-border">
+              <div className="app-shell min-h-screen bg-theme-page text-xs">
+                <header className="app-topbar bg-theme-header border-b border-theme-border">
                   <div className="max-w-[1920px] mx-auto px-2 sm:px-3">
                     <div className="flex justify-between items-center py-1.5 gap-2">
                       <div className="flex items-center gap-2 min-w-0">
@@ -338,10 +350,10 @@ function App() {
                   </div>
                 </header>
 
-                <div className="flex w-full px-2 sm:px-3 py-2 gap-2 items-stretch">
+                <div className="app-workspace flex w-full px-2 sm:px-3 py-2 gap-2 items-stretch">
                   <div
-                    className="hidden lg:flex shrink-0 sticky top-2 self-start max-h-[calc(100vh-2.75rem)] rounded-lg shadow-sm border border-theme-border bg-theme-card overflow-hidden"
-                    style={{ width: sidebarWidth }}
+                    className="app-sidebar-shell hidden lg:flex shrink-0 sticky top-2 self-start max-h-[calc(100vh-2.75rem)] rounded-lg border border-theme-border bg-theme-card overflow-hidden"
+                    style={{ '--sidebar-expanded-width': `${sidebarWidth}px` }}
                   >
                     <aside className="flex-1 min-w-0 p-2 overflow-y-auto overflow-x-hidden">
                     <nav className="space-y-1">
@@ -429,7 +441,7 @@ function App() {
                         <span className="truncate">POD inbox</span>
                       </NavLink>
 
-                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
+                      <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
                         <PieChart className="w-3 h-3" />
                         Reports
                       </div>
@@ -496,26 +508,8 @@ function App() {
                         <GitCompare className="w-3.5 h-3.5 flex-shrink-0" />
                         <span className="truncate">Stock Comparison Report</span>
                       </NavLink>
-                      <NavLink
-                        to="/ocr-center"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <ScanLine className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">OCR Center</span>
-                      </NavLink>
-                      <a
-                        href={import.meta.env.VITE_OCR_TOOL_URL || 'https://godam.divadivya.cloud/ocr'}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="nav-sidebar-link"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">OCR Tool</span>
-                      </a>
 
-                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
+                      <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
                         <FileSpreadsheet className="w-3 h-3" />
                         SAP Stock
                       </div>
@@ -529,38 +523,69 @@ function App() {
                         <span className="truncate">SAP Stock</span>
                       </NavLink>
 
-                      <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
-                        <Boxes className="w-3 h-3" />
-                        Modules
-                      </div>
-                      <button
-                        type="button"
-                        className="nav-sidebar-link w-full text-left cursor-pointer"
-                        title="Opens GoDam-1.0 in a new browser tab"
-                        onClick={async () => {
-                          try {
-                            const data = await huaweiModuleApi.recordGodamOpen();
-                            const url = data?.url;
-                            if (url) window.open(url, '_blank', 'noopener,noreferrer');
-                          } catch {
-                            try {
-                              const { url } = await huaweiModuleApi.getGodamUrl();
-                              if (url) window.open(url, '_blank', 'noopener,noreferrer');
-                            } catch {
-                              // ignore
+                      {user?.role === 'admin' && (
+                        <>
+                          <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-amber-600 uppercase tracking-wide">
+                            <Boxes className="w-3 h-3" />
+                            Under Construction
+                          </div>
+                          <NavLink
+                            to="/ocr-center"
+                            className={({ isActive }) =>
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
                             }
-                          }
-                        }}
-                      >
-                        <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Huawei · GoDam-1.0</span>
-                      </button>
+                          >
+                            <ScanLine className="w-3.5 h-3.5 flex-shrink-0" />
+                            <span className="truncate">OCR Center</span>
+                          </NavLink>
+                          <a
+                            href={import.meta.env.VITE_OCR_TOOL_URL || 'https://godam.divadivya.cloud/ocr'}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="nav-sidebar-link"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
+                            <span className="truncate">OCR Tool</span>
+                          </a>
+                          <button
+                            type="button"
+                            className="nav-sidebar-link w-full text-left cursor-pointer"
+                            title="Opens GoDam-1.0 in a new browser tab"
+                            onClick={async () => {
+                              try {
+                                const data = await huaweiModuleApi.recordGodamOpen();
+                                const url = data?.url;
+                                if (url) window.open(url, '_blank', 'noopener,noreferrer');
+                              } catch {
+                                try {
+                                  const { url } = await huaweiModuleApi.getGodamUrl();
+                                  if (url) window.open(url, '_blank', 'noopener,noreferrer');
+                                } catch {
+                                  // ignore
+                                }
+                              }
+                            }}
+                          >
+                            <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
+                            <span className="truncate">Huawei · GoDam-1.0</span>
+                          </button>
+                          <NavLink
+                            to="/huawei-godam"
+                            className={({ isActive }) =>
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
+                            }
+                          >
+                            <UploadCloud className="w-3.5 h-3.5 flex-shrink-0" />
+                            <span className="truncate">Huawei · Upload files</span>
+                          </NavLink>
+                        </>
+                      )}
 
                       {(user?.role === 'admin' ||
                         user?.permissions?.can_view_transportation ||
                         user?.permissions?.can_manage_transportation) && (
                         <>
-                          <div className="flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
+                          <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
                             <ShieldCheck className="w-3 h-3" />
                             Admin
                           </div>
@@ -631,6 +656,15 @@ function App() {
                             <Database className="w-3.5 h-3.5 flex-shrink-0" />
                             <span className="truncate">Outbound DB</span>
                           </NavLink>
+                          <NavLink
+                            to="/mobile-apps"
+                            className={({ isActive }) =>
+                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
+                            }
+                          >
+                            <Smartphone className="w-3.5 h-3.5 flex-shrink-0" />
+                            <span className="truncate">Mobile Apps</span>
+                          </NavLink>
                         </>
                       )}
                     </nav>
@@ -654,7 +688,7 @@ function App() {
                     </button>
                   </div>
 
-                  <main className="flex-1 min-w-0 pb-4">
+                  <main className="app-main flex-1 min-w-0 pb-4">
                     <Routes>
                       <Route path="/dashboard" element={<Dashboard />} />
                       <Route path="/reports/inbound" element={<InboundReport />} />
@@ -692,7 +726,22 @@ function App() {
                       />
                       <Route path="/reports/stock-comparison" element={<StockComparisonReport />} />
                       <Route path="/sap-stock" element={<SapStock />} />
-                      <Route path="/ocr-center" element={<OcrCenter />} />
+                      <Route
+                        path="/ocr-center"
+                        element={
+                          <RequireAdmin user={user}>
+                            <OcrCenter />
+                          </RequireAdmin>
+                        }
+                      />
+                      <Route
+                        path="/huawei-godam"
+                        element={
+                          <RequireAdmin user={user}>
+                            <HuaweiGodamUpload currentUser={user} />
+                          </RequireAdmin>
+                        }
+                      />
                       <Route path="/main-stock" element={<MainStock />} />
                       <Route path="/stock-by-rack/*" element={<StockByRack currentUser={user} />} />
                       <Route path="/pick-suggestion" element={<Navigate to="/dashboard" replace />} />
@@ -709,11 +758,20 @@ function App() {
                       <Route path="/role-permissions" element={<RolePermissions />} />
                       <Route path="/pick-change-requests" element={<PickChangeRequests />} />
                       <Route path="/admin-maintenance" element={<AdminMaintenance />} />
+                      <Route
+                        path="/mobile-apps"
+                        element={
+                          <RequireAdmin user={user}>
+                            <MobileApps />
+                          </RequireAdmin>
+                        }
+                      />
                       <Route path="/notifications" element={<Notifications />} />
                       <Route path="/" element={<Navigate to="/dashboard" replace />} />
                     </Routes>
                   </main>
                 </div>
+                <FloatingAIAgent user={user} />
               </div>
               </CardDisplayProvider>
             </RequireAuth>

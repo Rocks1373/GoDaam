@@ -1,4 +1,6 @@
 node_modules
+.venv/
+venv/
 .env
 .env.*
 !.env.example
@@ -22,6 +24,11 @@ coverage/
 # Large APK hosted next to web app but not stored in Git (deploy via rsync/scp)
 frontend/public/downloads/*.apk
 releases/*.apk
+
+# VPS-pulled secrets + mirrored test mobile tree (scripts/test-mobile/setup-from-vps.sh)
+/test/godam-mobile/
+/test/.pulled-backend.env
+/test/GoDam-test-release.apk
 
 # Local tooling / logs
 .godam/

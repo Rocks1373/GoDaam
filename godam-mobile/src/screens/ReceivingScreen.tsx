@@ -189,11 +189,11 @@ export default function ReceivingScreen() {
           <Text style={styles.v}>{selectedItem.remaining_qty}</Text>
         </View>
         <Text style={styles.label}>Rack location</Text>
-        <TextInput style={styles.input} value={rack} onChangeText={setRack} placeholder="A-12B" autoCapitalize="characters" />
+        <TextInput style={styles.input} value={rack} onChangeText={setRack} placeholder="A-12B" placeholderTextColor="#94a3b8" autoCapitalize="characters" />
         <Text style={styles.label}>Qty to put</Text>
-        <TextInput style={styles.input} value={qty} onChangeText={setQty} keyboardType="decimal-pad" placeholder="0" />
+        <TextInput style={styles.input} value={qty} onChangeText={setQty} keyboardType="decimal-pad" placeholder="0" placeholderTextColor="#94a3b8" />
         <Text style={styles.label}>Remarks</Text>
-        <TextInput style={styles.input} value={remarks} onChangeText={setRemarks} placeholder="-" />
+        <TextInput style={styles.input} value={remarks} onChangeText={setRemarks} placeholder="-" placeholderTextColor="#94a3b8" />
         <Pressable style={styles.btn} onPress={savePutaway}>
           <Text style={styles.btnText}>Save putaway</Text>
         </Pressable>
@@ -229,6 +229,7 @@ export default function ReceivingScreen() {
           value={itemPartQuery}
           onChangeText={setItemPartQuery}
           placeholder="e.g. ER8202 or cable"
+          placeholderTextColor="#94a3b8"
           autoCapitalize="none"
           autoCorrect={false}
           clearButtonMode="while-editing"
@@ -337,6 +338,7 @@ const styles = StyleSheet.create({
     padding: 12,
     marginTop: 4,
     backgroundColor: '#fff',
+    color: '#0f172a',
   },
   btn: { backgroundColor: '#2563eb', padding: 14, borderRadius: 10, alignItems: 'center', marginTop: 16 },
   btnText: { color: '#fff', fontWeight: '800' },
@@ -372,6 +374,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
     backgroundColor: '#fff',
     fontSize: 16,
+    color: '#0f172a',
   },
   searchMeta: { fontSize: 12, color: '#64748b', marginTop: 6 },
   emptySearch: { textAlign: 'center', color: '#94a3b8', marginTop: 20, fontSize: 13, paddingHorizontal: 8 },
