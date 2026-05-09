@@ -14,6 +14,8 @@ export type RootStackParamList = {
   Notifications: undefined;
   Orders: undefined;
   OrderDetail: { orderId: number };
+  PickedOrders: undefined;
+  PickedOrderDetail: { orderId: number };
   StockPeek: { orderId: number; outboundItemId: number };
   ScanRack: undefined;
   Receiving: undefined;

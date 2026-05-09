@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Loader2 } from 'lucide-react';
+import { Barcode, Cpu, Database, Loader2, Network, Server, Truck, Warehouse } from 'lucide-react';
 import { authApi } from '../services/api';
 import ThemeSwitcher from '../components/ThemeSwitcher';
 
@@ -32,23 +32,164 @@ function usePrefersReducedMotion() {
   return reduced;
 }
 
-function buildStars(count = 76) {
-  return Array.from({ length: count }, (_, i) => ({
-    id: i,
-    leftPct: (i * 41.3 + 7 * (i % 11)) % 100,
-    topPct: (i * 29.7 + 13 * (i % 9)) % 100,
-    size: 1 + (i % 6),
-    baseOp: 0.14 + (i % 10) * 0.06,
-    driftX: `${((i % 7) - 3) * 2.5}px`,
-    driftY: `${((i % 5) - 2) * -2.5}px`,
-    driftDur: 16 + (i % 19),
-    twDur: 2.8 + (i % 6) * 0.55,
-    twDelay: `${-(i * 0.29)}s`,
-    driftDelay: `${-(i * 0.61)}s`,
-    hue:
-      i % 5 === 0 ? 'rgba(224,242,254,0.95)' : i % 5 === 1 ? 'rgba(221,214,254,0.9)' : 'rgba(255,255,255,0.92)',
-  }));
+function AntigravityParticleField({ reducedMotion }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+
+    const ctx = canvas.getContext('2d', { alpha: true });
+    let width = 0;
+    let height = 0;
+    let raf = 0;
+    let particles = [];
+    const pointer = { x: 0, y: 0, tx: 0, ty: 0, active: false };
+
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const rect = canvas.getBoundingClientRect();
+      width = Math.max(1, rect.width);
+      height = Math.max(1, rect.height);
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      const count = Math.min(220, Math.max(110, Math.floor((width * height) / 6200)));
+      const maxRadius = Math.min(width * 0.46, height * 0.52, 520);
+      particles = Array.from({ length: count }, (_, i) => {
+        const band = i % 7;
+        const angle = ((i * 137.508) % 360) * (Math.PI / 180);
+        const radius = 64 + (maxRadius - 64) * ((i * 0.618033 + band * 0.07) % 1);
+        return {
+          angle,
+          radius,
+          band,
+          speed: 0.00045 + (band + 1) * 0.00008,
+          length: 3.2 + (i % 5) * 1.35,
+          width: 1 + (i % 4) * 0.28,
+          alpha: 0.18 + (i % 8) * 0.055,
+          phase: i * 0.37,
+        };
+      });
+    };
+
+    const onPointerMove = (event) => {
+      const rect = canvas.getBoundingClientRect();
+      pointer.tx = (event.clientX - rect.left - width / 2) / Math.max(width / 2, 1);
+      pointer.ty = (event.clientY - rect.top - height / 2) / Math.max(height / 2, 1);
+      pointer.active = true;
+    };
+
+    const onPointerLeave = () => {
+      pointer.active = false;
+      pointer.tx = 0;
+      pointer.ty = 0;
+    };
+
+    const drawFallback = () => {
+      ctx.clearRect(0, 0, width, height);
+      const cx = width / 2;
+      const cy = height * 0.42;
+      ctx.strokeStyle = 'rgba(37, 99, 235, 0.18)';
+      ctx.lineWidth = 1;
+      [116, 190, 276, 366].forEach((r) => {
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, r, r * 0.52, -0.18, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+    };
+
+    const step = (now = 0) => {
+      ctx.clearRect(0, 0, width, height);
+      ctx.globalCompositeOperation = 'source-over';
+
+      pointer.x += ((pointer.active ? pointer.tx : 0) - pointer.x) * 0.045;
+      pointer.y += ((pointer.active ? pointer.ty : 0) - pointer.y) * 0.045;
+
+      const cx = width / 2 + pointer.x * 22;
+      const cy = height * 0.42 + pointer.y * 18;
+      const time = now || 0;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(pointer.x * 0.035);
+
+      ctx.strokeStyle = 'rgba(37, 99, 235, 0.075)';
+      ctx.lineWidth = 1;
+      [104, 178, 254, 344, 438].forEach((r, i) => {
+        ctx.beginPath();
+        ctx.setLineDash([5 + i, 18 + i * 3]);
+        ctx.ellipse(0, 0, r, r * (0.48 + i * 0.015), -0.14 + i * 0.05, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      ctx.setLineDash([]);
+
+      for (let i = 0; i < particles.length; i += 1) {
+        const p = particles[i];
+        const drift = Math.sin(time * 0.0012 + p.phase) * 7;
+        const wobble = Math.cos(time * 0.001 + p.phase) * 0.035;
+        const a = p.angle + time * p.speed + wobble + pointer.x * 0.05;
+        const rx = p.radius + drift + pointer.y * (p.band - 3) * 2.2;
+        const ry = rx * (0.48 + p.band * 0.018);
+        const x = Math.cos(a) * rx;
+        const y = Math.sin(a) * ry;
+        const tangent = a + Math.PI / 2 + Math.sin(time * 0.001 + p.phase) * 0.24;
+        const half = p.length / 2;
+        const alpha = p.alpha * (0.65 + Math.sin(time * 0.0015 + p.phase) * 0.22);
+
+        ctx.strokeStyle = `rgba(37, 99, 235, ${alpha})`;
+        ctx.lineWidth = p.width;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(x - Math.cos(tangent) * half, y - Math.sin(tangent) * half);
+        ctx.lineTo(x + Math.cos(tangent) * half, y + Math.sin(tangent) * half);
+        ctx.stroke();
+
+        if (i % 9 === 0) {
+          ctx.fillStyle = `rgba(29, 78, 216, ${alpha * 0.55})`;
+          ctx.beginPath();
+          ctx.arc(x, y, 1.25, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      ctx.restore();
+      raf = requestAnimationFrame(step);
+    };
+
+    resize();
+    if (reducedMotion) {
+      drawFallback();
+      window.addEventListener('resize', resize);
+      return () => window.removeEventListener('resize', resize);
+    }
+
+    raf = requestAnimationFrame(step);
+    window.addEventListener('resize', resize);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerleave', onPointerLeave);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', resize);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerleave', onPointerLeave);
+    };
+  }, [reducedMotion]);
+
+  return <canvas ref={canvasRef} className="godam-antigravity-field absolute inset-0 z-[0] h-full w-full" aria-hidden />;
 }
+
+const techIcons = [
+  { Icon: Warehouse, label: 'Warehouse', className: 'left-[9%] top-[23%] hidden md:flex' },
+  { Icon: Server, label: 'Server', className: 'right-[12%] top-[24%] hidden md:flex' },
+  { Icon: Database, label: 'Database', className: 'left-[16%] bottom-[21%] hidden lg:flex' },
+  { Icon: Truck, label: 'Fleet', className: 'right-[16%] bottom-[23%] hidden lg:flex' },
+  { Icon: Barcode, label: 'Barcode', className: 'left-[7%] bottom-[42%] hidden xl:flex' },
+  { Icon: Cpu, label: 'AI', className: 'right-[8%] bottom-[43%] hidden xl:flex' },
+  { Icon: Network, label: 'Network', className: 'left-1/2 top-[12%] hidden sm:flex -translate-x-1/2' },
+];
 
 export default function Login({ onLoggedIn }) {
   const navigate = useNavigate();
@@ -60,88 +201,22 @@ export default function Login({ onLoggedIn }) {
 
   const reduceMotion = usePrefersReducedMotion();
   const rootRef = useRef(null);
-  const glowRef = useRef(null);
-  const starElsRef = useRef([]);
-  const mouseRef = useRef({ x: 0, y: 0, active: false });
-
-  const stars = useMemo(() => buildStars(76), []);
-
-  const setStarRef = useCallback((index) => (el) => {
-    starElsRef.current[index] = el;
-  }, []);
-
-  useEffect(() => {
-    starElsRef.current = starElsRef.current.slice(0, stars.length * 2);
-  }, [stars.length]);
-
-  useEffect(() => {
-    if (reduceMotion) return undefined;
-
-    let id = 0;
-    const influencePx = 158;
-    const maxPullPx = 21;
-
-    const tick = () => {
-      const root = rootRef.current;
-      const glow = glowRef.current;
-      if (root) {
-        const rect = root.getBoundingClientRect();
-        const { x: mcx, y: mcy, active } = mouseRef.current;
-
-        if (glow) {
-          if (active) {
-            const lx = mcx - rect.left;
-            const ly = mcy - rect.top;
-            glow.style.background = `radial-gradient(circle ${Math.min(210, rect.width * 0.28)}px at ${lx}px ${ly}px, rgba(219,234,254,0.2), rgba(129,140,248,0.08) 42%, transparent 68%)`;
-            glow.style.opacity = '1';
-          } else {
-            glow.style.opacity = '0';
-          }
-        }
-
-        const n = stars.length * 2;
-        for (let i = 0; i < n; i += 1) {
-          const el = starElsRef.current[i];
-          const s = stars[i % stars.length];
-          if (!el || !s) continue;
-
-          const sr = el.getBoundingClientRect();
-          const sx = sr.left + sr.width / 2 - rect.left;
-          const sy = sr.top + sr.height / 2 - rect.top;
-          let px = 0;
-          let py = 0;
-
-          if (active) {
-            const mx = mcx - rect.left;
-            const my = mcy - rect.top;
-            const dx = mx - sx;
-            const dy = my - sy;
-            const d = Math.hypot(dx, dy);
-            if (d < influencePx && d > 0.4) {
-              const t = 1 - d / influencePx;
-              const pull = t * t * maxPullPx;
-              px = (dx / d) * pull;
-              py = (dy / d) * pull;
-            }
-          }
-
-          el.style.transform = `translate3d(${px}px, ${py}px, 0)`;
-        }
-      }
-
-      id = requestAnimationFrame(tick);
-    };
-
-    id = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(id);
-  }, [reduceMotion, stars]);
 
   const onMouseMoveRoot = useCallback((e) => {
-    mouseRef.current = { x: e.clientX, y: e.clientY, active: true };
-  }, []);
+    const root = rootRef.current;
+    if (!root || reduceMotion) return;
+    const rect = root.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width - 0.5).toFixed(3);
+    const y = ((e.clientY - rect.top) / rect.height - 0.5).toFixed(3);
+    root.style.setProperty('--mx', x);
+    root.style.setProperty('--my', y);
+  }, [reduceMotion]);
 
   const onLeaveRoot = useCallback(() => {
-    mouseRef.current = { ...mouseRef.current, active: false };
+    const root = rootRef.current;
+    if (!root) return;
+    root.style.setProperty('--mx', '0');
+    root.style.setProperty('--my', '0');
   }, []);
 
   const submit = async (e) => {
@@ -173,118 +248,49 @@ export default function Login({ onLoggedIn }) {
   return (
     <div
       ref={rootRef}
-      className="godam-login-root relative flex min-h-[100dvh] flex-col overflow-hidden bg-[#020617]"
+      className="godam-login-root godam-antigravity-root relative flex min-h-[100dvh] flex-col overflow-hidden"
       onMouseMove={onMouseMoveRoot}
       onMouseLeave={onLeaveRoot}
     >
-      {/* Deep space base */}
-      <div
-        className="godam-login-bg-shift pointer-events-none absolute inset-0 bg-[length:220%_220%]"
-        style={{
-          backgroundImage:
-            'radial-gradient(ellipse 90% 75% at 18% 28%, rgba(30,58,138,0.35), transparent 58%), radial-gradient(ellipse 85% 70% at 82% 72%, rgba(76,29,149,0.32), transparent 55%), radial-gradient(ellipse 120% 90% at 50% 50%, rgba(15,23,42,0.9), #020617)',
-        }}
-        aria-hidden
-      />
+      <div className="godam-antigravity-static pointer-events-none absolute inset-0 z-[0]" aria-hidden />
+      <AntigravityParticleField reducedMotion={reduceMotion} />
 
-      {/* Slow galaxy / nebula rotation */}
-      <div
-        className="godam-login-galaxy-spin pointer-events-none absolute inset-[-55%] opacity-[0.42] mix-blend-screen"
-        style={{
-          background:
-            'radial-gradient(ellipse 42% 36% at 44% 46%, rgba(168,85,247,0.55), transparent 62%), radial-gradient(ellipse 52% 42% at 58% 54%, rgba(59,130,246,0.45), transparent 58%), radial-gradient(ellipse 68% 52% at 36% 58%, rgba(236,72,153,0.28), transparent 64%), radial-gradient(ellipse 90% 72% at 50% 48%, rgba(15,118,110,0.12), transparent 70%)',
-          filter: 'blur(1px)',
-        }}
-        aria-hidden
-      />
-
-      <div
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(2,6,23,0.55)_55%,rgba(2,6,23,0.92)_100%)]"
-        aria-hidden
-      />
-
-      {/* Subtle star-field grid */}
-      <div
-        className="godam-login-grid-x pointer-events-none absolute inset-0 opacity-[0.07]"
-        style={{
-          backgroundImage:
-            'linear-gradient(rgba(148,163,184,0.12) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.12) 1px, transparent 1px)',
-          backgroundSize: '64px 64px',
-        }}
-        aria-hidden
-      />
-
-      {/* Stars — slow drift left→right (seamless marquee) + magnetic pull near cursor */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
-        <div className="godam-login-star-marquee-motion flex h-full min-h-full w-[200%]">
-          {[0, 1].map((panel) => (
-            <div key={panel} className="relative h-full min-h-full w-1/2 shrink-0">
-              {stars.map((s, i) => (
-                <span
-                  key={`${panel}-${s.id}`}
-                  ref={setStarRef(panel * stars.length + i)}
-                  className="godam-login-star-host absolute"
-                  style={{ left: `${s.leftPct}%`, top: `${s.topPct}%` }}
-                >
-                  <span
-                    className="godam-login-star-inner absolute left-0 top-0 block"
-                    style={{
-                      '--dx': s.driftX,
-                      '--dy': s.driftY,
-                      animationDuration: `${s.driftDur}s`,
-                      animationDelay: s.driftDelay,
-                    }}
-                  >
-                    <span
-                      className="godam-login-star-dot block rounded-full shadow-[0_0_8px_currentColor]"
-                      style={{
-                        width: s.size,
-                        height: s.size,
-                        backgroundColor: s.hue,
-                        color: s.hue,
-                        '--base-op': s.baseOp,
-                        animationDuration: `${s.twDur}s`,
-                        animationDelay: s.twDelay,
-                      }}
-                    />
-                  </span>
-                </span>
-              ))}
-            </div>
-          ))}
-        </div>
+      <div className="pointer-events-none absolute inset-0 z-[1]" aria-hidden>
+        {techIcons.map(({ Icon, label, className }) => (
+          <div key={label} className={`godam-tech-icon absolute ${className}`} title={label}>
+            <Icon className="h-4 w-4" />
+          </div>
+        ))}
       </div>
 
-      {/* Local glow follows cursor — same neighborhood as magnetic stars */}
-      <div
-        ref={glowRef}
-        className="pointer-events-none absolute inset-0 z-[0] mix-blend-screen transition-opacity duration-300"
-        style={{ opacity: 0 }}
-        aria-hidden
-      />
+      <main className="relative z-[2] flex flex-1 flex-col items-center justify-center px-4 py-8 sm:py-10">
+        <section className="godam-antigravity-hero w-full max-w-[820px] text-center">
+          <div className="godam-brand-mark mx-auto mb-5 inline-flex items-center gap-3 rounded-full border border-blue-100 bg-white/85 px-4 py-2 shadow-[0_18px_45px_-32px_rgba(37,99,235,0.8)] backdrop-blur">
+            <span className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-blue-600 to-cyan-400 text-white shadow-[0_12px_28px_-16px_rgba(37,99,235,0.85)]">
+              <Network className="h-4 w-4" aria-hidden />
+            </span>
+            <span className="text-[12px] font-semibold tracking-[0.18em] text-slate-600">TECHNICAL LOGISTICS PLATFORM</span>
+          </div>
 
-      <main className="relative z-[1] flex flex-1 flex-col items-center justify-center px-4 py-10 sm:py-12">
-        <div className="w-full max-w-[420px]">
-          <div className="godam-login-card-shell rounded-2xl p-[1px] shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_24px_70px_-28px_rgba(0,0,0,0.88)] [background:linear-gradient(135deg,rgba(165,243,252,0.35)_0%,rgba(129,140,248,0.22)_45%,rgba(168,85,247,0.28)_100%)]">
-            <div className="rounded-[0.96rem] border border-white/[0.07] bg-slate-950/55 px-7 pb-7 pt-8 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-2xl sm:px-8">
-              <div className="mb-7 text-center">
+          <div className="godam-login-card-shell mx-auto w-full max-w-[460px] rounded-[1.35rem] border border-slate-200/80 bg-white/82 p-7 shadow-[0_30px_100px_-55px_rgba(15,23,42,0.45)] backdrop-blur-xl sm:p-8">
+            <div className="mb-7 text-center">
                 <img
                   src="/LOGO.png"
                   alt="GoDam"
-                  className="mx-auto mb-4 h-[4.5rem] w-auto max-w-[180px] object-contain opacity-95 brightness-110 contrast-105 drop-shadow-[0_12px_40px_rgba(34,211,238,0.15)] sm:h-[5rem]"
+                  className="mx-auto mb-4 h-[4.25rem] w-auto max-w-[170px] object-contain drop-shadow-[0_18px_40px_rgba(37,99,235,0.14)] sm:h-[4.75rem]"
                 />
-                <h1 className="text-[1.65rem] font-bold tracking-tight text-white sm:text-3xl">GoDam</h1>
-                <p className="mt-2 text-[13px] font-medium text-slate-300 sm:text-sm">
-                  Warehouse Operations System
-                </p>
-                <p className="mt-1 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-500">
-                  Secure logistics control panel
-                </p>
-              </div>
+              <h1 className="text-[2rem] font-semibold tracking-tight text-slate-950 sm:text-[2.6rem]">GoDam</h1>
+              <p className="mt-2 text-[14px] font-medium text-slate-600 sm:text-[15px]">
+                Warehouse Operations System
+              </p>
+              <p className="mt-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-blue-600/80">
+                Secure logistics control panel
+              </p>
+            </div>
 
               <form className="space-y-4" onSubmit={submit} noValidate>
                 <div>
-                  <label htmlFor="login-user" className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">
+                  <label htmlFor="login-user" className="mb-1.5 block text-left text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">
                     Username
                   </label>
                   <input
@@ -298,7 +304,7 @@ export default function Login({ onLoggedIn }) {
                   />
                 </div>
                 <div>
-                  <label htmlFor="login-pass" className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">
+                  <label htmlFor="login-pass" className="mb-1.5 block text-left text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">
                     Password
                   </label>
                   <input
@@ -316,7 +322,7 @@ export default function Login({ onLoggedIn }) {
                 {error ? (
                   <div
                     role="alert"
-                    className="rounded-xl border border-red-500/35 bg-red-950/45 px-3 py-2.5 text-[13px] text-red-200 shadow-[0_0_24px_-10px_rgba(239,68,68,0.45)]"
+                    className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-left text-[13px] text-red-700 shadow-[0_18px_36px_-30px_rgba(239,68,68,0.55)]"
                   >
                     {error}
                   </div>
@@ -339,20 +345,23 @@ export default function Login({ onLoggedIn }) {
 
                 <p className="text-center text-[10px] leading-relaxed text-slate-500">
                   Default admin via backend env{' '}
-                  <span className="font-mono text-slate-400">ADMIN_USERNAME</span> /{' '}
-                  <span className="font-mono text-slate-400">ADMIN_PASSWORD</span>
+                  <span className="font-mono text-slate-600">ADMIN_USERNAME</span> /{' '}
+                  <span className="font-mono text-slate-600">ADMIN_PASSWORD</span>
                 </p>
               </form>
-            </div>
           </div>
-        </div>
 
-        <p className="relative z-[1] mt-8 max-w-md px-2 text-center text-[11px] text-slate-600">
-          Powered by GoDam Warehouse System
-        </p>
+          <div className="godam-login-status-row mx-auto mt-6 flex max-w-[620px] flex-wrap items-center justify-center gap-2 text-[11px] font-medium text-slate-500">
+            <span>Inventory intelligence</span>
+            <span aria-hidden>•</span>
+            <span>Fleet-ready operations</span>
+            <span aria-hidden>•</span>
+            <span>Secure warehouse data</span>
+          </div>
+        </section>
       </main>
 
-      <div className="fixed bottom-4 right-4 z-[2] opacity-90">
+      <div className="fixed bottom-4 right-4 z-[3] opacity-90">
         <ThemeSwitcher />
       </div>
     </div>

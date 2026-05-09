@@ -43,7 +43,8 @@ router.get('/summary', async (req, res) => {
     const notifications_unread = Number(notesRow?.c) || 0;
     const perm = req.user.permissions || {};
     let orders_unseen = 0;
-    if (perm.can_view_orders) {
+    // Pickers typically have can_pick_orders, not can_view_orders. Either should show the picking queue.
+    if (perm.can_view_orders || perm.can_pick_orders) {
       const oRow = await dbGet(
         `SELECT COUNT(1) AS c
          FROM outbound_orders o
@@ -289,7 +290,7 @@ async function bumpMainStock(part_number, sap_part_number, description, qtyIn) {
   });
 }
 
-router.get('/orders', requirePermission('can_view_orders'), async (req, res) => {
+router.get('/orders', requireAnyPermission(['can_view_orders', 'can_pick_orders']), async (req, res) => {
   try {
     const uid = Number(req.user.sub);
     const rows = await dbAll(
@@ -310,7 +311,7 @@ router.get('/orders', requirePermission('can_view_orders'), async (req, res) => 
   }
 });
 
-router.post('/orders/:id/seen', requirePermission('can_view_orders'), async (req, res) => {
+router.post('/orders/:id/seen', requireAnyPermission(['can_view_orders', 'can_pick_orders']), async (req, res) => {
   try {
     const orderId = Number(req.params.id);
     const uid = Number(req.user.sub);
@@ -345,7 +346,74 @@ router.post('/orders/:id/seen', requirePermission('can_view_orders'), async (req
   }
 });
 
-router.get('/orders/:id', requirePermission('can_view_orders'), async (req, res) => {
+/**
+ * Picked orders panel (read-only):
+ * - shows which orders are already picked
+ * - includes who picked (from picked_transactions) + who confirmed picked (picked_orders)
+ */
+router.get(
+  '/picked-orders',
+  requireAnyPermission(['can_pick_orders', 'can_confirm_picked', 'can_view_orders']),
+  async (_req, res) => {
+    try {
+      const limit = Math.min(300, Math.max(1, Number(_req.query.limit) || 120));
+      const rows = await dbAll(
+        `SELECT
+           po.outbound_order_id AS order_id,
+           po.delivery,
+           po.sales_doc,
+           po.customer_reference,
+           po.sold_to,
+           po.name_1,
+           po.confirmed_by_user_id,
+           po.confirmed_by_user_name,
+           po.confirmed_at,
+           o.status AS order_status,
+           o.updated_at AS order_updated_at,
+           (
+             SELECT GROUP_CONCAT(DISTINCT TRIM(COALESCE(pt.user_name, '')), ', ')
+             FROM picked_transactions pt
+             WHERE pt.outbound_order_id = po.outbound_order_id
+               AND TRIM(COALESCE(pt.user_name, '')) != ''
+           ) AS picked_by_names
+         FROM picked_orders po
+         LEFT JOIN outbound_orders o ON o.id = po.outbound_order_id
+         ORDER BY datetime(COALESCE(po.confirmed_at, o.updated_at, o.created_at)) DESC
+         LIMIT ?`,
+        [limit]
+      );
+      res.json(rows || []);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+router.get(
+  '/picked-orders/:id',
+  requireAnyPermission(['can_pick_orders', 'can_confirm_picked', 'can_view_orders']),
+  async (req, res) => {
+    try {
+      const orderId = Number(req.params.id);
+      if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+      const po = await dbGet(`SELECT * FROM picked_orders WHERE outbound_order_id = ?`, [orderId]);
+      if (!po) return res.status(404).json({ error: 'Picked order not found' });
+      const order = await dbGet(`SELECT * FROM outbound_orders WHERE id = ?`, [orderId]);
+      const tx = await dbAll(
+        `SELECT id, user_id, user_name, material, sap_part_number, description, rack_location, picked_qty, picked_at
+         FROM picked_transactions
+         WHERE outbound_order_id = ?
+         ORDER BY datetime(picked_at) ASC, id ASC`,
+        [orderId]
+      );
+      res.json({ picked_order: po, order, picked_transactions: tx || [] });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+router.get('/orders/:id', requireAnyPermission(['can_view_orders', 'can_pick_orders']), async (req, res) => {
   try {
     const orderId = Number(req.params.id);
     const order = await dbGet('SELECT * FROM outbound_orders WHERE id = ?', [orderId]);
@@ -378,7 +446,10 @@ router.get('/orders/:id', requirePermission('can_view_orders'), async (req, res)
 });
 
 /** Main stock + stock-by-rack rows per pick line (read-only reference for mobile). Optional rack_q filters rack_location. */
-router.get('/orders/:id/stock-overview', requirePermission('can_view_orders'), async (req, res) => {
+router.get(
+  '/orders/:id/stock-overview',
+  requireAnyPermission(['can_view_orders', 'can_pick_orders']),
+  async (req, res) => {
   try {
     const orderId = Number(req.params.id);
     const rackQ = String(req.query.rack_q || '').trim();
@@ -455,7 +526,8 @@ router.get('/orders/:id/stock-overview', requirePermission('can_view_orders'), a
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
+  }
+);
 
 router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async (req, res) => {
   const body = req.body || {};

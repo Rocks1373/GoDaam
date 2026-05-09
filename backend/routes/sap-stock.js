@@ -177,8 +177,34 @@ router.get('/', async (req, res) => {
     const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 2000));
     const offset = Math.max(0, Number(req.query.offset) || 0);
     const search = String(req.query.search || '').trim();
+    const storageLocationFilter = String(req.query.storage_location || '').trim();
+    const materialGroupFilter = String(req.query.material_group || '').trim();
+    const materialFilter = String(req.query.material || '').trim();
+
     const params = [batchId];
     let where = 'WHERE s.upload_batch_id = ?';
+
+    if (storageLocationFilter) {
+      const loc = normStorageLoc(storageLocationFilter) || storageLocationFilter.replace(/\s+/g, '');
+      const p = `%${loc}%`;
+      where += ` AND (
+        TRIM(COALESCE(s.storage_location,'')) LIKE ?
+        OR TRIM(COALESCE(s.storage_location_description,'')) LIKE ?
+      )`;
+      params.push(p, p);
+    }
+    if (materialGroupFilter) {
+      where += ` AND TRIM(COALESCE(s.material_group,'')) LIKE ?`;
+      params.push(`%${materialGroupFilter}%`);
+    }
+    if (materialFilter) {
+      where += ` AND (
+        TRIM(COALESCE(s.material,'')) LIKE ?
+        OR TRIM(COALESCE(s.sap_part_number,'')) LIKE ?
+      )`;
+      const p = `%${materialFilter}%`;
+      params.push(p, p);
+    }
     if (search) {
       where += ` AND (
         TRIM(s.material) LIKE ? OR TRIM(s.description) LIKE ? OR TRIM(s.vendor_number) LIKE ?

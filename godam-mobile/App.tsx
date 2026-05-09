@@ -10,6 +10,8 @@ import ApiConfigurationScreen from './src/screens/ApiConfigurationScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import OrdersScreen from './src/screens/OrdersScreen';
 import OrderDetailScreen from './src/screens/OrderDetailScreen';
+import PickedOrdersScreen from './src/screens/PickedOrdersScreen';
+import PickedOrderDetailScreen from './src/screens/PickedOrderDetailScreen';
 import StockPeekScreen from './src/screens/StockPeekScreen';
 import ScanRackScreen from './src/screens/ScanRackScreen';
 import ReceivingScreen from './src/screens/ReceivingScreen';
@@ -91,6 +93,8 @@ function AppNavigator() {
               <Stack.Screen name="Notifications" component={NotificationsScreen} options={{ title: 'Notifications' }} />
               <Stack.Screen name="Orders" component={OrdersScreen} />
               <Stack.Screen name="OrderDetail" component={OrderDetailScreen} options={{ title: 'Order' }} />
+              <Stack.Screen name="PickedOrders" component={PickedOrdersScreen} />
+              <Stack.Screen name="PickedOrderDetail" component={PickedOrderDetailScreen} />
               <Stack.Screen name="StockPeek" component={StockPeekScreen} options={{ title: 'Stock review (read-only)' }} />
               <Stack.Screen name="ScanRack" component={ScanRackScreen} />
               <Stack.Screen name="Receiving" component={ReceivingScreen} />

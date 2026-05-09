@@ -25,6 +25,7 @@ const PERMISSION_DEFS = [
   ['can_manage_users', 'Manage users'],
   ['can_view_picked_table', 'View picked table'],
   ['can_change_pick_location', 'Change pick location'],
+  ['can_use_ai', 'Use AI admin assistant'],
   ['can_access_web', 'Access web'],
   ['can_access_mobile', 'Access mobile'],
   ['can_view_transportation', 'View transportation details'],
@@ -518,6 +519,39 @@ async function migrateGodamSchema(db) {
   await ensureColumn(db, 'driver_delivery_tasks', 'longitude', 'REAL');
   await ensureColumn(db, 'driver_delivery_tasks', 'sequence_no', 'INTEGER');
 
+  // --- AI admin assistant: action audit log ---
+  await run(`
+    CREATE TABLE IF NOT EXISTS ai_action_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      username TEXT,
+      role TEXT,
+      command TEXT,
+      tool_name TEXT,
+      tool_args_json TEXT,
+      result_json TEXT,
+      status TEXT DEFAULT 'ok',
+      error_message TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_ai_action_logs_created ON ai_action_logs(created_at DESC)`);
+
+  // --- AI floating agent logs (web widget) ---
+  await run(`
+    CREATE TABLE IF NOT EXISTS ai_agent_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      username TEXT,
+      role TEXT,
+      message TEXT,
+      response_summary TEXT,
+      tools_used TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_ai_agent_logs_created ON ai_agent_logs(created_at DESC)`);
+
   // --- Driver route planner (manual order + auto-sort) ---
   await run(`
     CREATE TABLE IF NOT EXISTS driver_route_stops (
@@ -794,6 +828,7 @@ async function ensureTransportationPermissionRows(db) {
   const extra = [
     ['can_view_transportation', 'View transportation details'],
     ['can_manage_transportation', 'Manage transportation (carriers, drivers, attachments)'],
+    ['can_use_ai', 'Use AI admin assistant'],
   ];
   for (const role of ROLES_SEED) {
     for (const [key, label] of extra) {

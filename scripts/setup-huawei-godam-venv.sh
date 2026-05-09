@@ -3,13 +3,16 @@
 # Run from repo root: bash scripts/setup-huawei-godam-venv.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GODAM="$ROOT/plugins/GoDam-1.0"
-REQ="$GODAM/requirements.txt"
 
-if [[ ! -f "$REQ" ]]; then
-  echo "Missing $REQ — ensure GoDam-1.0 is at plugins/GoDam-1.0"
+if [[ -f "$ROOT/GoDam/GoDam-1.0/requirements.txt" ]]; then
+  GODAM="$ROOT/GoDam/GoDam-1.0"
+elif [[ -f "$ROOT/plugins/GoDam-1.0/requirements.txt" ]]; then
+  GODAM="$ROOT/plugins/GoDam-1.0"
+else
+  echo "Missing GoDam-1.0 requirements.txt — use GoDam/GoDam-1.0 or plugins/GoDam-1.0"
   exit 1
 fi
+REQ="$GODAM/requirements.txt"
 
 BOOT="${HUAWEI_GODAM_PYTHON_BOOTSTRAP:-}"
 if [[ -z "$BOOT" ]] && [[ -x /opt/homebrew/bin/python3 ]]; then

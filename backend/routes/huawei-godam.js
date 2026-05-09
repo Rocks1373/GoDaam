@@ -32,6 +32,27 @@ const MASTER_NAMES = {
 
 fs.mkdirSync(UPLOAD_ROOT, { recursive: true });
 
+function extractLastJsonObject(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (!l.startsWith('{') || !l.endsWith('}')) continue;
+    try {
+      return JSON.parse(l);
+    } catch {
+      // continue scanning upward
+    }
+  }
+  // fallback: attempt whole string parse
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function makeUpload(jobDir) {
   const inputDir = path.join(jobDir, 'input');
   const dnDir = path.join(inputDir, 'DSA');
@@ -197,26 +218,29 @@ router.post('/batches', (req, res) => {
         stdout = py.stdout || '';
       } catch (e) {
         const stderr = e.stderr?.toString() || '';
-        const out = e.stdout?.toString()?.trim() || '';
-        let parsed = null;
-        try {
-          parsed = JSON.parse(out || '{}');
-        } catch {
-          /* ignore */
-        }
+        const out = e.stdout?.toString() || '';
+        const parsed = extractLastJsonObject(out);
         const msg = parsed?.error || e.message || 'Matcher failed';
         await updateBatch(batchId, {
           status: 'failed',
           completed_at: new Date().toISOString(),
           error_message: `${msg}${stderr ? `\n${stderr.slice(0, 4000)}` : ''}`,
-          matcher_stdout: out.slice(0, 12000),
+          matcher_stdout: String(out).slice(0, 12000),
         });
-        throw new Error(msg);
+        const detail = [
+          msg,
+          stderr ? `\n--- stderr ---\n${stderr.slice(0, 8000)}` : '',
+          out ? `\n--- stdout ---\n${String(out).slice(0, 8000)}` : '',
+        ]
+          .filter(Boolean)
+          .join('');
+        throw new Error(detail);
       }
 
       let stats = {};
       try {
-        stats = JSON.parse(String(stdout).trim() || '{}');
+        const parsed = extractLastJsonObject(stdout);
+        stats = parsed || {};
       } catch {
         stats = {};
       }
@@ -313,6 +337,86 @@ router.get('/health', async (_req, res) => {
     python: PYTHON,
     pluginReady: pluginOk,
   });
+});
+
+// ============================================================
+// Customer Order List (new DB design) — PO -> DSA -> Items
+// Business rules:
+// - exclude POs starting with 5500 or 5100
+// - DSA dropdown shows only status='Received'
+// - Delivered DSAs/items are not returned for DN creation
+// ============================================================
+
+function isExcludedPo(po) {
+  const s = String(po || '').trim();
+  return s.startsWith('5500') || s.startsWith('5100');
+}
+
+router.get('/customer-orders/po-options', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const lim = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const rows = await dbAll(
+      `
+      SELECT DISTINCT TRIM(COALESCE(gapp_po_number,'')) AS po
+      FROM huawei_customer_order_header
+      WHERE TRIM(COALESCE(gapp_po_number,'')) != ''
+        AND (? = '' OR gapp_po_number LIKE ?)
+      ORDER BY po ASC
+      LIMIT ?
+      `,
+      [q, q ? `%${q}%` : '', lim]
+    );
+    const pos = (rows || []).map((r) => r.po).filter((po) => po && !isExcludedPo(po));
+    res.json({ pos, count: pos.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/customer-orders/:po/dsa', async (req, res) => {
+  try {
+    const po = String(req.params.po || '').trim();
+    if (!po) return res.status(400).json({ error: 'Invalid PO' });
+    if (isExcludedPo(po)) return res.json({ po, dsas: [], count: 0, excluded: true });
+    const rows = await dbAll(
+      `
+      SELECT id, dsa_number, bill_no_pl_no, status, received_date, delivered_date
+      FROM huawei_customer_order_header
+      WHERE TRIM(COALESCE(gapp_po_number,'')) = ?
+        AND lower(COALESCE(status,'')) = 'received'
+        AND TRIM(COALESCE(dsa_number,'')) != ''
+      ORDER BY dsa_number ASC, id ASC
+      `,
+      [po]
+    );
+    res.json({ po, dsas: rows || [], count: (rows || []).length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/customer-orders/:po/dsa/:dsa/items', async (req, res) => {
+  try {
+    const po = String(req.params.po || '').trim();
+    const dsa = String(req.params.dsa || '').trim();
+    if (!po || !dsa) return res.status(400).json({ error: 'Invalid PO/DSA' });
+    if (isExcludedPo(po)) return res.json({ po, dsa, items: [], count: 0, excluded: true });
+    const rows = await dbAll(
+      `
+      SELECT *
+      FROM huawei_delivery_item_details
+      WHERE TRIM(COALESCE(gapp_po_number,'')) = ?
+        AND TRIM(COALESCE(dsa_number,'')) = ?
+        AND lower(COALESCE(status,'')) = 'received'
+      ORDER BY id ASC
+      `,
+      [po, dsa]
+    );
+    res.json({ po, dsa, items: rows || [], count: (rows || []).length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = router;

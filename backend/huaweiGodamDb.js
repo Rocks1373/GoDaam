@@ -213,6 +213,75 @@ hgDb.serialize(() => {
     )
   `);
   hgDb.run(`CREATE INDEX IF NOT EXISTS idx_hg_art_batch ON hg_artifact(batch_id, kind)`);
+
+  // ============================================================
+  // Huawei module: customer order list (header) + DN item details
+  // These tables are used by the Delivery Note creation flow:
+  // PO -> DSA dropdown (Received only) -> load item lines -> generate DN.
+  // ============================================================
+
+  hgDb.run(`
+    CREATE TABLE IF NOT EXISTS huawei_customer_order_header (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      gapp_po_number TEXT,
+      customer_po_number TEXT,
+      partner_name TEXT,
+      end_user TEXT,
+      contract_no TEXT,
+      note TEXT,
+      no_of_box REAL,
+      bill_no_pl_no TEXT,
+      dsa_number TEXT,
+      location TEXT,
+      received_date TEXT,
+      batch_amount REAL,
+      gr_number TEXT,
+      inventory_age TEXT,
+      status TEXT,
+      delivered_date TEXT,
+      invoice_no TEXT,
+      invoice_amount REAL,
+      psi_status TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  hgDb.run(
+    `CREATE INDEX IF NOT EXISTS idx_huawei_coh_po_status ON huawei_customer_order_header(gapp_po_number, status)`
+  );
+  hgDb.run(`CREATE INDEX IF NOT EXISTS idx_huawei_coh_dsa ON huawei_customer_order_header(dsa_number)`);
+
+  hgDb.run(`
+    CREATE TABLE IF NOT EXISTS huawei_delivery_item_details (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      header_id INTEGER,
+      gapp_po_number TEXT,
+      customer_po_number TEXT,
+      dsa_number TEXT,
+      contract_no TEXT,
+      so_number TEXT,
+      partner_name TEXT,
+      end_user TEXT,
+      batch TEXT,
+      part_number TEXT,
+      description TEXT,
+      quantity REAL,
+      uom TEXT,
+      volume TEXT,
+      cbm TEXT,
+      status TEXT,
+      source_file TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (header_id) REFERENCES huawei_customer_order_header(id) ON DELETE SET NULL
+    )
+  `);
+  hgDb.run(
+    `CREATE INDEX IF NOT EXISTS idx_huawei_items_header ON huawei_delivery_item_details(header_id, status)`
+  );
+  hgDb.run(
+    `CREATE INDEX IF NOT EXISTS idx_huawei_items_po_dsa ON huawei_delivery_item_details(gapp_po_number, dsa_number, status)`
+  );
 });
 
 console.log(`📂 Huawei GoDam DB: ${path.resolve(DB_PATH)}`);

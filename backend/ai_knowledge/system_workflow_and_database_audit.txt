@@ -1,0 +1,1924 @@
+SYSTEM WORKFLOW AND DATABASE AUDIT
+GoDam Warehouse System
+
+Audit date: 2026-05-04
+Audit type: Read-only project audit
+Audited areas: Web Admin, Mobile App, Backend API, SQLite schema, stock workflow, delivery workflow, deployment files
+
+============================================================
+1. PROJECT OVERVIEW
+============================================================
+
+GoDam is a warehouse stock, picking, delivery, and reporting system.
+
+The system has five main parts:
+
+1. Web Admin
+   The web admin is a React/Vite application in frontend/.
+   It is used by admin, warehouse, and office users to upload stock sheets, manage vendors/customers/users, view stock, send outbound orders for picking, create delivery notes, manage transportation, confirm delivery, and view reports.
+
+2. Mobile App
+   The mobile app is an Expo React Native application in godam-mobile/.
+   It is used by pickers, receivers, and drivers.
+   Main mobile jobs are:
+   - View pick orders
+   - Scan/confirm rack picking
+   - Request pick changes
+   - View main stock / stock by rack
+   - Receive stock
+   - Put away inbound batch items
+   - Driver delivery workflow
+   - Upload POD
+   - View notifications
+
+3. Backend API
+   The backend is an Express.js API in backend/.
+   It handles authentication, permissions, Excel parsing, stock movement, FIFO generation, picking, delivery notes, notifications, reporting, and SQLite access.
+
+4. SQLite Database
+   The database file is warehouse.db by default (path configurable via env — keep on persistent disk on the server).
+   Tables are created in backend/db.js and expanded by backend/schema-migrate.js.
+
+5. VPS Deployment
+   Typical production setup without containers:
+   - Run the Node API (e.g. pm2/systemd) on an internal port (often 3001).
+   - Build the Vite frontend to static files and serve with nginx (or Caddy); proxy /api to Node.
+   - Store warehouse.db and backend/uploads on persistent disk with backups.
+   - Terminate HTTPS at the reverse proxy (Let's Encrypt) or use a tunnel (e.g. Cloudflare).
+
+High-level architecture:
+
+Web Browser / Mobile App
+        ↓
+Backend Express API
+        ↓
+SQLite warehouse.db
+        ↓
+Reports, stock tables, delivery tables, notification tables
+
+
+============================================================
+2. MAIN MODULES
+============================================================
+
+2.1 Admin / User / Roles
+
+Purpose:
+Manage login users, access levels, web/mobile access, and permissions.
+
+Main tables:
+- users
+- role_permissions
+
+Main behavior:
+- Login creates JWT token.
+- Users have role, active/inactive status, token expiry days, web access flag, and mobile access flag.
+- Role permissions define actions such as can_pick_orders, can_receive_stock, can_upload_outbound, can_manage_users, can_view_transportation, and can_manage_transportation.
+- Backend middleware checks authentication and some permissions.
+
+2.2 Vendor Master
+
+Purpose:
+Maintain vendor master records.
+
+Main tables:
+- vendors
+- vendor_items
+- main_stock
+
+Main behavior:
+- Admin creates vendors manually, bulk paste, or Excel upload.
+- Main stock upload can auto-create missing vendor records.
+- Vendor number is a natural business key used in main_stock.
+
+2.3 Vendor Items
+
+Purpose:
+Maintain item master per vendor.
+
+Main tables:
+- vendor_items
+- vendors
+- main_stock
+
+Main behavior:
+- Admin creates vendor item records.
+- Main stock upload can create/update vendor_items automatically.
+- Unique index protects duplicate vendor + part number combinations.
+
+2.4 Main Stock
+
+Purpose:
+Main stock is the overall stock balance by part number.
+
+Main table:
+- main_stock
+
+Important rule:
+Main Stock is not the rack-level picking stock.
+It is the overall warehouse stock used for availability checks and final delivery deduction.
+
+Formula used:
+available_qty = received_qty - sold_out_qty - pending_delivery_qty
+
+Main behavior:
+- Main stock upload updates received_qty, sold_out_qty, pending_delivery_qty, available_qty, vendor fields, SAP fields, and item description.
+- Inbound upload increases received_qty and available_qty.
+- Manual stock in increases received_qty and available_qty.
+- Final delivered status increases sold_out_qty / issued_qty and reduces available_qty.
+
+2.5 Inbound / Receiving
+
+Purpose:
+Record incoming stock from vendors or manual receiving.
+
+Main tables:
+- inbound_receiving
+- inbound_batches
+- inbound_items
+- main_stock
+
+Main behavior:
+- Web inbound upload creates inbound batch and inbound items.
+- It also inserts inbound_receiving audit rows.
+- It increases main_stock using incrementReceivedOnDb.
+- Mobile receiving can directly receive to rack and bump main_stock.
+- Inbound batches are shown to mobile for putaway.
+
+2.6 Stock By Rack
+
+Purpose:
+Rack-level stock used for FIFO and picking.
+
+Main tables:
+- stock_by_rack
+- stock_in
+- stock_out
+- stock_by_rack_legacy
+
+Important rule:
+Stock By Rack is used for FIFO only.
+It does not need to strictly match Main Stock at the current stage.
+The comparison report is used to show mismatches.
+
+Main behavior:
+- stock_by_rack keeps one summary row per part_number + rack_location.
+- stock_in records rack increases.
+- stock_out records rack deductions.
+- FIFO reads stock_by_rack where available_qty > 0.
+
+2.7 Putaway
+
+Purpose:
+Move received inbound items into rack stock.
+
+Main tables:
+- inbound_batches
+- inbound_items
+- inbound_putaway_lines
+- stock_in
+- stock_by_rack
+
+Main behavior:
+- Mobile user opens an inbound batch.
+- User selects item, scans/enters rack, and enters putaway quantity.
+- System creates inbound_putaway_lines with applied_to_rack = 0.
+- Inbound item status becomes Partial or Completed.
+- Web inbound report shows putaway lines.
+- Admin applies selected putaway lines to rack.
+- applyStockIn creates stock_in and increases stock_by_rack.
+
+2.8 Outbound Upload
+
+Purpose:
+Upload sales/delivery outbound requirements.
+
+Main tables:
+- outbound_orders
+- outbound_items
+- fifo_suggestions
+- main_stock
+- stock_by_rack
+
+Main behavior:
+- Web upload reads Excel.
+- Rows are grouped by Delivery.
+- Repeated part numbers in the same delivery are summed.
+- Order header goes to outbound_orders.
+- Lines go to outbound_items.
+- main_stock is checked for availability.
+- fifo_suggestions are generated from stock_by_rack.
+
+2.9 FIFO Suggestion
+
+Purpose:
+Suggest which rack stock should be picked first.
+
+Main table:
+- fifo_suggestions
+
+FIFO rule found:
+FIFO reads stock_by_rack only:
+- match part_number or sap_part_number
+- available_qty > 0
+- order by first_entry_date ASC, then id ASC
+
+Data flow:
+outbound_items → stock_by_rack → fifo_suggestions
+
+2.10 Picking
+
+Purpose:
+Picker confirms suggested rack quantities on mobile.
+
+Main tables:
+- fifo_suggestions
+- picked_transactions
+- outbound_items
+- outbound_orders
+- picked_orders
+- stock_by_rack
+- stock_out
+
+Main behavior:
+- Admin sends order for pick.
+- Mobile picker receives/view order.
+- Picker scans the suggested rack.
+- Backend validates correct rack and exact suggested quantity.
+- picked_transactions is inserted.
+- stock_by_rack available_qty deducts.
+- stock_out row is inserted.
+- outbound_items.picked_qty updates.
+- When all lines are picked, picker confirms order.
+- picked_orders row is inserted and outbound order status becomes Picked.
+
+2.11 Manual Pick
+
+Purpose:
+Allow admin to pick without mobile picker flow.
+
+Main behavior:
+- Admin-only endpoint.
+- Generates FIFO if needed.
+- Follows fifo_suggestions.
+- Deducts stock_by_rack.
+- Inserts stock_out.
+- Inserts picked_transactions with picked_method = Manual Admin.
+- Sets is_manual_pick = 1.
+- Updates outbound_items and picked_orders.
+
+2.12 Picked Orders
+
+Purpose:
+Admin view of orders confirmed as picked.
+
+Main table:
+- picked_orders
+
+Main behavior:
+- Mobile confirm order or manual pick creates picked_orders.
+- Admin can view picked order details.
+- Delivery note can be created from picked outbound data.
+
+2.13 Customer Address Book
+
+Purpose:
+Maintain customer delivery information.
+
+Main tables:
+- customers
+- customer_locations
+
+Main behavior:
+- customers can have multiple rows for same customer_number with different city/address.
+- Delivery To mapping uses outbound sold_to/customer number.
+- If found, address/city/contact information can be selected.
+- If not found, user can enter temporary or permanent address information.
+
+2.14 Delivery Note
+
+Purpose:
+Create delivery document after picking.
+
+Main tables:
+- delivery_notes
+- delivery_note_items
+- customers
+- outbound_orders
+- outbound_items
+
+Main behavior:
+- Delivery note is created from outbound order.
+- Header fields include DN number/date, outbound number, customer, address, package, transport, carrier, driver, and status.
+- Items are copied to delivery_note_items.
+- Delivery To information is mapped from customers or entered manually.
+- Package information and transportation information must be completed before final delivery.
+
+2.15 Transportation Details
+
+Purpose:
+Manage carriers, drivers, documents, and delivery transport method.
+
+Main tables:
+- transportation_carriers
+- transportation_drivers
+- transportation_driver_attachments
+- delivery_notes
+
+Transport types:
+- GAPP
+- Rental
+- Courier
+- Self Collection
+
+Rules found:
+- GAPP requires driver name, driver phone, and vehicle.
+- Rental requires carrier, truck type, and truck quantity.
+- Courier requires courier company and waybill number.
+- Self Collection uses collector name/mobile.
+
+2.16 Driver Delivery
+
+Purpose:
+Mobile driver workflow for GAPP deliveries.
+
+Main tables:
+- delivery_notes
+- driver_delivery_tasks
+- notification_log
+- push_devices
+
+Main behavior:
+- Web confirms a GAPP delivery note.
+- Backend creates driver_delivery_tasks.
+- Driver receives notification.
+- Driver opens task.
+- Driver confirms pickup.
+- Driver uploads POD.
+- Driver closes task.
+- Web receives notifications at each important step.
+
+2.17 Reports
+
+Purpose:
+Show inbound, outbound, delivery, stock by rack, main stock, SAP stock, and stock comparison views.
+
+Main APIs:
+- /api/reports/inbound
+- /api/reports/outbound
+- /api/reports/delivery
+- /api/reports/stock-by-rack
+- /api/reports/main-stock
+- /api/reports/sap-stock
+- /api/stock-comparison-report
+
+2.18 Chat
+
+No dedicated chat module, chat table, or chat API was found in the audited files.
+The closest communication feature is notifications:
+- notification_log
+- push_devices
+- web notification badge/dropdown
+- mobile notification screen
+- Expo push messages
+
+Recommendation:
+If chat is required, add a separate messages/conversations design instead of mixing chat with notification_log.
+
+2.19 Notifications
+
+Purpose:
+Notify web users, pickers, checkers, and drivers.
+
+Main tables:
+- push_devices
+- notification_log
+
+Main behavior:
+- Mobile registers Expo push token.
+- Backend sends notification log rows.
+- Web polls unread count.
+- Mobile can view and mark notifications read.
+
+
+============================================================
+3. DATABASE TABLE LIST
+============================================================
+
+Tables found in backend/db.js and backend/schema-migrate.js:
+
+1. main_stock
+Purpose: Overall stock balance per part number.
+Primary key: id
+Important columns: product, vendor_id, vendor_number, vendor_name, sap_part_number, sap_qty, part_number, description, received_qty, issued_qty, sold_out_qty, pending_delivery_qty, available_qty, uom, remarks, last_updated, created_at, updated_at
+References: vendor_id is logical reference to vendors.id; vendor_number is logical reference to vendors.vendor_number. No explicit FK was found on main_stock.vendor_id.
+Connected tables: vendors, vendor_items, inbound_receiving, outbound_items, sold_out, stock_by_rack by part_number.
+
+2. stock_by_rack_legacy
+Purpose: Legacy FIFO entry-level rack rows kept for older data compatibility.
+Primary key: entry_id
+Important columns: part_number, sap_part_number, description, rack_location, entry_date, qty_received, qty_issued, available_qty, source_type
+References: No explicit FK.
+Connected tables: older FIFO/picking data if present.
+
+3. stock_by_rack
+Purpose: Current rack summary table for FIFO and picking.
+Primary key: id
+Important columns: part_number, sap_part_number, description, rack_location, total_in_qty, total_out_qty, available_qty, first_entry_date, last_updated
+References: No explicit FK to main_stock, but part_number/sap_part_number logically connect to main_stock and outbound_items.
+Connected tables: stock_in, stock_out, fifo_suggestions, picked_transactions, main_stock.
+
+4. stock_in
+Purpose: Movement log for rack stock increases.
+Primary key: id
+Important columns: transaction_date, part_number, sap_part_number, description, rack_location, qty_in, source_type, reference_no, remarks, created_at
+References: No explicit FK.
+Connected tables: stock_by_rack by part_number + rack_location; inbound_putaway_lines by reference_no convention.
+
+5. stock_out
+Purpose: Movement log for rack stock deductions.
+Primary key: id
+Important columns: transaction_date, part_number, sap_part_number, description, rack_location, qty_out, outbound_number, reference_no, remarks, created_at
+References: No explicit FK.
+Connected tables: stock_by_rack by part_number + rack_location; picked_transactions by reference_no/outbound_number convention.
+
+6. outbound_orders
+Purpose: Outbound delivery/order header.
+Primary key: id
+Important columns: outbound_number, delivery, sales_doc, gapp_po, customer_reference, sold_to, name_1, sales_order_number, customer_po_number, customer_name, vendor_name, status, dn_date, invoice_number, delivery_address, contact_person, dn_status, uploaded_by_user_id, created_at, updated_at
+References: uploaded_by_user_id logically references users.id; no explicit FK found for this added column.
+Connected tables: outbound_items, fifo_suggestions, picked_transactions, picked_orders, pick_change_requests, outbound_order_seen, delivered_outbounds, delivery_notes, sold_out.
+
+7. outbound_items
+Purpose: Outbound order item lines.
+Primary key: id
+Important columns: outbound_id, part_number, sap_part_number, material, description, required_qty, picked_qty, available_qty_main_stock, fifo_status, shortage_qty, status, uom, serial_no, condition
+Foreign key: outbound_id → outbound_orders.id
+Connected tables: outbound_orders, fifo_suggestions, picked_transactions, pick_change_requests, main_stock, stock_by_rack.
+
+8. pick_suggestions
+Purpose: Older pick suggestion table.
+Primary key: id
+Important columns: outbound_id, part_number, rack_location, entry_id, suggested_qty, fifo_sequence, status, created_at
+Foreign key: outbound_id → outbound_orders.id
+Connected tables: outbound_orders and legacy pick flow.
+
+9. delivered_outbounds
+Purpose: Guard table to prevent double delivered deduction for outbound orders.
+Primary key: id
+Important columns: outbound_id, delivered_at
+Foreign key: outbound_id → outbound_orders.id
+Connected tables: outbound_orders, sold_out, main_stock.
+
+10. sold_out
+Purpose: Sold/delivered item log and final outbound movement history.
+Primary key: id
+Important columns: date, po, gapp_po, customer_po, invoice_number, invoice, customer_name, delivery_address, gps, part_number, sap_part_number, description, sold_qty, outbound_qty, delivery, sales_doc, status, source_dn_id, dedupe_key, created_at
+References: source_dn_id is used for delivered/order source but is not explicitly constrained.
+Connected tables: main_stock, delivered_outbounds, outbound_orders, delivery_notes.
+
+11. users
+Purpose: Authentication users and access flags.
+Primary key: id
+Important columns: username, password_hash, role, full_name, mobile_number, email, is_active, token_expiry_days, can_access_web, can_access_mobile, created_at, updated_at
+References: No FK.
+Connected tables: role_permissions, picked_transactions, picked_orders, push_devices, notification_log, inbound_batches, inbound_receiving, outbound_order_seen, driver_delivery_tasks by driver user id.
+
+12. role_permissions
+Purpose: Permission matrix by role.
+Primary key: id
+Important columns: role, permission_key, permission_label, is_enabled, created_at, updated_at
+References: role is logical reference to users.role.
+Connected tables: users and backend permission middleware.
+
+13. fifo_suggestions
+Purpose: Current FIFO suggestions generated from stock_by_rack.
+Primary key: id
+Important columns: outbound_order_id, outbound_item_id, material, sap_part_number, description, rack_location, stock_by_rack_id, entry_date, available_qty, suggested_qty, fifo_sequence, is_admin_changed, changed_by_admin_id, created_at
+Foreign keys: outbound_order_id → outbound_orders.id; outbound_item_id → outbound_items.id; stock_by_rack_id → stock_by_rack.id
+Connected tables: outbound_orders, outbound_items, stock_by_rack, picked_transactions.
+
+14. picked_transactions
+Purpose: Picking history, mobile and manual admin.
+Primary key: id
+Important columns: outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name, material, sap_part_number, description, rack_location, picked_qty, picked_at, device_id, picked_method, is_manual_pick, manual_pick_reason, picked_by_role
+Foreign keys: outbound_order_id → outbound_orders.id; outbound_item_id → outbound_items.id; user_id → users.id
+Connected tables: outbound_orders, outbound_items, fifo_suggestions, users, stock_out, picked_orders.
+
+15. picked_orders
+Purpose: Order-level confirmation that all picking is done.
+Primary key: id
+Important columns: outbound_order_id, delivery, sales_doc, customer_reference, sold_to, name_1, confirmed_by_user_id, confirmed_by_user_name, confirmed_at, status, created_at
+Foreign key: outbound_order_id → outbound_orders.id
+Connected tables: outbound_orders, delivery_notes.
+
+16. pick_change_requests
+Purpose: Picker request to change rack/qty for a pick line.
+Primary key: id
+Important columns: outbound_order_id, outbound_item_id, fifo_suggestion_id, requested_rack_location, requested_qty, reason, status, requested_by_user_id, requested_by_user_name, created_at, resolved_at, resolved_by_user_id, resolution_note
+Foreign keys: outbound_order_id → outbound_orders.id; outbound_item_id → outbound_items.id; requested_by_user_id → users.id
+Connected tables: outbound_orders, outbound_items, fifo_suggestions, users, notification_log.
+
+17. push_devices
+Purpose: Mobile push device registry.
+Primary key: id
+Important columns: user_id, expo_push_token, device_id, platform, created_at, updated_at
+Foreign key: user_id → users.id
+Connected tables: users, notification_log.
+
+18. notification_log
+Purpose: Notification inbox for web/mobile users.
+Primary key: id
+Important columns: user_id, title, body, data_json, created_at, read_at
+Foreign key: user_id → users.id
+Connected tables: users, push_devices, mobile/web notifications.
+
+19. customers
+Purpose: Customer address book. Multiple rows can exist for same customer_number with different city/address.
+Primary key: id
+Important columns: customer_number, company_name, city_name, address, gps, contact_person, contact_person_number, contact_person_number_1, email_1, second_name, second_number, second_email, remarks, address_type, created_at, updated_at
+References: No explicit FK.
+Connected tables: customer_locations, delivery_notes by customer_number/customer_id, outbound_orders sold_to.
+
+20. inbound_receiving
+Purpose: Audit log for inbound receiving rows and manual stock-in.
+Primary key: id
+Important columns: transaction_date, batch_vendor_name, vendor_id, vendor_number, vendor_name, invoice_no, po_number, part_number, sap_part_number, description, inbound_qty, received_date, reference_no, remarks, uploaded_by, created_at
+Foreign key: uploaded_by → users.id
+Connected tables: main_stock by part_number; vendors by vendor_id/vendor_number; inbound_batches by batch naming.
+
+21. carriers
+Purpose: Legacy transportation carrier table.
+Primary key: id
+Important columns: carrier_name, carrier_type, is_active, created_at, updated_at
+References: No explicit FK.
+Connected tables: carrier_drivers. Data may be migrated into transportation_carriers.
+
+22. carrier_drivers
+Purpose: Legacy carrier driver table.
+Primary key: id
+Important columns: carrier_id, driver_name, phone_number, vehicle, is_active, created_at, updated_at
+Foreign key: carrier_id → carriers.id
+Connected tables: carriers. Data may be migrated into transportation_drivers.
+
+23. delivery_notes
+Purpose: Delivery note header and delivery workflow state.
+Primary key: id
+Important columns: dn_number, dn_date, sales_order_number, gapp_po, customer_po, outbound_number, invoice_number, customer_id, customer_number, customer_name, delivery_address, gps, city_name, contact_person, contact_number, package_type, pallet_qty, box_qty, gross_weight_kg, volume_cbm, transportation_type, carrier_id, carrier_name, driver_id, driver_name, driver_mobile, vehicle, truck_type, truck_qty, waybill_number, collector_name, collector_mobile, status, delivery_status, confirmed_at, driver_task_id, pod_file_path, closed_at, closed_by, is_closed, delivered_at
+References: customer_id, carrier_id, driver_id, confirmed_by, closed_by, and driver_task_id are logical references; explicit FKs were not found.
+Connected tables: delivery_note_items, delivered, driver_delivery_tasks, customers, transportation_carriers, transportation_drivers, outbound_orders.
+
+24. delivery_note_items
+Purpose: Delivery note item rows.
+Primary key: id
+Important columns: dn_id, item_no, part_number, sap_part_number, description, qty, uom, serial_no, condition_text, created_at
+Foreign key: dn_id → delivery_notes.id
+Connected tables: delivery_notes, outbound_items, delivered.
+
+25. delivered
+Purpose: Final delivered snapshot table. Stores delivery header and item detail after DN mark-delivered.
+Primary key: id
+Important columns: dn_id, dn_number, delivered_date, sales_order_number, gapp_po, customer_po, outbound_number, invoice_number, customer_number, customer_name, delivery_address, gps, transportation_type, carrier_name, driver_name, driver_mobile, package_type, part_number, sap_part_number, description, delivered_qty, uom, created_at
+References: dn_id logically references delivery_notes.id but no explicit FK was found in table definition.
+Connected tables: delivery_notes, delivery_note_items, sold_out, main_stock.
+
+26. vendors
+Purpose: Vendor master.
+Primary key: id
+Important columns: vendor_number, vendor_name, contact_person, phone_number, email, remarks, is_active, created_at, updated_at
+References: No FK.
+Connected tables: vendor_items, main_stock, inbound_receiving.
+
+27. vendor_items
+Purpose: Vendor item master.
+Primary key: id
+Important columns: vendor_id, vendor_number, vendor_name, sap_part_number, part_number, description, uom, remarks, is_active, created_at, updated_at
+Foreign key: vendor_id → vendors.id
+Connected tables: vendors, main_stock.
+
+28. customer_locations
+Purpose: Extra customer delivery locations.
+Primary key: id
+Important columns: customer_id, label, address, gps, contact_person, contact_number, contact_person_2, contact_number_2, is_active, created_at, updated_at
+Foreign key: customer_id → customers.id
+Connected tables: customers, delivery_notes delivery-to selection.
+
+29. inbound_batches
+Purpose: Inbound upload batch header.
+Primary key: id
+Important columns: batch_name, vendor_name, upload_date, status, created_by, created_at
+Foreign key: created_by → users.id
+Connected tables: inbound_items, inbound_putaway_lines, users.
+
+30. inbound_items
+Purpose: Inbound batch item line and putaway progress.
+Primary key: id
+Important columns: inbound_batch_id, part_number, sap_part_number, description, total_qty, putaway_qty, remaining_qty, status, created_at, updated_at
+Foreign key: inbound_batch_id → inbound_batches.id
+Connected tables: inbound_batches, inbound_putaway_lines, stock_in, stock_by_rack.
+
+31. inbound_putaway_lines
+Purpose: Mobile putaway submissions waiting for web/admin rack application.
+Primary key: id
+Important columns: inbound_item_id, inbound_batch_id, part_number, rack_location, qty, transaction_date, user_name, remarks, applied_to_rack, created_at
+Foreign keys: inbound_item_id → inbound_items.id; inbound_batch_id → inbound_batches.id
+Connected tables: inbound_items, inbound_batches, stock_in, stock_by_rack.
+
+32. outbound_order_seen
+Purpose: Tracks which mobile user has seen which outbound pick order.
+Primary key: composite user_id + outbound_order_id
+Important columns: user_id, outbound_order_id, seen_at
+Foreign keys: user_id → users.id; outbound_order_id → outbound_orders.id
+Connected tables: users, outbound_orders.
+
+33. driver_delivery_tasks
+Purpose: Mobile driver task for GAPP delivery.
+Primary key: id
+Important columns: dn_id, outbound_number, invoice_number, customer_name, delivery_address, city_name, gps_link, contact_person, contact_number, driver_user_id, driver_name, driver_mobile, status, confirmed_at, opened_at, pickup_confirmed_at, out_for_delivery_at, pod_uploaded_at, pod_file_path, closed_at, created_at, updated_at
+Foreign key: dn_id → delivery_notes.id
+Connected tables: delivery_notes, users by driver_user_id, notification_log.
+
+34. transportation_carriers
+Purpose: Current transportation carrier master.
+Primary key: id
+Important columns: carrier_type, carrier_name, contact_person, phone_number, email, remarks, status, created_at, updated_at
+References: No FK.
+Connected tables: transportation_drivers, delivery_notes.
+
+35. transportation_drivers
+Purpose: Current transportation driver master and vehicle/document fields.
+Primary key: id
+Important columns: carrier_id, carrier_type, carrier_name, driver_name, driver_phone, iqama_number, iqama_expiry, license_number, license_expiry, national_id, vehicle_number, vehicle_type, insurance_number, insurance_expiry, fahas_number, fahas_expiry, remarks, status, auto_warning, created_at, updated_at
+Foreign key: carrier_id → transportation_carriers.id
+Connected tables: transportation_carriers, transportation_driver_attachments, delivery_notes.
+
+36. transportation_driver_attachments
+Purpose: Driver document/file attachments.
+Primary key: id
+Important columns: driver_id, attachment_type, file_name, file_path, file_mime_type, uploaded_at, uploaded_by
+Foreign keys: driver_id → transportation_drivers.id; uploaded_by → users.id
+Connected tables: transportation_drivers, users.
+
+
+============================================================
+4. DATABASE RELATIONSHIP MAP
+============================================================
+
+Master data:
+
+vendors.id → vendor_items.vendor_id
+vendors.vendor_number → vendor_items.vendor_number
+vendors.vendor_number → main_stock.vendor_number
+vendors.id → main_stock.vendor_id (logical; not explicit FK)
+vendor_items.part_number → main_stock.part_number
+customers.id → customer_locations.customer_id
+customers.customer_number → delivery_notes.customer_number
+outbound_orders.sold_to → customers.customer_number
+
+Inbound:
+
+users.id → inbound_batches.created_by
+users.id → inbound_receiving.uploaded_by
+inbound_batches.id → inbound_items.inbound_batch_id
+inbound_batches.id → inbound_putaway_lines.inbound_batch_id
+inbound_items.id → inbound_putaway_lines.inbound_item_id
+inbound_items.part_number → main_stock.part_number
+inbound_putaway_lines.part_number → stock_in.part_number
+inbound_putaway_lines.rack_location → stock_in.rack_location
+stock_in.part_number + stock_in.rack_location → stock_by_rack.part_number + stock_by_rack.rack_location
+
+Rack stock and FIFO:
+
+main_stock.part_number → stock_by_rack.part_number
+main_stock.sap_part_number → stock_by_rack.sap_part_number
+stock_by_rack.id → fifo_suggestions.stock_by_rack_id
+stock_by_rack.part_number → fifo_suggestions.material / outbound_items.part_number
+stock_by_rack.sap_part_number → fifo_suggestions.sap_part_number / outbound_items.sap_part_number
+
+Outbound:
+
+outbound_orders.id → outbound_items.outbound_id
+outbound_orders.id → fifo_suggestions.outbound_order_id
+outbound_items.id → fifo_suggestions.outbound_item_id
+outbound_orders.id → picked_transactions.outbound_order_id
+outbound_items.id → picked_transactions.outbound_item_id
+fifo_suggestions.id → picked_transactions.fifo_suggestion_id (logical; no explicit FK found)
+users.id → picked_transactions.user_id
+outbound_orders.id → picked_orders.outbound_order_id
+outbound_orders.id → pick_change_requests.outbound_order_id
+outbound_items.id → pick_change_requests.outbound_item_id
+users.id → pick_change_requests.requested_by_user_id
+users.id + outbound_orders.id → outbound_order_seen.user_id + outbound_order_seen.outbound_order_id
+outbound_orders.id → delivered_outbounds.outbound_id
+outbound_orders.id → sold_out.source_dn_id (logical in markOutboundDelivered when source is outbound order)
+
+Delivery:
+
+outbound_orders.outbound_number → delivery_notes.outbound_number
+outbound_orders.delivery → delivery_notes.outbound_number
+delivery_notes.id → delivery_note_items.dn_id
+delivery_notes.id → driver_delivery_tasks.dn_id
+delivery_notes.id → delivered.dn_id (logical; table has dn_id but no explicit FK found)
+delivery_note_items.id → delivered item rows by copied item values
+delivery_notes.customer_number → customers.customer_number
+delivery_notes.customer_id → customers.id (logical; no explicit FK found)
+transportation_carriers.id → transportation_drivers.carrier_id
+transportation_carriers.id → delivery_notes.carrier_id (logical)
+transportation_drivers.id → delivery_notes.driver_id (logical)
+transportation_drivers.id → transportation_driver_attachments.driver_id
+users.id → transportation_driver_attachments.uploaded_by
+users.id → driver_delivery_tasks.driver_user_id (logical)
+
+Notifications:
+
+users.id → push_devices.user_id
+users.id → notification_log.user_id
+
+
+============================================================
+5. FULL WORKFLOW
+============================================================
+
+A. Vendor + Item Setup
+
+Vendor created → Vendor items created → Main stock upload links vendor.
+
+Detailed flow:
+1. Admin creates vendor in Vendor Master.
+2. Admin creates vendor items in Vendor Items.
+3. Each vendor item stores vendor_id, vendor_number, vendor_name, part_number, SAP part, description, and UOM.
+4. Main Stock upload uses vendor number/name and part number.
+5. If vendor or vendor item is missing, main stock upload can create it automatically.
+
+B. Main Stock Upload
+
+Upload sheet → detect vendor → create vendor if missing → create vendor item if missing → update main_stock.
+
+Detailed flow:
+1. Web Admin uploads Excel or bulk pastes data.
+2. Backend normalizes row headers and values.
+3. Backend resolves vendor:
+   - If vendor_number exists, find vendor by vendor_number.
+   - If not found, create vendor.
+   - If vendor_number is blank but vendor_name exists, match by vendor_name or create vendor with NULL number.
+4. Backend upserts vendor_items for vendor + part number.
+5. Backend upserts main_stock by unique part_number.
+6. available_qty is calculated as:
+   received_qty - sold_out_qty - pending_delivery_qty.
+
+C. Inbound / Receiving
+
+Inbound upload → main_stock increases → inbound batch created → mobile receiving shows batch/vendor → putaway process starts.
+
+Detailed flow:
+1. Web Admin uploads inbound Excel or bulk pastes inbound rows.
+2. Backend groups rows by Batch/Vendor Name.
+3. Backend creates inbound_batches.
+4. Backend creates inbound_items with total_qty, putaway_qty = 0, remaining_qty = total_qty.
+5. Backend inserts inbound_receiving rows.
+6. Backend increases main_stock received_qty and available_qty.
+7. Mobile app lists pending inbound batches.
+8. Receiver starts putaway from the mobile Receiving screen.
+
+Note:
+Mobile also has a direct receiving endpoint that can increase stock_by_rack and main_stock in one step.
+
+D. Putaway
+
+Mobile user selects inbound batch → selects part number → enters rack + qty → partial/complete putaway → web inbound report → admin confirms update to stock_by_rack.
+
+Detailed flow:
+1. Mobile user opens Receiving.
+2. User selects inbound batch.
+3. User selects inbound item.
+4. User scans/enters rack location.
+5. User enters quantity.
+6. Backend inserts inbound_putaway_lines with applied_to_rack = 0.
+7. Backend updates inbound_items:
+   - putaway_qty increases
+   - remaining_qty decreases
+   - status becomes Pending, Partial, or Completed
+8. Backend updates inbound_batches status:
+   - Pending
+   - In Progress
+   - Completed
+9. Web inbound putaway report shows pending putaway lines.
+10. Admin applies putaway to rack.
+11. Backend calls applyStockIn:
+   - inserts stock_in
+   - increases stock_by_rack total_in_qty
+   - increases stock_by_rack available_qty
+   - marks inbound_putaway_lines.applied_to_rack = 1
+
+E. Stock By Rack
+
+Stock By Rack is used for FIFO only.
+It does not need to strictly match Main Stock now.
+Comparison report shows mismatch.
+
+Detailed behavior:
+1. stock_by_rack is rack summary by part_number + rack_location.
+2. FIFO uses stock_by_rack available_qty.
+3. Picking deducts stock_by_rack.
+4. Delivered does not deduct stock_by_rack again.
+5. stock_by_rack can mismatch main_stock if:
+   - inbound is uploaded but putaway not applied
+   - manual main stock upload changes totals
+   - rack stock is adjusted separately
+   - older legacy rows exist
+
+F. Outbound Upload
+
+Upload outbound sheet → group by Delivery → sum repeated part numbers → check main_stock availability → generate FIFO from stock_by_rack.
+
+Detailed flow:
+1. Web Admin uploads outbound Excel.
+2. Backend reads first sheet.
+3. Backend groups rows by Delivery.
+4. Backend creates or updates outbound_orders.
+5. Backend deletes old items/FIFO for re-upload if order is not already Picked or Delivered.
+6. Backend merges repeated part numbers inside the delivery.
+7. Backend inserts outbound_items.
+8. Backend checks main_stock availability.
+9. Backend updates outbound_items:
+   - available_qty_main_stock
+   - fifo_status = Available or Shortage
+   - shortage_qty
+10. Backend generates FIFO suggestions from stock_by_rack.
+
+G. FIFO
+
+FIFO uses stock_by_rack only:
+part_number/sap_part_number + available_qty > 0
+order by first_entry_date ASC, id ASC
+
+Detailed flow:
+1. Backend loads outbound_items.
+2. For each outbound item, backend searches stock_by_rack using item material/part_number and sap_part_number.
+3. Only rows with available_qty > 0 are used.
+4. Rows are sorted oldest first:
+   date(COALESCE(first_entry_date, '1970-01-01')) ASC, id ASC
+5. Backend allocates suggested_qty until required_qty is covered or rack stock is exhausted.
+6. Backend inserts fifo_suggestions.
+
+H. Picking
+
+Admin sends for pick → mobile notification → picker scans rack → confirms picked qty → stock_by_rack deducts → picked_transactions saved.
+
+Detailed flow:
+1. Admin sends outbound order for pick.
+2. outbound_orders.status becomes Sent For Pick.
+3. Backend sends notification to picking users.
+4. Mobile picker opens Orders.
+5. Picker opens order detail.
+6. Mobile shows FIFO suggested racks and quantities.
+7. Picker scans rack.
+8. Backend verifies scanned rack equals suggested rack.
+9. Backend verifies picked quantity equals required FIFO quantity for that rack.
+10. Backend inserts picked_transactions.
+11. Backend deducts stock_by_rack:
+    available_qty decreases
+    total_out_qty increases
+12. Backend inserts stock_out.
+13. Backend updates outbound_items.picked_qty.
+14. Order status becomes Picking.
+15. When all items are picked, picker confirms order.
+16. Backend inserts picked_orders and sets outbound_orders.status = Picked.
+
+I. Manual Pick
+
+Admin-only manual pick → follows FIFO → deducts stock_by_rack → logs picked_method = Manual Admin.
+
+Detailed flow:
+1. Admin starts manual pick.
+2. Backend blocks if order is Picked, Delivered, or Cancelled.
+3. Backend generates FIFO when needed.
+4. Backend loops through outbound items and FIFO rows.
+5. Backend verifies rack availability.
+6. Backend inserts picked_transactions:
+   picked_method = Manual Admin
+   is_manual_pick = 1
+   manual_pick_reason = override reason if used
+7. Backend deducts stock_by_rack.
+8. Backend inserts stock_out.
+9. Backend updates outbound_items.picked_qty.
+10. If fully picked, backend inserts picked_orders and sets outbound order status to Picked.
+
+J. Delivery Note
+
+Picked order → Delivery Note → Delivery To mapping from customer table → transportation method → package info.
+
+Detailed flow:
+1. Admin opens Delivery Note page.
+2. Admin creates DN from picked outbound order.
+3. Backend creates delivery_notes header.
+4. Backend creates delivery_note_items.
+5. Admin selects or enters Delivery To information.
+6. Admin saves package information.
+7. Admin saves transportation method.
+8. If GAPP delivery, Admin confirms for driver delivery.
+9. If non-GAPP delivery, Admin can mark delivered after required transportation/package data is complete.
+
+K. Delivery To Mapping
+
+outbound sold_to = customers.customer_number.
+If found → select city/address.
+If not found → temporary/permanent address option.
+
+Detailed flow:
+1. outbound_orders.sold_to contains customer number from upload.
+2. Delivery To lookup uses customer_number.
+3. If matching customers rows exist, user can select city/address.
+4. Selected address fills delivery_notes:
+   customer_number, customer_name, city_name, delivery_address, gps, contact names/numbers, emails, address_type.
+5. If no customer is found, user can enter temporary or permanent address.
+6. Permanent option can be saved into customer address book.
+
+L. Transportation Details
+
+Carrier type → carrier → driver.
+GAPP driver required.
+Rental truck type/qty.
+Courier waybill.
+Self collection.
+
+Detailed flow:
+1. Admin manages transportation_carriers.
+2. Admin manages transportation_drivers under carriers.
+3. Admin uploads driver attachments when needed.
+4. Delivery note stores selected transportation fields.
+5. Required fields depend on transport type:
+   - GAPP: driver, phone, vehicle
+   - Rental: carrier, truck type, truck quantity
+   - Courier: courier company, waybill
+   - Self Collection: collector details
+
+M. Driver Delivery
+
+If delivery type = GAPP:
+Web confirms delivery → mobile driver notification → driver opens order → confirms pickup → uploads POD → closes order → web notification.
+
+Detailed flow:
+1. Admin confirms GAPP delivery note.
+2. Backend creates driver_delivery_tasks.
+3. Backend links delivery_notes.driver_task_id.
+4. Backend sends mobile push to driver if driver user can be found by phone.
+5. Driver opens mobile Delivery list.
+6. Driver opens task.
+7. Backend sets task and delivery note status to Opened.
+8. Driver confirms pickup.
+9. Backend sets status to Out For Delivery.
+10. Driver uploads POD.
+11. Backend stores POD file under backend/uploads/pod and updates pod_file_path.
+12. Driver closes task.
+13. Backend sets delivery note is_closed = 1 and closed_at.
+14. Web staff receive notifications.
+
+N. Delivered / Final Close
+
+Final delivered status → main_stock deducts → sold_out saved → delivered table saved → closed order locked.
+
+Detailed flow:
+1. Admin marks Delivery Note as delivered.
+2. For GAPP delivery:
+   - DN must be confirmed.
+   - Driver must close the task with POD, or admin must close with override.
+3. Backend validates transportation requirements.
+4. Backend validates invoice number and package information.
+5. Backend finds outbound order by outbound_number or delivery.
+6. Backend calls markOutboundDelivered.
+7. markOutboundDelivered checks delivered_outbounds to prevent double deduction.
+8. markOutboundDelivered verifies main_stock availability.
+9. markOutboundDelivered deducts main_stock by increasing sold_out_qty and issued_qty.
+10. markOutboundDelivered recalculates available_qty.
+11. markOutboundDelivered inserts sold_out rows.
+12. markOutboundDelivered inserts delivered_outbounds guard row.
+13. Backend inserts delivered snapshot rows from delivery_note_items.
+14. Backend updates delivery_notes status/delivery_status as Delivered and locks closed state.
+
+O. Reports
+
+Main reports:
+1. Inbound report:
+   inbound_receiving, inbound_batches, inbound_items, inbound_putaway_lines
+2. Outbound report:
+   outbound_orders, outbound_items, fifo_suggestions, picked_transactions
+3. Delivery report:
+   delivery_notes, delivery_note_items, delivered, driver_delivery_tasks
+4. Stock by rack report:
+   stock_by_rack, stock_in, stock_out
+5. Main stock report:
+   main_stock
+6. SAP stock report:
+   SAP part / SAP qty fields from main_stock
+7. Stock comparison:
+   compares main_stock against stock_by_rack summary
+
+
+============================================================
+6. STOCK MOVEMENT RULES
+============================================================
+
+Main Stock:
+
+- Main Stock increases from inbound / receiving.
+- Main Stock also increases from manual stock-in.
+- Main Stock deducts only when order/DN is Delivered.
+- Main Stock deduction happens through markOutboundDelivered.
+- Main Stock is not deducted during picking.
+
+Stock By Rack:
+
+- Stock By Rack increases only after putaway confirm/apply or stock-in rack process.
+- Stock By Rack deducts during picking.
+- Mobile picking deducts stock_by_rack.
+- Manual admin pick deducts stock_by_rack.
+- Stock-out rack process also deducts stock_by_rack.
+- Delivered does not deduct stock_by_rack again.
+
+Picking:
+
+- Picking does NOT deduct main_stock.
+- Picking inserts picked_transactions.
+- Picking inserts stock_out.
+- Picking deducts stock_by_rack only.
+
+Delivered:
+
+- Delivered deducts main_stock only.
+- Delivered inserts sold_out.
+- Delivered inserts delivered/delivered_outbounds.
+- Delivered does NOT deduct stock_by_rack again.
+
+Double deduction control:
+
+- delivered_outbounds prevents duplicate main_stock deduction for the same outbound order.
+- sold_out.dedupe_key has a unique index for rows created by final delivery.
+- The system should still keep all stock movement functions inside transactions to avoid partial updates.
+
+Correct stock principle:
+
+Inbound upload:
+Excel → main_stock increase
+
+Putaway apply:
+inbound_putaway_lines → stock_in → stock_by_rack increase
+
+Picking:
+fifo_suggestions → picked_transactions + stock_out → stock_by_rack decrease
+
+Delivered:
+delivery_notes/outbound_orders → sold_out + delivered → main_stock decrease
+
+
+============================================================
+7. DATA FLOW DIAGRAM IN TEXT
+============================================================
+
+Inbound:
+
+Excel Upload
+  → Backend Parser
+  → inbound_batches
+  → inbound_items
+  → inbound_receiving
+  → main_stock increase
+  → Mobile Receiving / Putaway
+  → inbound_putaway_lines
+  → Web Admin apply putaway
+  → stock_in
+  → stock_by_rack increase
+
+Mobile direct receiving:
+
+Mobile Receiving
+  → /api/mobile/receiving
+  → stock_in
+  → stock_by_rack increase
+  → main_stock increase
+  → notification to web/checker
+
+Outbound:
+
+Excel Upload
+  → Backend Parser
+  → group by Delivery
+  → outbound_orders
+  → outbound_items
+  → main_stock availability check
+  → fifo_suggestions from stock_by_rack
+  → Admin send for pick
+  → Mobile Picking
+  → picked_transactions
+  → stock_out
+  → stock_by_rack decrease
+  → picked_orders
+  → delivery_notes
+  → delivery_note_items
+  → driver_delivery_tasks
+  → POD / close
+  → mark delivered
+  → main_stock decrease
+  → sold_out
+  → delivered
+  → delivered_outbounds guard
+
+Notifications:
+
+Backend event
+  → notification_log
+  → push_devices / Expo push
+  → Web notification badge
+  → Mobile notification screen
+
+
+============================================================
+8. API MAP
+============================================================
+
+Base health:
+- GET /api/health
+
+Auth:
+- POST /api/auth/login
+- POST /api/auth/logout
+- GET /api/auth/me
+- POST /api/auth/refresh
+
+Users:
+- GET /api/users
+- POST /api/users
+- PUT /api/users/:id
+- DELETE /api/users/:id
+- POST /api/users/:id/disable
+- POST /api/users/:id/reset-password
+
+Roles:
+- GET /api/roles/:role/permissions
+- PUT /api/roles/:role/permissions
+
+Vendors:
+- GET /api/vendors
+- GET /api/vendors/template
+- GET /api/vendors/:id
+- POST /api/vendors
+- PUT /api/vendors/:id
+- DELETE /api/vendors/:id
+- POST /api/vendors/bulk-paste
+- POST /api/vendors/upload
+
+Vendor Items:
+- GET /api/vendor-items
+- GET /api/vendor-items/search
+- GET /api/vendor-items/template
+- POST /api/vendor-items
+- PUT /api/vendor-items/:id
+- DELETE /api/vendor-items/:id
+- POST /api/vendor-items/bulk-paste
+- POST /api/vendor-items/upload
+
+Main Stock:
+- GET /api/main-stock
+- GET /api/main-stock/search
+- GET /api/main-stock/template
+- GET /api/main-stock/:partNumber
+- POST /api/main-stock
+- POST /api/main-stock/add-new-part
+- POST /api/main-stock/manual-stock-in
+- POST /api/main-stock/upload
+- POST /api/main-stock/bulk-paste
+- POST /api/main-stock/update-existing
+- PUT /api/main-stock/:id
+- DELETE /api/main-stock/:id
+
+Inbound:
+- GET /api/inbound/template
+- GET /api/inbound
+- POST /api/inbound/upload
+- POST /api/inbound/bulk-paste
+- GET /api/inbound/putaway-report
+- POST /api/inbound/apply-putaway-to-rack
+
+Stock By Rack:
+- GET /api/stock-by-rack
+- GET /api/stock-by-rack/search
+
+Stock In:
+- GET /api/stock-in
+- POST /api/stock-in
+- PUT /api/stock-in/:id
+- DELETE /api/stock-in/:id
+- POST /api/stock-in/bulk-paste
+- POST /api/stock-in/upload
+
+Stock Out:
+- GET /api/stock-out
+- POST /api/stock-out
+- PUT /api/stock-out/:id
+- DELETE /api/stock-out/:id
+- POST /api/stock-out/bulk-paste
+- POST /api/stock-out/upload
+
+Outbound:
+- POST /api/outbound/upload
+- POST /api/outbound/:id/check-stock
+- POST /api/outbound/:id/generate-fifo
+- POST /api/outbound/:id/send-for-pick
+- POST /api/outbound/:id/manual-pick
+- POST /api/outbound/:id/mark-delivered
+- POST /api/outbound/:id/reverse-delivery
+- POST /api/outbound/:id/change-pick-location
+- PUT /api/outbound/:id/fifo/:fifoId
+- DELETE /api/outbound/:id/fifo/:fifoId
+- PUT /api/outbound/:id/items/:itemId
+- GET /api/outbound
+- POST /api/outbound
+- GET /api/outbound/:id
+- PUT /api/outbound/:id/status
+- DELETE /api/outbound/:id
+
+Picking / Pick Suggestions:
+- POST /api/pick-suggestion/generate
+- GET /api/pick-suggestion/:outbound_id
+- PUT /api/pick-suggestion/:id/confirm
+- GET /api/admin/picked-orders
+- GET /api/admin/picked-orders/:id
+- GET /api/pick-change-requests
+- POST /api/pick-change-requests/:id/resolve
+
+Mobile Picking / Mobile Warehouse:
+- GET /api/mobile/summary
+- GET /api/mobile/orders
+- POST /api/mobile/orders/:id/seen
+- GET /api/mobile/orders/:id
+- GET /api/mobile/orders/:id/stock-overview
+- POST /api/mobile/picking/confirm-item
+- POST /api/mobile/picking/confirm-order
+- POST /api/mobile/picking/change-request
+- GET /api/mobile/upcoming
+- GET /api/mobile/rack/:rack_location
+- POST /api/mobile/rack-scan/import
+- GET /api/mobile/inbound-batches
+- GET /api/mobile/inbound-batches/:id
+- POST /api/mobile/putaway/upload
+- POST /api/mobile/receiving
+- GET /api/mobile/stock/main
+- GET /api/mobile/stock/main/suggest
+- GET /api/mobile/stock/by-rack
+- GET /api/mobile/stock/by-rack/suggest
+
+Delivery Note:
+- GET /api/delivery-note/:outbound_number
+- PATCH /api/delivery-note/:outbound_number/invoice
+- POST /api/delivery-note/:outbound_number/deliver
+- GET /api/delivery-notes
+- GET /api/delivery-notes/outbound-options
+- POST /api/delivery-notes
+- GET /api/delivery-notes/:id
+- GET /api/delivery-notes/:id/delivery-to
+- POST /api/delivery-notes/:id/delivery-to
+- POST /api/delivery-notes/:id/deliver-to
+- GET /api/delivery-notes/:id/timeline
+- POST /api/delivery-notes/:id/confirm
+- POST /api/delivery-notes/:id/close-admin
+- GET /api/delivery-notes/recent-pods
+- POST /api/delivery-notes/:id/hold
+- POST /api/delivery-notes/:id/transportation
+- POST /api/delivery-notes/:id/package-info
+- POST /api/delivery-notes/:id/mark-delivered
+- GET /api/delivery-notes/:id/print
+
+Transportation:
+- GET /api/transportation/carriers
+- POST /api/transportation/carriers
+- PUT /api/transportation/carriers/:id
+- DELETE /api/transportation/carriers/:id
+- GET /api/transportation/carriers/:carrier_id/drivers
+- GET /api/transportation/drivers
+- GET /api/transportation/drivers/:id
+- GET /api/transportation/drivers/export/excel
+- POST /api/transportation/drivers
+- PUT /api/transportation/drivers/:id
+- DELETE /api/transportation/drivers/:id
+- POST /api/transportation/drivers/:driver_id/attachments
+- GET /api/transportation/drivers/:driver_id/attachments
+- GET /api/transportation/attachments/:id/download
+- DELETE /api/transportation/attachments/:id
+- GET /api/transportation/drivers/:driver_id/export/pdf
+
+Legacy Carriers / Drivers:
+- GET /api/carriers
+- POST /api/carriers
+- PUT /api/carriers/:id
+- DELETE /api/carriers/:id
+- GET /api/carriers/:carrier_id/drivers
+- POST /api/carriers/:carrier_id/drivers
+- PUT /api/drivers/:id
+- DELETE /api/drivers/:id
+
+Driver Delivery:
+- GET /api/mobile/deliveries
+- GET /api/mobile/deliveries/:id
+- POST /api/mobile/deliveries/:id/open
+- POST /api/mobile/deliveries/:id/confirm-pickup
+- POST /api/mobile/deliveries/:id/upload-pod
+- POST /api/mobile/deliveries/:id/close
+
+Reports:
+- GET /api/reports/outbound-picks
+- GET /api/reports/outbound
+- GET /api/reports/inbound
+- GET /api/reports/delivery
+- GET /api/reports/stock-by-rack
+- GET /api/reports/main-stock
+- GET /api/reports/sap-stock
+- GET /api/stock-comparison-report
+
+Customers:
+- GET /api/customers
+- GET /api/customers/by-number/:customer_number
+- GET /api/customers/by-number/:customer_number/cities
+- GET /api/customers/by-number/:customer_number/addresses
+- POST /api/customers
+- PUT /api/customers/:id
+- DELETE /api/customers/:id
+- POST /api/customers/bulk-paste
+- POST /api/customers/upload
+- GET /api/customers/:customer_number/locations
+- POST /api/customers/:customer_number/locations
+
+Notifications:
+- POST /api/notifications/register-device
+- POST /api/notifications/send
+- GET /api/notifications/unread-count
+- GET /api/notifications
+- POST /api/notifications/mark-all-read
+- POST /api/notifications/:id/read
+
+OCR:
+- POST /api/mobile/ocr/image
+
+Chat:
+- No dedicated chat API group found.
+
+Admin Maintenance:
+- GET /api/admin/maintenance/outbound-stats
+- GET /api/admin/maintenance/browse/:table
+- POST /api/admin/maintenance/clear-outbound-domain
+
+Final outbound delivery compatibility endpoints:
+- POST /api/orders/:id/mark-delivered
+- POST /api/orders/:id/reverse-delivery
+
+
+============================================================
+9. WEB PAGES MAP
+============================================================
+
+Web app routes found in frontend/src/App.jsx:
+
+/login
+Purpose: Login page.
+
+/dashboard
+Purpose: Main dashboard summary, recent activity, and notifications.
+
+/main-stock
+Purpose: Main stock list, upload, bulk paste, add new part, manual stock-in, and edit/delete stock rows.
+
+/stock-by-rack/*
+Purpose: Stock by rack module. Includes summary, stock-in, stock-out, and rack stock views.
+
+/stock-by-rack/summary
+Purpose: Rack-level stock summary for FIFO source stock.
+
+/outbound-upload
+Purpose: Upload outbound Excel, check stock, generate FIFO, send for pick, manual pick, edit FIFO/items, and mark/reverse delivered.
+
+/picked-orders
+Purpose: Admin picked orders view after mobile or manual pick confirmation.
+
+/customers
+Purpose: Customer address book management.
+
+/delivery-note
+Purpose: Create/manage delivery notes, delivery-to mapping, package details, transportation details, confirm driver delivery, mark delivered, print.
+
+/pod-inbox
+Purpose: View recent POD uploads and delivery POD notifications.
+
+/reports/inbound
+Purpose: Inbound report.
+
+/reports/outbound
+Purpose: Outbound/picking report.
+
+/reports/delivery
+Purpose: Delivery report.
+
+/reports/stock-by-rack-report
+Purpose: Exportable stock-by-rack report.
+
+/reports/main-stock-report
+Purpose: Exportable main-stock report.
+
+/reports/sap-stock
+Purpose: Exportable SAP stock report from main_stock SAP fields.
+
+/transportation-details
+Purpose: Transportation carriers, drivers, driver documents, exports, and permissions.
+
+/vendor-master
+Purpose: Vendor master management.
+
+/vendor-items
+Purpose: Vendor item master management.
+
+/users
+Purpose: User admin, reset password, disable/delete users.
+
+/role-permissions
+Purpose: Role permission management.
+
+/pick-change-requests
+Purpose: Admin resolution screen for mobile pick change requests.
+
+/admin-maintenance
+Purpose: Outbound database maintenance and table browse tools.
+
+/notifications
+Purpose: Notification inbox and read/unread handling.
+
+/carrier-master
+Purpose: Redirects to /transportation-details.
+
+/pick-suggestion
+Purpose: Redirects to dashboard.
+
+/
+Purpose: Redirects to dashboard.
+
+
+============================================================
+10. MOBILE SCREENS MAP
+============================================================
+
+Mobile app screens found in godam-mobile/App.tsx and godam-mobile/src/screens:
+
+ApiConfiguration
+Purpose: First-run API URL configuration. Stores backend URL ending with /api.
+
+Login
+Purpose: Mobile login using /auth/login.
+
+Home
+Purpose: Mobile dashboard / menu. Shows summary badges for notifications, unseen orders, and inbound putaway.
+
+Notifications
+Purpose: Mobile notification inbox. Can mark notifications read.
+
+Orders
+Purpose: List outbound orders available for picking.
+
+OrderDetail
+Purpose: Pick order detail. Shows FIFO lines, rack suggestions, required quantity, picked quantity, and confirmation actions.
+
+StockPeek
+Purpose: Read-only stock review during picking.
+
+ScanRack
+Purpose: Rack scan / rack stock lookup.
+
+Receiving
+Purpose: Receiving and inbound putaway. Lets users receive stock or upload putaway lines against inbound batches.
+
+MainStockCheck
+Purpose: Read-only main stock lookup.
+
+StockByRackCheck
+Purpose: Read-only rack stock lookup.
+
+Upcoming
+Purpose: Upcoming orders view.
+
+DeliveryList
+Purpose: Driver delivery task list for GAPP deliveries.
+
+DeliveryDetail
+Purpose: Driver delivery detail. Open task, confirm pickup, upload POD, close task.
+
+Profile
+Purpose: Profile and API configuration/account support.
+
+
+============================================================
+11. CURRENT WEAK POINTS / RISKS
+============================================================
+
+1. Duplicate stock deduction risk
+
+Positive control exists:
+- delivered_outbounds prevents marking same outbound delivered twice.
+- sold_out.dedupe_key has a unique index.
+
+Remaining risk:
+- There are multiple delivery-related endpoints:
+  /api/outbound/:id/mark-delivered
+  /api/orders/:id/mark-delivered
+  /api/delivery-note/:outbound_number/deliver
+  /api/delivery-notes/:id/mark-delivered
+  If all routes do not share the same guard and status rules, future edits can create double deduction risk.
+
+2. main_stock and stock_by_rack mismatch
+
+This is expected in the current design, but risky operationally.
+Reasons:
+- Main stock increases during inbound upload.
+- Rack stock increases later when putaway is applied.
+- Picking deducts rack stock.
+- Delivered deducts main stock.
+- Manual uploads can change main stock independently.
+
+Risk:
+Users may think both tables should always match. The comparison report must be clearly explained and monitored.
+
+3. Missing foreign keys
+
+Some key relationships are logical but not enforced:
+- main_stock.vendor_id → vendors.id
+- delivery_notes.customer_id → customers.id
+- delivery_notes.carrier_id → transportation_carriers.id
+- delivery_notes.driver_id → transportation_drivers.id
+- delivered.dn_id → delivery_notes.id
+- picked_transactions.fifo_suggestion_id → fifo_suggestions.id
+- driver_delivery_tasks.driver_user_id → users.id
+
+Risk:
+Data can become orphaned after deletes or manual maintenance.
+
+4. Weak status control
+
+Status values are text fields across many tables:
+- outbound_orders.status
+- delivery_notes.status
+- delivery_notes.delivery_status
+- driver_delivery_tasks.status
+- inbound_batches.status
+- inbound_items.status
+
+Risk:
+Different routes may use different capitalization or allowed transitions.
+Example: Delivered vs delivered.
+
+5. HTTP/HTTPS API issue
+
+Mobile client includes a warning that many mobile networks block non-standard ports and recommends HTTPS on port 443.
+
+Risk:
+Mobile app may work on Wi-Fi but fail on cellular if API is exposed on HTTP or non-standard ports.
+
+6. Token expiry handling
+
+Web removes token on 401.
+Mobile clears auth during boot if token is expired.
+
+Risk:
+Long-running mobile sessions may need stronger refresh handling, clearer expired-session user messages, and a consistent refresh-token strategy.
+
+7. Mobile offline sync risk
+
+Mobile has local storage helpers for scans/putaway, but no full server-confirmed sync queue was found.
+
+Risk:
+If network drops during picking, putaway, or POD upload, users may think work is saved when backend did not receive it.
+
+8. File upload storage risk
+
+Uploads and POD files are stored under backend/uploads (persistent path on the server).
+
+Risk:
+Without cleanup, size limits, virus scanning, retention policy, and backup policy, storage can grow or contain unsafe files.
+
+9. SQLite scalability
+
+SQLite is simple and good for initial deployment, but warehouse workflows have concurrent writes:
+- inbound upload
+- putaway apply
+- picking
+- delivery close
+- notifications
+
+Risk:
+SQLite write locking can become a bottleneck when many users pick/receive at the same time.
+
+10. Permission bypass risk
+
+Many routes use requireAuth and some use requirePermission/requireAdmin.
+Some route groups are protected at group level, but individual write operations are not always permission-specific.
+
+Risk:
+A logged-in web user with broad web access may reach endpoints that should be role-restricted unless every route is guarded consistently.
+
+11. Legacy and current table overlap
+
+Legacy tables exist:
+- stock_by_rack_legacy
+- pick_suggestions
+- carriers
+- carrier_drivers
+
+Risk:
+Developers may accidentally use old tables or confuse legacy and current workflows.
+
+12. Destructive maintenance risk
+
+Admin maintenance routes can browse and clear outbound-domain data.
+
+Risk:
+Useful for support, but dangerous without audit logs, backups, and strong admin-only enforcement.
+
+
+============================================================
+12. SUGGESTIONS FOR IMPROVEMENT
+============================================================
+
+1. Enforce transaction for stock movements
+
+Every stock movement should be one database transaction:
+- insert movement row
+- update balance table
+- update status
+- insert audit record
+
+Priority stock transactions:
+- inbound upload
+- putaway apply
+- mobile receiving
+- mobile picking
+- manual pick
+- mark delivered
+- reverse delivered
+
+2. Add audit_log table
+
+Suggested table:
+audit_log(
+  id,
+  user_id,
+  user_name,
+  action,
+  entity_type,
+  entity_id,
+  before_json,
+  after_json,
+  ip_address,
+  device_id,
+  created_at
+)
+
+Use it for:
+- stock edits
+- uploads
+- manual picks
+- delivery close
+- admin maintenance
+- permission changes
+
+3. Add stock_movement_ledger table
+
+Suggested table:
+stock_movement_ledger(
+  id,
+  movement_date,
+  stock_scope,
+  part_number,
+  sap_part_number,
+  rack_location,
+  qty_in,
+  qty_out,
+  balance_after,
+  source_type,
+  source_table,
+  source_id,
+  user_id,
+  created_at
+)
+
+Purpose:
+Provide one complete source of truth for stock movements.
+
+4. Add status transition table
+
+Suggested table:
+status_transitions(
+  id,
+  entity_type,
+  entity_id,
+  from_status,
+  to_status,
+  changed_by,
+  reason,
+  created_at
+)
+
+Also create backend status transition helpers so statuses cannot jump incorrectly.
+
+5. Add backup job
+
+For SQLite:
+- schedule database backup daily
+- backup uploads/POD folder
+- keep 7 daily, 4 weekly, 12 monthly backups
+- test restore process
+
+6. Move SQLite to PostgreSQL later
+
+PostgreSQL will improve:
+- concurrent writes
+- row locks
+- foreign keys
+- reporting
+- backups
+- scalability
+- migration safety
+
+7. Add API health page
+
+Current /api/health exists.
+Improve it with:
+- database reachable
+- database write disabled/read-only check if needed
+- disk space
+- upload directory writable
+- app version
+- migration version
+
+8. Add mobile sync queue
+
+Mobile should queue critical actions:
+- pick confirm
+- putaway upload
+- receiving
+- POD upload
+
+Queue fields:
+- local_id
+- action_type
+- payload
+- file_uri
+- retry_count
+- status
+- server_response
+- created_at
+- synced_at
+
+9. Add role permission guard middleware consistently
+
+Make every write endpoint require a specific permission.
+Examples:
+- can_upload_outbound for outbound upload/mark delivered
+- can_pick_orders for picking
+- can_receive_stock for receiving/putaway
+- can_manage_transportation for carrier/driver changes
+- can_manage_users for user changes
+- can_confirm_picked for delivery staff actions
+
+10. Add report export queue
+
+Large exports should run in background:
+- create export_jobs
+- process job
+- store file
+- notify user when ready
+
+11. Add file cleanup/storage policy
+
+Policy should define:
+- max file size
+- allowed file types
+- POD retention period
+- temp upload cleanup
+- backup inclusion
+- private vs public access
+- signed download URLs if moved to cloud storage
+
+12. Add database constraints gradually
+
+Add explicit FKs where safe:
+- delivery_note_items.dn_id
+- driver_delivery_tasks.dn_id
+- vendor_items.vendor_id
+- transportation_drivers.carrier_id
+- transportation_driver_attachments.driver_id
+
+For logical weak areas, add validation first before FK:
+- main_stock.vendor_id
+- delivery_notes.customer_id
+- delivery_notes.driver_id
+
+13. Rename or retire legacy tables
+
+Keep legacy tables documented.
+Add comments or migration notes:
+- stock_by_rack_legacy is not current FIFO source
+- pick_suggestions is old; fifo_suggestions is current
+- carriers/carrier_drivers are legacy; transportation_* is current
+
+
+============================================================
+13. RECOMMENDED EASY UPGRADE PATH
+============================================================
+
+Stage 1: Stabilize database + API
+
+Goal:
+Make current system safer without changing workflow.
+
+Actions:
+- Document official stock rules in code comments and admin manual.
+- Standardize statuses and capitalization.
+- Add status helper functions.
+- Ensure all stock movement routes use BEGIN IMMEDIATE transactions.
+- Add missing permission guards to write endpoints.
+- Improve /api/health with database and disk checks.
+- Add daily SQLite and upload backup.
+
+Stage 2: Add audit logs
+
+Goal:
+Make every critical action traceable.
+
+Actions:
+- Add audit_log table.
+- Log uploads, stock edits, picks, manual picks, delivery close, reverse delivery, user changes, role changes, and maintenance actions.
+- Add admin audit report page.
+- Add before_json and after_json for important changes.
+
+Stage 3: Improve mobile sync
+
+Goal:
+Protect warehouse operations from network problems.
+
+Actions:
+- Add mobile local sync queue.
+- Add retry and clear synced tasks only after backend confirms.
+- Add visible sync status on mobile.
+- Add idempotency keys for mobile pick/putaway/POD actions.
+- Improve token refresh and expired-session messages.
+
+Stage 4: Add PostgreSQL
+
+Goal:
+Prepare for larger warehouse load and stronger data integrity.
+
+Actions:
+- Create PostgreSQL schema with proper FKs.
+- Create migration script from SQLite to PostgreSQL.
+- Move stock movement writes to row-locking transactions.
+- Add database migration versioning.
+- Keep SQLite backup until PostgreSQL is verified.
+
+Stage 5: Add barcode/OCR improvements
+
+Goal:
+Improve speed and reduce manual entry.
+
+Actions:
+- Standardize barcode format for rack, part number, delivery, and DN.
+- Add barcode validation rules.
+- Improve OCR confidence handling.
+- Store scan images only when needed.
+- Add scan audit and error correction workflow.
+
+
+============================================================
+FINAL SUMMARY
+============================================================
+
+GoDam currently has a clear warehouse flow:
+
+Vendor/item setup
+  → main stock setup
+  → inbound receiving
+  → putaway to rack
+  → outbound upload
+  → FIFO suggestion
+  → mobile picking
+  → delivery note
+  → driver delivery/POD
+  → delivered close
+  → reports
+
+Most important stock rules:
+
+1. Main Stock increases during inbound/receiving.
+2. Main Stock deducts only at Delivered.
+3. Stock By Rack increases during putaway apply or rack stock-in.
+4. Stock By Rack deducts during picking.
+5. Picking does not deduct Main Stock.
+6. Delivered does not deduct Stock By Rack again.
+7. Avoid double deduction by keeping delivered_outbounds and dedupe keys.
+
+Most important improvement:
+
+Add a formal stock_movement_ledger and audit_log, then gradually enforce stronger status transitions and database relationships.

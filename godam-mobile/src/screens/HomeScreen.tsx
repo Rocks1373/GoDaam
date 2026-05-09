@@ -24,6 +24,7 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
 type QuickActionRoute =
   | 'Orders'
+  | 'PickedOrders'
   | 'ScanRack'
   | 'Receiving'
   | 'Upcoming'
@@ -46,6 +47,13 @@ const ACTIONS: ActionItem[] = [
     subtitle: 'Assigned & pick lists',
     icon: 'clipboard-outline',
     route: 'Orders',
+  },
+  {
+    key: 'pickedOrders',
+    title: 'Picked orders',
+    subtitle: 'Who picked what',
+    icon: 'checkmark-done-outline',
+    route: 'PickedOrders',
   },
   {
     key: 'delivery',
@@ -192,6 +200,11 @@ export default function HomeScreen({ navigation }: Props) {
         if (!permissionsLoaded) return false;
         const r = String(roleLabel || '').toLowerCase();
         return r === 'driver' || r === 'admin' || !!perms.can_confirm_picked;
+      }
+      if (item.key === 'pickedOrders') {
+        if (!permissionsLoaded) return false;
+        const r = String(roleLabel || '').toLowerCase();
+        return r === 'admin' || !!perms.can_confirm_picked || !!perms.can_pick_orders;
       }
       if (item.key === 'mainStock') {
         if (!permissionsLoaded) return true;

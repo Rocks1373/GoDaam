@@ -1,0 +1,26 @@
+# Copy to /etc/systemd/system/godaam-backend.service (adjust paths and user).
+#   sudo cp deploy/systemd/godaam-backend.service.example /etc/systemd/system/godaam-backend.service
+# Create /etc/godaam/backend.env (see comments in nginx example).
+#   sudo systemctl daemon-reload && sudo systemctl enable --now godaam-backend
+
+[Unit]
+Description=GoDaam warehouse API (Node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/godaam/backend
+Environment=NODE_ENV=production
+EnvironmentFile=-/etc/godaam/backend.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+# Hardening (optional; relax if something breaks)
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

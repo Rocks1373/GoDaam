@@ -1,5 +1,15 @@
 const { promisify } = require('util');
 
+/** sqlite3 promisify drops `this.changes`; use this for UPDATE … WHERE part_number = ? */
+function runUpdateReturningChanges(db, sql, params) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function onRun(err) {
+      if (err) reject(err);
+      else resolve(this.changes);
+    });
+  });
+}
+
 function asNumber(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -91,16 +101,23 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
     for (const it2 of items) {
       const qty2 = asNumber(it2.required_qty);
       const dedupeKey = `outbound-deliver:${orderId}:${it2.part_number}:${qty2}`;
-      await dbRun(
-        `UPDATE main_stock SET
+      const sql = `UPDATE main_stock SET
            sold_out_qty = COALESCE(sold_out_qty, 0) + ?,
            issued_qty = COALESCE(issued_qty, 0) + ?,
            available_qty = received_qty - (COALESCE(sold_out_qty, 0) + ?) - COALESCE(pending_delivery_qty, 0),
            last_updated = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
-         WHERE part_number = ?`,
-        [qty2, qty2, qty2, it2.part_number]
-      );
+         WHERE part_number = ?`;
+      const changes = await runUpdateReturningChanges(db, sql, [qty2, qty2, qty2, it2.part_number]);
+      if (!changes) {
+        const err = new Error(
+          `Main stock has no row for part "${it2.part_number}". Stock was not deducted — add or align this part in Main Stock first.`
+        );
+        err.statusCode = 400;
+        err.code = 'MAIN_STOCK_PART_MISSING';
+        err.part_number = it2.part_number;
+        throw err;
+      }
 
       await dbRun(
         `INSERT INTO sold_out

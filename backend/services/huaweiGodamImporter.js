@@ -6,10 +6,25 @@ const { promisify } = require('util');
 
 const hgDb = require('../huaweiGodamDb');
 const dbRun = promisify(hgDb.run.bind(hgDb));
+const dbGet = promisify(hgDb.get.bind(hgDb));
+const dbAll = promisify(hgDb.all.bind(hgDb));
 
 const BACKEND_ROOT = path.join(__dirname, '..');
 const PLUGIN_ROOT = path.join(BACKEND_ROOT, '..', 'plugins', 'GoDam-1.0');
-const PYTHON = process.env.HUAWEI_GODAM_PYTHON || process.env.GODAM_EXCEL_PYTHON || 'python3';
+
+/** Prefer plugins/GoDam-1.0/.venv (same as Streamlit script) so matcher CLI matches that env. */
+function resolveHuaweiPython() {
+  const explicit = process.env.HUAWEI_GODAM_PYTHON || process.env.GODAM_EXCEL_PYTHON;
+  if (explicit) return explicit;
+  const venvPy =
+    process.platform === 'win32'
+      ? path.join(PLUGIN_ROOT, '.venv', 'Scripts', 'python.exe')
+      : path.join(PLUGIN_ROOT, '.venv', 'bin', 'python3');
+  if (fs.existsSync(venvPy)) return venvPy;
+  return 'python3';
+}
+
+const PYTHON = resolveHuaweiPython();
 
 function sheetToAoA(ws) {
   if (!ws || !ws['!ref']) return [];
@@ -28,6 +43,23 @@ function numOrNull(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function splitDsaNumbers(raw) {
+  const t = String(raw || '').trim();
+  if (!t) return [];
+  const parts = t
+    .split(/[\r\n,;|]+/g)
+    .map((s) => String(s || '').trim())
+    .filter(Boolean);
+  const out = [];
+  for (const p of parts) {
+    // Sometimes the field is pasted with spaces; pull out DSA-like tokens.
+    const m = p.match(/DSA\d+/gi);
+    if (m && m.length) out.push(...m.map((x) => x.trim()));
+    else out.push(p);
+  }
+  return Array.from(new Set(out)).filter(Boolean);
+}
+
 async function deleteBatchChildren(batchId) {
   await dbRun(`DELETE FROM hg_dn_line WHERE dn_document_id IN (SELECT id FROM hg_dn_document WHERE batch_id = ?)`, [
     batchId,
@@ -43,6 +75,183 @@ async function deleteBatchChildren(batchId) {
   await dbRun(`DELETE FROM hg_duplicate_dn_po WHERE batch_id = ?`, [batchId]);
   await dbRun(`DELETE FROM hg_po_matchrollup WHERE batch_id = ?`, [batchId]);
   await dbRun(`DELETE FROM hg_artifact WHERE batch_id = ?`, [batchId]);
+}
+
+async function rebuildCustomerOrderTables() {
+  // Current design keeps the latest imported snapshot for DN creation.
+  await dbRun(`DELETE FROM huawei_delivery_item_details`);
+  await dbRun(`DELETE FROM huawei_customer_order_header`);
+
+  // Header rows are sourced from the generated "Summary" output sheet import (hg_summary_row).
+  const hdrRows = await dbAll(
+    `
+      SELECT
+        po,
+        contract_no,
+        contract_name,
+        dn_number,
+        distributor,
+        remarks,
+        number_of_boxes,
+        batch_no,
+        cbm
+      FROM hg_summary_row
+      ORDER BY id ASC
+    `
+  );
+
+  // Contract rows provide end user + partner (reseller).
+  const contractMap = new Map();
+  const cRows = await dbAll(`SELECT contract_no, reseller_name, end_customer_name FROM hg_contract_row`);
+  for (const c of cRows || []) {
+    const k = String(c.contract_no || '').trim();
+    if (!k) continue;
+    contractMap.set(k, { reseller_name: c.reseller_name || null, end_customer_name: c.end_customer_name || null });
+  }
+
+  // DN docs provide customer PO + SO + file, and may include multiple POs.
+  const dnDocs = await dbAll(
+    `SELECT dn_number, contract_no, customer_po_raw, so_number, original_filename, po_numbers_json FROM hg_dn_document`
+  );
+  const dnDocMap = new Map(); // dn -> best doc
+  for (const d of dnDocs || []) {
+    const dn = String(d.dn_number || '').trim();
+    if (!dn) continue;
+    if (!dnDocMap.has(dn)) dnDocMap.set(dn, d);
+  }
+
+  // Build header rows; if bill_no_pl_no has multiple DSAs, create one row per DSA.
+  const headerIdByPoDsa = new Map();
+  for (const r of hdrRows || []) {
+    const po = normCell(r.po);
+    if (!po) continue;
+    const contractNo = normCell(r.contract_no);
+    const dist = normCell(r.distributor);
+    const remarks = normCell(r.remarks);
+    const billRaw = normCell(r.dn_number);
+    const dsaList = splitDsaNumbers(billRaw);
+    const cx = contractNo ? contractMap.get(contractNo) : null;
+    const dnDoc = billRaw ? dnDocMap.get(String(billRaw).trim()) : null;
+
+    const base = {
+      gapp_po_number: po,
+      customer_po_number: dnDoc?.customer_po_raw ? String(dnDoc.customer_po_raw) : null,
+      partner_name: cx?.reseller_name || dist || null,
+      end_user: cx?.end_customer_name || null,
+      contract_no: contractNo,
+      note: remarks,
+      no_of_box: numOrNull(r.number_of_boxes),
+      bill_no_pl_no: billRaw,
+      location: null,
+      received_date: null,
+      batch_amount: null,
+      gr_number: null,
+      inventory_age: null,
+      status: 'Received',
+      delivered_date: null,
+      invoice_no: null,
+      invoice_amount: null,
+      psi_status: null,
+    };
+
+    const list = dsaList.length ? dsaList : billRaw ? [billRaw] : [];
+    for (const dsa of list) {
+      const dsaNum = String(dsa || '').trim() || null;
+      await dbRun(
+        `INSERT INTO huawei_customer_order_header
+          (gapp_po_number, customer_po_number, partner_name, end_user, contract_no, note, no_of_box,
+           bill_no_pl_no, dsa_number, location, received_date, batch_amount, gr_number, inventory_age, status,
+           delivered_date, invoice_no, invoice_amount, psi_status, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)`,
+        [
+          base.gapp_po_number,
+          base.customer_po_number,
+          base.partner_name,
+          base.end_user,
+          base.contract_no,
+          base.note,
+          base.no_of_box,
+          base.bill_no_pl_no,
+          dsaNum,
+          base.location,
+          base.received_date,
+          base.batch_amount,
+          base.gr_number,
+          base.inventory_age,
+          base.status,
+          base.delivered_date,
+          base.invoice_no,
+          base.invoice_amount,
+          base.psi_status,
+        ]
+      );
+      const row = await dbGet(`SELECT last_insert_rowid() AS id`);
+      const hid = row?.id ? Number(row.id) : null;
+      if (hid && base.gapp_po_number && dsaNum) headerIdByPoDsa.set(`${base.gapp_po_number}::${dsaNum}`, hid);
+    }
+  }
+
+  // Item-level rows: from DN documents + DN lines (material rows).
+  const lines = await dbAll(
+    `
+      SELECT
+        d.dn_number,
+        d.contract_no,
+        d.customer_po_raw,
+        d.so_number,
+        d.original_filename,
+        d.po_numbers_json,
+        l.material,
+        l.qty,
+        l.description
+      FROM hg_dn_document d
+      JOIN hg_dn_line l ON l.dn_document_id = d.id
+      ORDER BY d.id ASC, l.id ASC
+    `
+  );
+
+  for (const it of lines || []) {
+    const dsa = normCell(it.dn_number);
+    if (!dsa) continue;
+
+    let po = null;
+    try {
+      const arr = it.po_numbers_json ? JSON.parse(String(it.po_numbers_json)) : [];
+      po = Array.isArray(arr) && arr.length ? String(arr[0] || '').trim() : null;
+    } catch {
+      po = null;
+    }
+
+    const contractNo = normCell(it.contract_no);
+    const cx = contractNo ? contractMap.get(contractNo) : null;
+    const headerId = po && dsa ? headerIdByPoDsa.get(`${po}::${dsa}`) : null;
+
+    await dbRun(
+      `INSERT INTO huawei_delivery_item_details
+        (header_id, gapp_po_number, customer_po_number, dsa_number, contract_no, so_number, partner_name, end_user,
+         batch, part_number, description, quantity, uom, volume, cbm, status, source_file, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)`,
+      [
+        headerId || null,
+        po,
+        it.customer_po_raw ? String(it.customer_po_raw) : null,
+        dsa,
+        contractNo,
+        normCell(it.so_number),
+        cx?.reseller_name || null,
+        cx?.end_customer_name || null,
+        null,
+        normCell(it.material),
+        normCell(it.description),
+        numOrNull(it.qty),
+        null,
+        null,
+        null,
+        'Received',
+        normCell(it.original_filename),
+      ]
+    );
+  }
 }
 
 async function importArtifacts(batchId, batchAbsDir) {
@@ -341,6 +550,7 @@ async function importHuaweiGodamBatch(batchId, storageDirRelative) {
   await importOutputsOnly(batchId, batchAbsDir);
   await importInputsFromPython(batchId, batchAbsDir);
   await importArtifacts(batchId, batchAbsDir);
+  await rebuildCustomerOrderTables();
 }
 
 async function importOutputsOnly(batchId, batchAbsDir) {

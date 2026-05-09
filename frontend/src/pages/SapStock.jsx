@@ -14,7 +14,9 @@ export default function SapStock() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [batchId, setBatchId] = useState(null);
-  const [search, setSearch] = useState('');
+  const [filterStorageLocation, setFilterStorageLocation] = useState('');
+  const [filterMaterialGroup, setFilterMaterialGroup] = useState('');
+  const [filterMaterial, setFilterMaterial] = useState('');
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
   const [uploadBusy, setUploadBusy] = useState(false);
@@ -28,7 +30,13 @@ export default function SapStock() {
     setLoading(true);
     setErr('');
     try {
-      const data = await sapStockApi.list({ search: search.trim(), limit: 3000, offset: 0 });
+      const data = await sapStockApi.list({
+        storage_location: filterStorageLocation.trim(),
+        material_group: filterMaterialGroup.trim(),
+        material: filterMaterial.trim(),
+        limit: 3000,
+        offset: 0,
+      });
       setRows(data.rows || []);
       setTotal(data.total ?? 0);
       setBatchId(data.batch_id ?? null);
@@ -38,12 +46,12 @@ export default function SapStock() {
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  }, [filterStorageLocation, filterMaterialGroup, filterMaterial]);
 
   useEffect(() => {
     const t = setTimeout(() => load(), 320);
     return () => clearTimeout(t);
-  }, [search, load]);
+  }, [filterStorageLocation, filterMaterialGroup, filterMaterial, load]);
 
   const sortValue = useCallback((r, k) => {
     if (k === 'sap_qty') return Number(r.sap_qty) || 0;
@@ -177,14 +185,35 @@ export default function SapStock() {
 
       {err ? <div className="mb-2 text-[11px] font-bold text-red-700">{err}</div> : null}
 
-      <div className="flex items-center gap-2 mb-2">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search part, description, vendor, material group…"
-          className="flex-1 min-w-[160px] max-w-md border border-gray-300 rounded-md px-2 py-1 text-[11px]"
-        />
-        <span className="text-[10px] text-gray-500 whitespace-nowrap">{total} row(s)</span>
+      <div className="flex flex-wrap items-end gap-2 mb-2">
+        <label className="flex flex-col gap-0.5 min-w-[120px] flex-1 max-w-[200px]">
+          <span className="text-[10px] font-bold text-gray-600 uppercase tracking-wide">Storage location</span>
+          <input
+            value={filterStorageLocation}
+            onChange={(e) => setFilterStorageLocation(e.target.value)}
+            placeholder="e.g. 1002"
+            className="w-full border border-gray-300 rounded-md px-2 py-1 text-[11px]"
+          />
+        </label>
+        <label className="flex flex-col gap-0.5 min-w-[120px] flex-1 max-w-[200px]">
+          <span className="text-[10px] font-bold text-gray-600 uppercase tracking-wide">Material group</span>
+          <input
+            value={filterMaterialGroup}
+            onChange={(e) => setFilterMaterialGroup(e.target.value)}
+            placeholder="Group code"
+            className="w-full border border-gray-300 rounded-md px-2 py-1 text-[11px]"
+          />
+        </label>
+        <label className="flex flex-col gap-0.5 min-w-[140px] flex-1 max-w-[220px]">
+          <span className="text-[10px] font-bold text-gray-600 uppercase tracking-wide">Material</span>
+          <input
+            value={filterMaterial}
+            onChange={(e) => setFilterMaterial(e.target.value)}
+            placeholder="Material / SAP part"
+            className="w-full border border-gray-300 rounded-md px-2 py-1 text-[11px]"
+          />
+        </label>
+        <span className="text-[10px] text-gray-500 whitespace-nowrap pb-1">{total} row(s)</span>
       </div>
 
       <div className="border border-gray-200 rounded-lg overflow-auto bg-white">

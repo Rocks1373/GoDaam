@@ -64,6 +64,29 @@ const SIDEBAR_WIDTH_KEY = 'godam_sidebar_width_px';
 const SIDEBAR_MIN = 120;
 const SIDEBAR_MAX = 440;
 const SIDEBAR_DEFAULT = 160;
+const GODAM_1_EXTERNAL_URL = import.meta.env.VITE_GODAM_1_EXTERNAL_URL;
+const HUAWEI_STREAMLIT_BASE =
+  import.meta.env.VITE_HUAWEI_GODAM_STREAMLIT_BASE || 'huawei-godam-app';
+
+/** Opens Streamlit GoDam in a new tab (proxied under HUAWEI_STREAMLIT_BASE), never embedded in SPA shell. */
+async function openGoDamOneNewTab() {
+  const ext = String(GODAM_1_EXTERNAL_URL || '').trim();
+  if (ext) {
+    window.open(ext, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  try {
+    const data = await huaweiModuleApi.grantStreamlitAccess();
+    const slug =
+      String(data?.basePath || '')
+        .replace(/^\/+|\/+$/g, '')
+        .trim() || String(HUAWEI_STREAMLIT_BASE).replace(/^\/+|\/+$/g, '');
+    const path = slug.startsWith('/') ? slug : `/${slug}`;
+    window.open(`${window.location.origin}${path}/`, '_blank', 'noopener,noreferrer');
+  } catch {
+    /* optional UI toast elsewhere */
+  }
+}
 
 function readSidebarWidth() {
   try {
@@ -98,6 +121,26 @@ function App() {
   const [notifUnread, setNotifUnread] = useState(0);
   const [notifRows, setNotifRows] = useState([]);
   const notifUnreadSigRef = useRef('');
+  const notifMenuRef = useRef(null);
+
+  useEffect(() => {
+    if (!notifOpen) return undefined;
+    const onPointerDown = (e) => {
+      const root = notifMenuRef.current;
+      if (root && !root.contains(e.target)) setNotifOpen(false);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') setNotifOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('touchstart', onPointerDown, { passive: true });
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('touchstart', onPointerDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [notifOpen]);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const sidebarDrag = useRef(false);
   const dragStartX = useRef(0);
@@ -280,7 +323,7 @@ function App() {
                         </div>
                         <ThemeSwitcher />
                         <CardSizeControls />
-                        <div className="relative">
+                        <div className="relative" ref={notifMenuRef}>
                           <button
                             type="button"
                             className="btn-secondary relative"
@@ -523,6 +566,26 @@ function App() {
                         <span className="truncate">SAP Stock</span>
                       </NavLink>
 
+                      <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
+                        <Boxes className="w-3 h-3" />
+                        Plugins
+                      </div>
+                      <button
+                        type="button"
+                        className="nav-sidebar-link w-full text-left cursor-pointer"
+                        title={
+                          GODAM_1_EXTERNAL_URL
+                            ? 'Opens separately hosted GoDam 1.0 in a new browser tab'
+                            : 'Opens GoDam 1.0 (Streamlit) in a new browser tab — Python UI served via this site'
+                        }
+                        onClick={() => {
+                          void openGoDamOneNewTab();
+                        }}
+                      >
+                        <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate">GoDam 1.0</span>
+                      </button>
+
                       {user?.role === 'admin' && (
                         <>
                           <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-amber-600 uppercase tracking-wide">
@@ -547,28 +610,6 @@ function App() {
                             <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
                             <span className="truncate">OCR Tool</span>
                           </a>
-                          <button
-                            type="button"
-                            className="nav-sidebar-link w-full text-left cursor-pointer"
-                            title="Opens GoDam-1.0 in a new browser tab"
-                            onClick={async () => {
-                              try {
-                                const data = await huaweiModuleApi.recordGodamOpen();
-                                const url = data?.url;
-                                if (url) window.open(url, '_blank', 'noopener,noreferrer');
-                              } catch {
-                                try {
-                                  const { url } = await huaweiModuleApi.getGodamUrl();
-                                  if (url) window.open(url, '_blank', 'noopener,noreferrer');
-                                } catch {
-                                  // ignore
-                                }
-                              }
-                            }}
-                          >
-                            <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Huawei · GoDam-1.0</span>
-                          </button>
                           <NavLink
                             to="/huawei-godam"
                             className={({ isActive }) =>
@@ -726,6 +767,7 @@ function App() {
                       />
                       <Route path="/reports/stock-comparison" element={<StockComparisonReport />} />
                       <Route path="/sap-stock" element={<SapStock />} />
+                      <Route path="/godam-plugin" element={<Navigate to="/dashboard" replace />} />
                       <Route
                         path="/ocr-center"
                         element={

@@ -263,6 +263,7 @@ export const deliveryNotesApi = {
   applyDeliveryTo: async (id, payload) => (await api.post(`/delivery-notes/${id}/delivery-to`, payload)).data,
   saveTransportation: async (id, payload) => (await api.post(`/delivery-notes/${id}/transportation`, payload)).data,
   savePackageInfo: async (id, payload) => (await api.post(`/delivery-notes/${id}/package-info`, payload)).data,
+  saveContactPerson2: async (id, payload) => (await api.post(`/delivery-notes/${id}/contact-person-2`, payload)).data,
   setHold: async (id, is_hold) => (await api.post(`/delivery-notes/${id}/hold`, { is_hold })).data,
   markDelivered: async (id) => (await api.post(`/delivery-notes/${id}/mark-delivered`)).data,
   print: async (id) => (await api.get(`/delivery-notes/${id}/print`)).data,
@@ -430,6 +431,49 @@ export const pickedOrdersApi = {
   get: async (id) => (await api.get(`/admin/picked-orders/${id}`)).data,
 };
 
+async function readBlobError(blob) {
+  if (!(blob instanceof Blob)) return null;
+  try {
+    const text = await blob.text();
+    const j = JSON.parse(text);
+    return j.error || j.detail || text;
+  } catch {
+    try {
+      return await blob.text();
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Admin-only: release APK metadata + download (Bearer auth; file lives under backend/uploads/mobile/) */
+export const adminMobileAppApi = {
+  getInfo: async () => (await api.get('/admin/mobile-app')).data,
+  downloadApk: async () => {
+    try {
+      const res = await api.get('/admin/mobile-app/apk', { responseType: 'blob' });
+      let filename = 'GoDam.apk';
+      const cd = res.headers['content-disposition'];
+      if (cd && typeof cd === 'string') {
+        const m = cd.match(/filename\*?=(?:UTF-8'')?([^;\s]+)|filename="([^"]+)"/i);
+        const raw = m ? (m[1] || m[2] || '').trim() : '';
+        if (raw) {
+          try {
+            filename = decodeURIComponent(raw.replace(/^["']|["']$/g, ''));
+          } catch {
+            filename = raw.replace(/^["']|["']$/g, '') || filename;
+          }
+        }
+      }
+      downloadBlob(res.data, filename);
+    } catch (e) {
+      const msg = await readBlobError(e.response?.data);
+      if (msg) throw new Error(msg);
+      throw e;
+    }
+  },
+};
+
 /** Admin-only: outbound SQLite domain stats, browse whitelist tables, wipe outbound workflow */
 export const maintenanceApi = {
   outboundStats: async () => (await api.get('/admin/maintenance/outbound-stats')).data,
@@ -472,6 +516,16 @@ export const huaweiGodamApi = {
   health: async () => (await api.get('/huawei-godam/health')).data,
   listBatches: async (limit = 50) => (await api.get('/huawei-godam/batches', { params: { limit } })).data,
   getBatch: async (id) => (await api.get(`/huawei-godam/batches/${id}`)).data,
+  poOptions: async (q = '', limit = 50) =>
+    (await api.get('/huawei-godam/customer-orders/po-options', { params: { q, limit } })).data,
+  dsaOptions: async (po) =>
+    (await api.get(`/huawei-godam/customer-orders/${encodeURIComponent(po)}/dsa`)).data,
+  dsaItems: async (po, dsa) =>
+    (
+      await api.get(
+        `/huawei-godam/customer-orders/${encodeURIComponent(po)}/dsa/${encodeURIComponent(dsa)}/items`
+      )
+    ).data,
   createBatch: async (masters, dnFiles, rulesFile = null) => {
     const fd = new FormData();
     const keys = ['summary', 'po', 'so', 'vcust', 'contracts', 'accessories'];
@@ -492,6 +546,9 @@ export const huaweiGodamApi = {
 export const huaweiModuleApi = {
   getGodamUrl: async () => (await api.get('/huawei-module/godam-url')).data,
   recordGodamOpen: async () => (await api.post('/huawei-module/godam-open')).data,
+  /** Sets HttpOnly cookie for the authenticated Streamlit reverse proxy (opened from sidebar in a new tab). */
+  grantStreamlitAccess: async () =>
+    (await api.post('/huawei-module/streamlit-access-grant')).data,
   /** Admin: set Streamlit / hosted GoDam URL */
   updateGodamUrl: async (external_url) =>
     (await api.put('/huawei-module/godam-url', { external_url })).data,

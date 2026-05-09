@@ -56,16 +56,17 @@ case "$ACTION" in
     ;;
   start|huawei)
     stop_all
+    export HUAWEI_GODAM_STREAMLIT_AUTOSTART="${HUAWEI_GODAM_STREAMLIT_AUTOSTART:-1}"
     echo ""
     echo "Starting FULL stack (Ctrl+C to stop all):"
     echo "  • API     → http://127.0.0.1:3001"
     echo "  • Web app → http://127.0.0.1:5173"
-    echo "  • Huawei GoDam (Streamlit) → http://127.0.0.1:8501"
+    echo "  • Huawei GoDam (Streamlit) → http://127.0.0.1:8501 (child of Node when HUAWEI_GODAM_STREAMLIT_AUTOSTART=1)"
     echo ""
-    if [[ ! -f "$ROOT/plugins/GoDam-1.0/Home.py" ]]; then
-      echo "WARN: plugins/GoDam-1.0/Home.py missing — clone GoDam-1.0 into plugins/GoDam-1.0"
+    if [[ ! -f "$ROOT/GoDam/GoDam-1.0/Home.py" ]] && [[ ! -f "$ROOT/plugins/GoDam-1.0/Home.py" ]]; then
+      echo "WARN: GoDam-1.0/Home.py missing — add GoDam/GoDam-1.0 or plugins/GoDam-1.0"
       echo ""
-    elif [[ ! -x "$ROOT/plugins/GoDam-1.0/.venv/bin/python3" ]]; then
+    elif [[ ! -x "$ROOT/GoDam/GoDam-1.0/.venv/bin/python3" ]] && [[ ! -x "$ROOT/plugins/GoDam-1.0/.venv/bin/python3" ]]; then
       echo "TIP: Homebrew Python blocks global pip. Create the plugin venv once:"
       echo "     npm run setup:huawei-godam"
       echo ""

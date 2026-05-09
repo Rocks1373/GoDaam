@@ -1,7 +1,10 @@
 const express = require('express');
 const { promisify } = require('util');
+const jwt = require('jsonwebtoken');
 
 const db = require('../db');
+const { JWT_SECRET } = require('../middleware/auth');
+const { streamlitBasePath } = require('../huaweiGodamStreamlitProxy');
 const dbGet = promisify(db.get.bind(db));
 const dbRun = promisify(db.run.bind(db));
 
@@ -60,6 +63,32 @@ router.post('/godam-open', async (req, res) => {
       [Number.isFinite(uid) ? uid : null, url]
     );
     res.json({ ok: true, url });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** HttpOnly cookie so the Streamlit reverse-proxy iframe can load without Bearer headers. */
+router.post('/streamlit-access-grant', async (req, res) => {
+  try {
+    const token = jwt.sign(
+      { typ: 'huawei_streamlit', sub: req.user?.id, role: req.user?.role },
+      JWT_SECRET,
+      { expiresIn: '8h' }
+    );
+    const base = streamlitBasePath();
+    const cookiePath = `/${base}`;
+    const secure =
+      String(process.env.COOKIE_SECURE || '').trim() === '1' ||
+      String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+    res.cookie('huawei_streamlit_proxy', token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure,
+      path: cookiePath,
+      maxAge: 8 * 60 * 60 * 1000,
+    });
+    res.json({ ok: true, basePath: cookiePath });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

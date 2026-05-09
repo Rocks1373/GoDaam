@@ -105,5 +105,6 @@ else
   done
 fi
 
-cd "$ROOT_DIR/godam-mobile"
-exec npx expo start --android --port 8090
+# Do not use `expo start --android`: it launches Expo Go via `adb monkey`, which often
+# fails on API 35+ with exit 251. Use scripts/expo-start-android-emulator.sh instead.
+exec bash "$ROOT_DIR/scripts/expo-start-android-emulator.sh"

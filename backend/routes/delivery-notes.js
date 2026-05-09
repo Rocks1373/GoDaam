@@ -553,7 +553,7 @@ router.get(
 );
 
 // POST /api/delivery-notes/:id/confirm — GAPP only; creates driver task + notifications
-router.post('/:id/confirm', requirePermission('can_upload_outbound'), async (req, res) => {
+router.post('/:id/confirm', requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
   try {
@@ -598,6 +598,25 @@ router.post('/:id/confirm', requirePermission('can_upload_outbound'), async (req
     const customerName = trimStr(dn.customer_name);
     const address = trimStr(dn.delivery_address);
     const driverName = trimStr(dn.driver_name);
+    const dnNumber = trimStr(dn.dn_number) || outboundNum;
+    const items = await dbAll(
+      `SELECT part_number, qty, uom
+       FROM delivery_note_items
+       WHERE dn_id = ?
+       ORDER BY item_no ASC, id ASC
+       LIMIT 8`,
+      [id]
+    );
+    const details =
+      (items || [])
+        .map((it) => {
+          const pn = trimStr(it?.part_number);
+          const q = Number(it?.qty) || 0;
+          const u = trimStr(it?.uom);
+          return pn ? `${pn} x${q}${u ? ` ${u}` : ''}` : '';
+        })
+        .filter(Boolean)
+        .join('\n') || '';
 
     await dbRun('BEGIN IMMEDIATE');
     try {
@@ -637,7 +656,8 @@ router.post('/:id/confirm', requirePermission('can_upload_outbound'), async (req
       await dbRun('COMMIT');
 
       const mapsHint = gpsLink ? `\nMaps: ${gpsLink}` : '';
-      const bodyDriver = `Outbound: ${outboundNum}\nCustomer: ${customerName}\nAddress: ${address}\nDriver: ${driverName}${mapsHint}`;
+      const detailsHint = details ? `\n\nDetails:\n${details}` : '';
+      const bodyDriver = `DN: ${dnNumber}\nOutbound: ${outboundNum}\nCustomer/Site: ${customerName}\nAddress: ${address}\nAssigned Driver: ${driverName}${mapsHint}${detailsHint}`;
 
       try {
         if (driverUserId) {
@@ -647,9 +667,15 @@ router.post('/:id/confirm', requirePermission('can_upload_outbound'), async (req
             bodyDriver,
             {
               type: 'delivery_confirmed',
+              channel: 'delivery',
               dn_id: id,
               task_id: taskRow.id,
               outbound_number: outboundNum,
+              dn_number: dnNumber,
+              customer_name: customerName,
+              delivery_address: address,
+              driver_user_id: driverUserId,
+              driver_name: driverName,
               open_action: 'delivery_open',
             }
           );
@@ -933,8 +959,33 @@ router.post('/:id/package-info', async (req, res) => {
   }
 });
 
+// POST /api/delivery-notes/:id/contact-person-2 — secondary contact on DN only (clear with empty strings)
+router.post('/:id/contact-person-2', requirePermission('can_upload_outbound'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
+    if (!dn) return res.status(404).json({ error: 'DN not found' });
+    if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'DN already delivered' });
+    if (!assertDnEditable(dn, res)) return;
+
+    const cp2 = trimStr(req.body?.contact_person_2 ?? '');
+    const cn2 = trimStr(req.body?.contact_number_2 ?? '');
+    await dbRun(
+      `UPDATE delivery_notes SET contact_person_2 = ?, contact_number_2 = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [cp2 || null, cn2 || null, id]
+    );
+    res.json(await getDnView(id));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/delivery-notes/:id/mark-delivered
-router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), async (req, res) => {
+router.post(
+  '/:id/mark-delivered',
+  requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']),
+  async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
   try {
@@ -977,21 +1028,19 @@ router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), asy
       : null;
     if (!order?.id) return res.status(400).json({ error: 'Outbound not found for this DN' });
 
-    let effectiveInvoice = trimStr(dn.invoice_number) || trimStr(order.invoice_number);
-    if (!effectiveInvoice) return res.status(400).json({ error: 'Invoice Number is required' });
+    /** Single resolved invoice — must exist on both DN + outbound before stock deduction (markOutboundDelivered reads outbound row). */
+    const resolvedInvoice = trimStr(dn.invoice_number) || trimStr(order.invoice_number);
+    if (!resolvedInvoice) return res.status(400).json({ error: 'Invoice Number is required' });
 
-    if (!trimStr(order.invoice_number) && trimStr(dn.invoice_number)) {
-      await dbRun(`UPDATE outbound_orders SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
-        trimStr(dn.invoice_number),
-        order.id,
-      ]);
-    } else if (!trimStr(dn.invoice_number) && trimStr(order.invoice_number)) {
-      await dbRun(`UPDATE delivery_notes SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
-        trimStr(order.invoice_number),
-        id,
-      ]);
-      dn.invoice_number = order.invoice_number;
-    }
+    await dbRun(`UPDATE outbound_orders SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
+      resolvedInvoice,
+      order.id,
+    ]);
+    await dbRun(`UPDATE delivery_notes SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
+      resolvedInvoice,
+      id,
+    ]);
+    dn.invoice_number = resolvedInvoice;
 
     const pkg = normalizePackageType(dn.package_type);
     if (!pkg) return res.status(400).json({ error: 'Package Type is required' });
@@ -1000,7 +1049,19 @@ router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), asy
     }
 
     // Deduct main stock only at Delivered status (reuse existing outbound delivered logic, which guards double deduction).
-    await markOutboundDelivered(db, Number(order.id), { requireInvoice: true });
+    let outboundStockAlreadyFinalized = false;
+    try {
+      await markOutboundDelivered(db, Number(order.id), { requireInvoice: true });
+    } catch (e) {
+      const dup =
+        Number(e.statusCode) === 409 && String(e.message || '').includes('Already delivered (double deduction prevented)');
+      if (!dup) throw e;
+      outboundStockAlreadyFinalized = true;
+      // Outbound was already marked delivered from another screen (e.g. Outbound upload). Finish the DN without re-deducting.
+    }
+
+    const dnLatest = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
+    if (!dnLatest) return res.status(404).json({ error: 'DN not found' });
 
     // Persist delivered table snapshot (one row per item, with header fields duplicated).
     const dnItems = await dbAll(`SELECT * FROM delivery_note_items WHERE dn_id = ? ORDER BY item_no ASC`, [id]);
@@ -1021,40 +1082,40 @@ router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), asy
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
           [
             id,
-            dn.dn_number || dn.outbound_number || '',
+            dnLatest.dn_number || dnLatest.outbound_number || '',
             delivered_date,
-            dn.sales_order_number || '',
-            dn.gapp_po || '',
-            dn.customer_po || '',
-            dn.outbound_number || '',
-            trimStr(dn.invoice_number) || effectiveInvoice || '',
-            dn.customer_number || '',
-            dn.customer_name || '',
-            dn.delivery_address || '',
-            dn.gps || '',
-            dn.contact_person || '',
-            dn.contact_number || '',
-            dn.city_name || '',
-            dn.contact_person_2 || '',
-            dn.contact_number_2 || '',
-            dn.email_1 || '',
-            dn.second_email || '',
-            dn.transportation_type || '',
-            dn.carrier_name || '',
-            dn.driver_name || '',
-            dn.driver_mobile || '',
-            dn.vehicle || '',
-            dn.truck_type || '',
-            asNumber(dn.truck_qty) || 0,
-            dn.waybill_number || '',
-            dn.package_type || '',
-            asNumber(dn.pallet_qty) || 0,
-            asNumber(dn.box_qty) || 0,
-            asNumber(dn.gross_weight_kg) || 0,
-            asNumber(dn.volume_cbm) || 0,
-            dn.deliver_to_remarks || '',
-            dn.address_type || '',
-            dn.address_source || '',
+            dnLatest.sales_order_number || '',
+            dnLatest.gapp_po || '',
+            dnLatest.customer_po || '',
+            dnLatest.outbound_number || '',
+            trimStr(dnLatest.invoice_number) || resolvedInvoice || '',
+            dnLatest.customer_number || '',
+            dnLatest.customer_name || '',
+            dnLatest.delivery_address || '',
+            dnLatest.gps || '',
+            dnLatest.contact_person || '',
+            dnLatest.contact_number || '',
+            dnLatest.city_name || '',
+            dnLatest.contact_person_2 || '',
+            dnLatest.contact_number_2 || '',
+            dnLatest.email_1 || '',
+            dnLatest.second_email || '',
+            dnLatest.transportation_type || '',
+            dnLatest.carrier_name || '',
+            dnLatest.driver_name || '',
+            dnLatest.driver_mobile || '',
+            dnLatest.vehicle || '',
+            dnLatest.truck_type || '',
+            asNumber(dnLatest.truck_qty) || 0,
+            dnLatest.waybill_number || '',
+            dnLatest.package_type || '',
+            asNumber(dnLatest.pallet_qty) || 0,
+            asNumber(dnLatest.box_qty) || 0,
+            asNumber(dnLatest.gross_weight_kg) || 0,
+            asNumber(dnLatest.volume_cbm) || 0,
+            dnLatest.deliver_to_remarks || '',
+            dnLatest.address_type || '',
+            dnLatest.address_source || '',
             it.part_number || '',
             it.sap_part_number || '',
             it.description || '',
@@ -1073,10 +1134,20 @@ router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), asy
       throw e;
     }
 
-    res.json({ ok: true, dn_id: id, status: 'Delivered' });
+    res.json({
+      ok: true,
+      dn_id: id,
+      status: 'Delivered',
+      outbound_stock_already_finalized: outboundStockAlreadyFinalized,
+    });
   } catch (e) {
     const code = e.statusCode || 500;
-    res.status(code).json({ error: e.message, shortages: e.shortages });
+    res.status(code).json({
+      error: e.message,
+      shortages: e.shortages,
+      code: e.code,
+      part_number: e.part_number,
+    });
   }
 });
 

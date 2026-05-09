@@ -14,6 +14,8 @@ export default function DeliveryNote() {
   const [dn, setDn] = useState(null);
   const [error, setError] = useState('');
   const [showContact2, setShowContact2] = useState(false);
+  const [cp2DraftName, setCp2DraftName] = useState('');
+  const [cp2DraftPhone, setCp2DraftPhone] = useState('');
   const [showInvoicePrompt, setShowInvoicePrompt] = useState(false);
   const [invoiceDraft, setInvoiceDraft] = useState('');
   const [packageTypeDraft, setPackageTypeDraft] = useState('Ignore');
@@ -103,6 +105,27 @@ export default function DeliveryNote() {
     }
   };
 
+  const refreshDnOnly = async (id = dnId, options = {}) => {
+    const silent = Boolean(options.silent);
+    if (!id) return;
+    try {
+      const data = await deliveryNotesApi.get(id);
+      setDn(data);
+      await refreshTimeline(id);
+    } catch (e) {
+      if (!silent) alert(e?.response?.data?.error || e.message);
+      throw e;
+    }
+  };
+
+  useEffect(() => {
+    if (!dn) return;
+    const has2 = Boolean(trim(dn.contact_person_2) || trim(dn.contact_number_2));
+    if (has2) setShowContact2(true);
+    setCp2DraftName(trim(dn.contact_person_2));
+    setCp2DraftPhone(trim(dn.contact_number_2));
+  }, [dn?.id, dn?.contact_person_2, dn?.contact_number_2]);
+
   const filteredDeliveryAddresses = useMemo(() => {
     const list = deliveryToCtx?.addresses || [];
     if (!deliveryToCity) return list;
@@ -133,7 +156,10 @@ export default function DeliveryNote() {
 
   const isGapp = String(dn?.transportation_type || '').trim().toLowerCase() === 'gapp';
   const isAdmin = String(me?.role || '').toLowerCase() === 'admin';
-  const canUploadOutbound = Boolean(me?.permissions?.can_upload_outbound) || isAdmin;
+  const canUploadOutbound =
+    Boolean(me?.permissions?.can_upload_outbound) ||
+    Boolean(me?.permissions?.can_confirm_picked) ||
+    isAdmin;
   const dnLocked =
     Number(dn?.is_closed) === 1 || String(dn?.delivery_status || '').toLowerCase() === 'closed';
 
@@ -161,6 +187,17 @@ export default function DeliveryNote() {
     if (dn.confirmed_at) return false;
     const addrOk = Boolean(String(dn.delivery_address || '').trim());
     return addrOk && packageValidForConfirm && gappTransportComplete;
+  }, [dn, isGapp, dnLocked, packageValidForConfirm, gappTransportComplete]);
+
+  const gappMissingConfirmReasons = useMemo(() => {
+    if (!dn || !isGapp) return [];
+    const reasons = [];
+    if (dnLocked) reasons.push('Delivery note is closed');
+    if (dn.confirmed_at) reasons.push('Already confirmed');
+    if (!String(dn.delivery_address || '').trim()) reasons.push('Delivery To / delivery address is missing');
+    if (!packageValidForConfirm) reasons.push('Invoice + package info is incomplete');
+    if (!gappTransportComplete) reasons.push('GAPP driver / phone / vehicle is incomplete');
+    return reasons;
   }, [dn, isGapp, dnLocked, packageValidForConfirm, gappTransportComplete]);
 
   const gappMarkDeliveredBlocked = useMemo(() => {
@@ -245,16 +282,49 @@ export default function DeliveryNote() {
         setShowInvoicePrompt(true);
         return;
       }
-      await deliveryNotesApi.markDelivered(dnId);
-      await load();
-      alert('Marked as Delivered. Stock deducted (double deduction prevented).');
+      const result = await deliveryNotesApi.markDelivered(dnId);
+      try {
+        await refreshDnOnly(dnId, { silent: true });
+      } catch {
+        try {
+          const data = await deliveryNotesApi.get(dnId);
+          setDn(data);
+          await refreshTimeline(dnId);
+        } catch {
+          /* ignore — mark-delivered already succeeded */
+        }
+      }
+      alert(
+        result?.outbound_stock_already_finalized
+          ? 'Delivery note marked Delivered. Stock for this outbound was already finalized earlier (no second deduction).'
+          : 'Marked as Delivered. Stock deducted from main stock (guarded against duplicate deduction).'
+      );
     } catch (e) {
-      alert(e?.response?.data?.error || e.message);
+      const data = e?.response?.data;
+      const shortages = data?.shortages;
+      let msg = data?.error || e.message || 'Request failed';
+      if (Array.isArray(shortages) && shortages.length) {
+        const lines = shortages.map(
+          (s) =>
+            `${s.part_number}: need ${s.required_qty}, available ${s.available_qty} (short ${s.shortage_qty})`
+        );
+        msg = `${msg}\n\n${lines.join('\n')}`;
+      }
+      alert(msg);
     }
   };
 
   const handleConfirmForDelivery = async () => {
     if (!dnId) return;
+    if (!gappCanConfirm) {
+      const reasons = gappMissingConfirmReasons;
+      const msg =
+        reasons && reasons.length
+          ? `Cannot confirm for delivery:\n- ${reasons.join('\n- ')}`
+          : 'Cannot confirm for delivery. Please complete required fields first.';
+      alert(msg);
+      return;
+    }
     try {
       const data = await deliveryNotesApi.confirmForDelivery(dnId);
       setDn(data);
@@ -613,6 +683,46 @@ export default function DeliveryNote() {
     }
   };
 
+  const saveContactPerson2Fields = async () => {
+    if (!dnId || dnLocked) return;
+    try {
+      const data = await deliveryNotesApi.saveContactPerson2(dnId, {
+        contact_person_2: cp2DraftName.trim(),
+        contact_number_2: cp2DraftPhone.trim(),
+      });
+      setDn(data);
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    }
+  };
+
+  const handleContactPerson2Toggle = async () => {
+    if (!dnId) return;
+    const hasSaved = Boolean(trim(dn?.contact_person_2) || trim(dn?.contact_number_2));
+    if (showContact2 && hasSaved) {
+      try {
+        const data = await deliveryNotesApi.saveContactPerson2(dnId, {
+          contact_person_2: '',
+          contact_number_2: '',
+        });
+        setDn(data);
+        setShowContact2(false);
+        setCp2DraftName('');
+        setCp2DraftPhone('');
+      } catch (e) {
+        alert(e?.response?.data?.error || e.message);
+      }
+      return;
+    }
+    if (showContact2 && !hasSaved) {
+      setShowContact2(false);
+      setCp2DraftName(trim(dn?.contact_person_2));
+      setCp2DraftPhone(trim(dn?.contact_number_2));
+      return;
+    }
+    setShowContact2(true);
+  };
+
   return (
     <div>
       <div className="mb-2 dn-no-print">
@@ -708,13 +818,12 @@ export default function DeliveryNote() {
               <button
                 type="button"
                 className="btn-secondary"
-                disabled={!dn || dnLocked || !gappCanConfirm}
                 onClick={handleConfirmForDelivery}
                 title={
                   dnLocked
                     ? 'Closed'
-                    : !gappCanConfirm
-                      ? 'Complete Delivery To, GAPP driver/vehicle, and package info'
+                    : gappMissingConfirmReasons?.length
+                      ? `Complete required fields:\n- ${gappMissingConfirmReasons.join('\n- ')}`
                       : 'Send confirmation to driver'
                 }
               >
@@ -759,14 +868,60 @@ export default function DeliveryNote() {
             </button>
           </div>
         </div>
-        <div className="mt-2 flex flex-wrap gap-1">
-          <button
-            className="btn-secondary"
-            type="button"
-            onClick={() => setShowContact2((v) => !v)}
-          >
-            {showContact2 ? 'Remove Contact Person 2' : 'Add Contact Person 2'}
-          </button>
+        <div className="mt-2 space-y-2">
+          <div className="flex flex-wrap gap-1 items-center">
+            <button
+              className="btn-secondary"
+              type="button"
+              disabled={!dn || dnLocked}
+              onClick={handleContactPerson2Toggle}
+              title={
+                !dn
+                  ? 'Load a delivery note first'
+                  : dnLocked
+                    ? 'Closed — no changes'
+                    : trim(dn?.contact_person_2) || trim(dn?.contact_number_2)
+                      ? 'Clear secondary contact on this delivery note'
+                      : 'Add fields for a second contact'
+              }
+            >
+              {showContact2 && (trim(dn?.contact_person_2) || trim(dn?.contact_number_2))
+                ? 'Remove Contact Person 2'
+                : showContact2
+                  ? 'Cancel Contact Person 2'
+                  : 'Add Contact Person 2'}
+            </button>
+            {showContact2 && dn && !dnLocked ? (
+              <span className="text-[11px] text-gray-600">
+                Values also populate when you apply an address that includes 2nd Name / 2nd Number.
+              </span>
+            ) : null}
+          </div>
+          {showContact2 && dn && !dnLocked ? (
+            <div className="flex flex-wrap gap-2 items-end max-w-xl">
+              <label className="text-[11px] font-bold text-gray-700 flex-1 min-w-[140px]">
+                Contact Person (2)
+                <input
+                  className="input-field mt-1"
+                  value={cp2DraftName}
+                  onChange={(e) => setCp2DraftName(e.target.value)}
+                  placeholder="Name"
+                />
+              </label>
+              <label className="text-[11px] font-bold text-gray-700 flex-1 min-w-[140px]">
+                Number (2)
+                <input
+                  className="input-field mt-1"
+                  value={cp2DraftPhone}
+                  onChange={(e) => setCp2DraftPhone(e.target.value)}
+                  placeholder="Phone"
+                />
+              </label>
+              <button type="button" className="btn-primary" onClick={saveContactPerson2Fields}>
+                Save contact (2)
+              </button>
+            </div>
+          ) : null}
         </div>
         {error ? <div className="text-xs text-red-600 mt-2">{error}</div> : null}
         {dn && (!hasInvoice || !hasPackageType) ? (
@@ -1710,60 +1865,61 @@ export default function DeliveryNote() {
             </div>
           </div>
 
-          {/* DELIVERY SECTION */}
-          <div className="dn-delivery">
-            <div className="dn-delivery-left">
-              <div className="lbl">Delivery to:</div>
+          {/* DELIVERY + CONTACTS — shared label column so “Delivery to” lines up with Contact Person */}
+          <div className="dn-address-contact-block">
+            <div className="dn-delivery">
+              <div className="dn-delivery-left">
+                <div className="lbl">Delivery to:</div>
+              </div>
+              <div className="dn-delivery-content">
+                {String(view?.customer_name || '').trim() ? (
+                  <div className="dn-delivery-name">{view.customer_name}</div>
+                ) : null}
+                {String(view?.delivery_address || '').trim() ? (
+                  <div className="dn-delivery-addr">{view.delivery_address}</div>
+                ) : null}
+                {String(view?.city_name || '').trim() ? (
+                  <div className="dn-delivery-addr">{view.city_name}</div>
+                ) : null}
+                {String(view?.gps || '').trim() ? (
+                  <a className="dn-link" href={view.gps} target="_blank" rel="noreferrer">
+                    {view.gps}
+                  </a>
+                ) : null}
+              </div>
             </div>
-            <div className="dn-delivery-content">
-              {String(view?.customer_name || '').trim() ? (
-                <div className="dn-delivery-name">{view.customer_name}</div>
-              ) : null}
-              {String(view?.delivery_address || '').trim() ? (
-                <div className="dn-delivery-addr">{view.delivery_address}</div>
-              ) : null}
-              {String(view?.city_name || '').trim() ? (
-                <div className="dn-delivery-addr">{view.city_name}</div>
-              ) : null}
-              {String(view?.gps || '').trim() ? (
-                <a className="dn-link" href={view.gps} target="_blank" rel="noreferrer">
-                  {view.gps}
-                </a>
-              ) : null}
-            </div>
+
+            {String(view?.contact_person || '').trim() || String(view?.contact_number || '').trim() ? (
+              <div className="dn-contact dn-contact-1row">
+                <div className="lbl">Contact Person:</div>
+                <div className="dn-inline-underline">
+                  <span className="dn-under-text">
+                    {[view?.contact_person, view?.contact_number].filter(Boolean).join(' - ')}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+
+            {String(view?.contact_person_2 || '').trim() || String(view?.contact_number_2 || '').trim() ? (
+              <div className="dn-contact dn-contact-2">
+                <div className="lbl">Contact Person:</div>
+                <div className="dn-inline-underline">
+                  <span className="dn-under-text">
+                    {[view?.contact_person_2, view?.contact_number_2].filter(Boolean).join(' - ')}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+
+            {String(view?.deliver_to_remarks || '').trim() ? (
+              <div className="dn-contact dn-contact-remarks">
+                <div className="lbl">Delivery remarks:</div>
+                <div className="dn-inline-underline">
+                  <span className="dn-under-text whitespace-pre-wrap">{String(view.deliver_to_remarks).trim()}</span>
+                </div>
+              </div>
+            ) : null}
           </div>
-
-          {/* CONTACT SECTION */}
-          {String(view?.contact_person || '').trim() || String(view?.contact_number || '').trim() ? (
-            <div className="dn-contact dn-contact-1row">
-              <div className="lbl">Contact Person:</div>
-              <div className="dn-inline-underline">
-                <span className="dn-under-text">
-                  {[view?.contact_person, view?.contact_number].filter(Boolean).join(' - ')}
-                </span>
-              </div>
-            </div>
-          ) : null}
-
-          {String(view?.contact_person_2 || '').trim() || String(view?.contact_number_2 || '').trim() ? (
-            <div className="dn-contact dn-contact-2">
-              <div className="lbl">2nd Contact:</div>
-              <div className="dn-inline-underline">
-                <span className="dn-under-text">
-                  {[view?.contact_person_2, view?.contact_number_2].filter(Boolean).join(' - ')}
-                </span>
-              </div>
-            </div>
-          ) : null}
-
-          {String(view?.deliver_to_remarks || '').trim() ? (
-            <div className="dn-contact dn-contact-remarks">
-              <div className="lbl">Delivery remarks:</div>
-              <div className="dn-inline-underline">
-                <span className="dn-under-text whitespace-pre-wrap">{String(view.deliver_to_remarks).trim()}</span>
-              </div>
-            </div>
-          ) : null}
 
           {/* ITEM TABLE */}
           <table className="dn-grid">
@@ -1908,15 +2064,15 @@ export default function DeliveryNote() {
           background: #fff;
         }
         .dn-top { display: grid; grid-template-columns: 1fr 0.9fr 0.85fr; gap: 10px; align-items: start; }
-        /* Logo must be on top, company details below */
+        /* Logo + company first line — slightly larger for readability */
         .dn-company { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
-        .dn-logo { width: 170px; height: 60px; object-fit: contain; }
+        .dn-logo { width: 200px; height: 72px; object-fit: contain; }
         .dn-company-text { padding-top: 0; }
-        .dn-company-name { font-weight: 700; font-size: 15px; }
+        .dn-company-name { font-weight: 700; font-size: 17px; }
         .dn-company-name-red { color: #c1121f; }
         .dn-company-address { font-size: 11px; line-height: 1.2; margin-top: 2px; }
         .dn-company-tel { font-size: 11px; margin-top: 4px; }
-        .dn-title-block { text-align: center; padding-top: 4px; }
+        .dn-title-block { text-align: center; padding-top: 8px; align-self: start; }
         /* Prevent DELIVERY NOTE wrapping/overlapping */
         .dn-title { font-weight: 900; font-size: 24px; letter-spacing: 1px; line-height: 1; white-space: nowrap; }
         .dn-declaration-line { display: none; }
@@ -1945,16 +2101,29 @@ export default function DeliveryNote() {
           text-overflow: ellipsis;
         }
 
-        /* Delivery block should support multi-line address + Google links */
-        .dn-delivery { display: grid; grid-template-columns: 95px 1fr; gap: 6px; align-items: start; margin-top: 10px; }
+        /* Delivery + contact share one label column so rows align */
+        .dn-address-contact-block { margin-top: 10px; }
+        .dn-address-contact-block .dn-delivery,
+        .dn-address-contact-block .dn-contact {
+          display: grid;
+          grid-template-columns: 95px 1fr;
+          gap: 6px;
+          align-items: start;
+        }
+        .dn-address-contact-block .dn-delivery { margin-top: 0; }
+        .dn-address-contact-block .dn-contact { margin-top: 6px; }
+        .dn-address-contact-block .dn-contact-1row { margin-top: 8px; }
+
+        /* Delivery block */
+        .dn-delivery { display: grid; grid-template-columns: 95px 1fr; gap: 6px; align-items: start; margin-top: 0; }
         .dn-delivery .lbl { font-size: 10px; font-weight: 700; padding-top: 1px; }
         .dn-delivery-content { min-height: 22px; font-size: 11px; line-height: 1.25; white-space: pre-wrap; }
         .dn-delivery-name { font-weight: 700; }
         .dn-delivery-addr { margin-top: 1px; white-space: pre-wrap; }
         .dn-link { display: inline-block; margin-top: 2px; color: #0b5bd3; text-decoration: underline; word-break: break-all; }
 
-        .dn-contact { display: grid; grid-template-columns: 120px 1fr; align-items: end; gap: 6px; margin-top: 8px; }
-        .dn-contact-1row { grid-template-columns: 120px 1fr; align-items: baseline; }
+        .dn-contact { display: grid; grid-template-columns: 95px 1fr; align-items: end; gap: 6px; margin-top: 8px; }
+        .dn-contact-1row { grid-template-columns: 95px 1fr; align-items: baseline; }
         .dn-inline-underline { display: inline-flex; align-items: baseline; }
         .dn-contact-2 { margin-top: 4px; }
         .dn-contact .lbl { font-size: 10px; font-weight: 700; }

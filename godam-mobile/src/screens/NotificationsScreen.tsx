@@ -90,6 +90,7 @@ export default function NotificationsScreen({ navigation }: Props) {
           const unread = !item.read_at;
           const data = parseData(item.data_json);
           const orderId = typeof data?.outbound_order_id === 'number' ? data.outbound_order_id : null;
+          const taskId = typeof data?.task_id === 'number' ? data.task_id : null;
           return (
             <Pressable
               style={({ pressed }) => [styles.card, unread && styles.cardUnread, pressed && { opacity: 0.92 }]}
@@ -98,6 +99,12 @@ export default function NotificationsScreen({ navigation }: Props) {
                   if (unread) await markNotificationRead(item.id);
                   if (orderId) {
                     navigation.navigate('OrderDetail', { orderId });
+                    return;
+                  }
+                  // Delivery notifications deep-link to the driver task view (created by /api/delivery-notes/:id/confirm).
+                  if (taskId) {
+                    navigation.navigate('DeliveryDetail', { taskId });
+                    return;
                   } else {
                     await load();
                   }

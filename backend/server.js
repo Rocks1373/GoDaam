@@ -2,6 +2,18 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const cookieParser = require('cookie-parser');
+
+const huaweiStreamlit = require('./huaweiStreamlitAutostart');
+huaweiStreamlit.registerLifecycleHooks();
+
+const {
+  streamlitProxyGate,
+  createHuaweiGodamStreamlitProxy,
+  attachStreamlitUpgrade,
+} = require('./huaweiGodamStreamlitProxy');
+const huaweiStreamlitProxyBundle = createHuaweiGodamStreamlitProxy();
+const HUAWEI_GODAM_STREAMLIT_BASE = huaweiStreamlitProxyBundle.base;
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -51,8 +63,15 @@ function buildCorsOptions() {
 }
 
 app.use(cors(buildCorsOptions()));
+app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+app.use(
+  `/${HUAWEI_GODAM_STREAMLIT_BASE}`,
+  streamlitProxyGate,
+  huaweiStreamlitProxyBundle.proxy
+);
 
 // Public routes
 app.get('/api/health', (_req, res) => {
@@ -110,7 +129,9 @@ app.use('/api/users', ...webAuth, require('./routes/users'));
 app.use('/api/roles', ...webAuth, require('./routes/roles'));
 app.use('/api/admin/picked-orders', ...webAuth, requireAdmin, require('./routes/admin-picked'));
 app.use('/api/admin/maintenance', ...webAuth, requireAdmin, require('./routes/admin-maintenance'));
+app.use('/api/admin/mobile-app', ...webAuth, requireAdmin, require('./routes/admin-mobile-app'));
 app.use('/api/pick-change-requests', ...webAuth, requireAdmin, require('./routes/pick-change-requests'));
+app.use('/api/ai', ...webAuth, require('./routes/ai'));
 
 app.use('/api/notifications', requireAuth, require('./routes/notifications'));
 
@@ -162,6 +183,8 @@ app.use((err, _req, res, _next) => {
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Backend listening on 0.0.0.0:${PORT}`);
+  attachStreamlitUpgrade(server, huaweiStreamlitProxyBundle.proxy, HUAWEI_GODAM_STREAMLIT_BASE);
+  huaweiStreamlit.startHuaweiStreamlitIfEnabled();
 });
 
 server.on('error', (err) => {

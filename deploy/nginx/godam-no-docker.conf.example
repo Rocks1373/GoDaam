@@ -1,0 +1,61 @@
+# Nginx: static Vite build + reverse proxy to Node on loopback (no Docker).
+# Adjust server_name, TLS, and root to match your VPS.
+#
+# Prereqs on VPS:
+#   1) Clone repo to e.g. /var/www/godaam
+#   2) cd /var/www/godaam && npm ci && npm run build
+#   3) cd backend && npm ci
+#   4) Create /etc/godaam/backend.env with at least:
+#        JWT_SECRET=...
+#        PORT=3001
+#        CORS_ORIGIN=https://your.domain,https://www.your.domain
+#      (or CORS_ALLOW_ALL=0 and list exact origins)
+#   5) Ensure SQLite DB + uploads dirs exist and are writable by the service user
+#
+# Install:
+#   sudo cp deploy/nginx/godam-no-docker.conf.example /etc/nginx/sites-available/godam
+#   sudo ln -sf /etc/nginx/sites-available/godam /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+
+server {
+    listen 80;
+    server_name godam.example.com;
+
+    root /var/www/godaam/frontend/dist;
+    index index.html;
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript application/xml image/svg+xml;
+
+    client_max_body_size 25m;
+
+    location = /LOGO.png {
+        root /var/www/godaam/frontend/dist;
+        default_type image/png;
+        expires 7d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location /api {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    location /templates {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+# For TLS, use certbot or your host panel; often certbot inserts a second server {}
+# block on port 443. Keep the same location /api and /templates blocks there.

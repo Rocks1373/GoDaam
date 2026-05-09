@@ -4,7 +4,7 @@ const XLSX = require('xlsx');
 const { promisify } = require('util');
 
 const db = require('../db');
-const { requirePermission, requireAdmin } = require('../middleware/auth');
+const { requirePermission, requireAdmin, requireAnyPermission } = require('../middleware/auth');
 const MainStock = require('../models/MainStock');
 const OutboundOrder = require('../models/OutboundOrder');
 const OutboundItem = require('../models/OutboundItem');
@@ -488,7 +488,7 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
 });
 
 /** Same as delivery-note deliver — deduct main_stock only here (sold_out_qty), insert sold_out + guard double delivery. */
-router.post('/:id/mark-delivered', requirePermission('can_upload_outbound'), async (req, res) => {
+router.post('/:id/mark-delivered', requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']), async (req, res) => {
   const orderId = Number(req.params.id);
   if (!orderId) return res.status(400).json({ error: 'Invalid id' });
   try {

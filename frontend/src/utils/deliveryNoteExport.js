@@ -78,7 +78,7 @@ export function buildDeliveryNoteExcelSheet({
   }
   const c2 = [view?.contact_person_2, view?.contact_number_2].filter(Boolean).join(' - ');
   if (String(c2).trim()) {
-    pushRow(rows, '2nd Contact:', c2);
+    pushRow(rows, 'Contact Person:', c2);
   }
   const rem = String(view?.deliver_to_remarks ?? '').trim();
   if (rem) {

@@ -80,38 +80,130 @@ html[data-card-scale='4'] {
   }
 
   body {
-    background-color: var(--surface-page);
+    background:
+      radial-gradient(circle at 18% 12%, rgba(20, 184, 166, 0.12), transparent 28rem),
+      radial-gradient(circle at 88% 6%, rgba(99, 102, 241, 0.11), transparent 24rem),
+      var(--surface-page);
     color: var(--text-primary);
     @apply text-xs antialiased;
   }
 }
 
 @layer components {
+  .app-shell {
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.08), transparent 38%),
+      radial-gradient(circle at 8% 0%, rgba(20, 184, 166, 0.12), transparent 26rem),
+      radial-gradient(circle at 100% 12%, rgba(99, 102, 241, 0.12), transparent 28rem),
+      var(--surface-page);
+  }
+
+  .app-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    backdrop-filter: blur(18px) saturate(145%);
+    box-shadow: 0 12px 38px -30px rgba(15, 23, 42, 0.45);
+  }
+
+  .app-workspace {
+    min-height: calc(100vh - 3.25rem);
+  }
+
+  .app-main {
+    border-radius: 1rem;
+  }
+
+  .app-sidebar-shell {
+    width: 3.75rem;
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(18px) saturate(145%);
+    transition:
+      width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 0.28s ease,
+      border-color 0.28s ease;
+  }
+
+  .app-sidebar-shell:hover,
+  .app-sidebar-shell:focus-within {
+    width: var(--sidebar-expanded-width, 160px);
+    border-color: var(--color-primary-border);
+    box-shadow:
+      var(--shadow-soft),
+      0 0 44px -30px var(--glow-primary);
+  }
+
+  .app-sidebar-shell aside {
+    transition: padding 0.25s ease;
+  }
+
+  .app-sidebar-shell:not(:hover):not(:focus-within) aside {
+    padding-left: 0.55rem;
+    padding-right: 0.55rem;
+  }
+
   .nav-sidebar-link {
     @apply flex items-center gap-2 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all border border-transparent;
     color: var(--nav-inactive-text);
+    min-height: 2.25rem;
+    position: relative;
+    overflow: hidden;
   }
 
   .nav-sidebar-link:hover {
     background-color: var(--nav-hover-bg);
+    color: var(--text-primary);
+    transform: translateX(1px);
   }
 
   .nav-sidebar-link-active {
-    background-color: var(--nav-active-bg);
+    background: var(--nav-active-bg);
     color: var(--nav-active-text);
     border-color: var(--nav-active-border);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 10px 30px -24px var(--glow-primary);
+  }
+
+  .app-sidebar-shell .nav-sidebar-link svg,
+  .app-sidebar-section-label svg {
+    filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.12));
+  }
+
+  .app-sidebar-shell:not(:hover):not(:focus-within) .nav-sidebar-link {
+    justify-content: center;
+    padding-left: 0.45rem;
+    padding-right: 0.45rem;
+  }
+
+  .app-sidebar-shell:not(:hover):not(:focus-within) .nav-sidebar-link span,
+  .app-sidebar-shell:not(:hover):not(:focus-within) .app-sidebar-section-label {
+    opacity: 0;
+    max-width: 0;
+    max-height: 0;
+    padding: 0;
+    margin: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .app-sidebar-shell .nav-sidebar-link span,
+  .app-sidebar-section-label {
+    transition:
+      opacity 0.18s ease,
+      max-width 0.2s ease,
+      max-height 0.2s ease;
   }
 
   .btn-primary {
     @apply text-white font-semibold text-xs py-1.5 px-2.5 rounded-md border border-transparent
            transition-all duration-150 shadow-sm
            focus:outline-none focus:ring-1 focus:ring-offset-1;
-    background-color: var(--color-primary);
-    box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+    background: linear-gradient(135deg, var(--color-primary), #6366f1);
+    box-shadow: 0 12px 28px -20px var(--glow-primary);
   }
 
   .btn-primary:hover {
-    background-color: var(--color-primary-hover);
+    background: linear-gradient(135deg, var(--color-primary-hover), #7c3aed);
+    transform: translateY(-1px);
   }
 
   .btn-primary:focus {
@@ -123,10 +215,12 @@ html[data-card-scale='4'] {
     background-color: var(--surface-card);
     color: var(--text-secondary);
     border: 1px solid var(--border-default);
+    backdrop-filter: blur(14px);
   }
 
   .btn-secondary:hover {
     background-color: var(--surface-muted);
+    border-color: var(--border-strong);
   }
 
   .btn-success {
@@ -154,6 +248,8 @@ html[data-card-scale='4'] {
     background-color: var(--surface-card);
     border-color: var(--border-default);
     color: var(--text-primary);
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(16px);
   }
 
   /* Beat Tailwind `hover:bg-gray-50` on rows: themed hover + readable text (fixes dark mode). */
@@ -170,16 +266,31 @@ html[data-card-scale='4'] {
   }
 
   .input-field {
-    @apply w-full px-2 py-1.5 rounded-md transition-all text-xs;
+    @apply w-full px-3 py-2 rounded-md transition-all text-xs;
+    min-height: 2.4rem;
     border: 1px solid var(--border-strong);
     background-color: var(--surface-card);
     color: var(--text-primary);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   }
 
   .input-field:focus {
     outline: none;
-    box-shadow: 0 0 0 1px var(--ring-primary);
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--ring-primary) 18%, transparent),
+      0 12px 28px -24px var(--glow-primary);
     border-color: var(--color-primary);
+  }
+
+  textarea.input-field,
+  textarea {
+    min-height: 6.5rem;
+    resize: both;
+  }
+
+  input.input-field {
+    resize: horizontal;
+    min-width: 8rem;
   }
 
   /* Shared dense table cells (used across list pages). */
@@ -187,6 +298,7 @@ html[data-card-scale='4'] {
     @apply px-2 py-1.5 text-left text-[10px] font-bold uppercase tracking-wide;
     color: var(--text-muted);
     background-color: var(--surface-muted);
+    border-bottom: 1px solid var(--border-default);
   }
 
   .tbl-td {
@@ -212,6 +324,8 @@ html[data-card-scale='4'] {
     background-color: var(--surface-card);
     border-color: var(--border-default);
     padding: var(--toolbar-pad, 0.5rem);
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(16px);
   }
 
   .display-stat-grid {
@@ -220,6 +334,17 @@ html[data-card-scale='4'] {
 
   .display-stat-card {
     padding: var(--ds-pad, 0.625rem);
+    box-shadow: var(--shadow-soft);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .display-stat-card::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.18), transparent 48%);
+    pointer-events: none;
   }
 
   .display-stat-card .ds-title {
@@ -238,6 +363,8 @@ html[data-card-scale='4'] {
 
   .display-card {
     padding: var(--dc-pad, 0.75rem);
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(16px);
   }
 
   .display-card .dc-head {
@@ -448,6 +575,160 @@ html[data-card-scale='4'] {
   cursor: not-allowed;
 }
 
+/* Antigravity-style login hero (white SaaS / technical field). */
+.godam-antigravity-root {
+  --mx: 0;
+  --my: 0;
+  background:
+    radial-gradient(circle at 50% 34%, rgba(219, 234, 254, 0.9), transparent 26rem),
+    radial-gradient(circle at 14% 22%, rgba(191, 219, 254, 0.45), transparent 22rem),
+    radial-gradient(circle at 88% 78%, rgba(186, 230, 253, 0.42), transparent 22rem),
+    #ffffff;
+  color: #0f172a;
+}
+
+.godam-antigravity-static {
+  background-image:
+    linear-gradient(rgba(37, 99, 235, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.045) 1px, transparent 1px),
+    radial-gradient(circle at center, transparent 0 18%, rgba(37, 99, 235, 0.055) 18.2%, transparent 18.7%, transparent 32%, rgba(37, 99, 235, 0.04) 32.2%, transparent 32.6%);
+  background-position:
+    center,
+    center,
+    center 38%;
+  background-size:
+    42px 42px,
+    42px 42px,
+    min(68rem, 110vw) min(68rem, 110vw);
+  mask-image: radial-gradient(ellipse at center, black 0%, black 58%, transparent 88%);
+}
+
+.godam-antigravity-field {
+  pointer-events: none;
+  opacity: 0.96;
+}
+
+.godam-antigravity-hero {
+  transform: translate3d(calc(var(--mx) * -10px), calc(var(--my) * -8px), 0);
+  transition: transform 0.18s ease-out;
+}
+
+.godam-brand-mark,
+.godam-login-card-shell,
+.godam-tech-icon {
+  transform: translate3d(calc(var(--mx) * 8px), calc(var(--my) * 7px), 0);
+  transition:
+    transform 0.28s ease,
+    box-shadow 0.28s ease,
+    border-color 0.28s ease;
+}
+
+.godam-brand-mark:hover,
+.godam-login-card-shell:hover {
+  transform: translate3d(calc(var(--mx) * 8px), calc(var(--my) * 7px - 3px), 0);
+}
+
+.godam-login-card-shell:hover {
+  border-color: rgba(37, 99, 235, 0.22);
+  box-shadow:
+    0 38px 110px -58px rgba(37, 99, 235, 0.4),
+    0 18px 42px -34px rgba(15, 23, 42, 0.45);
+}
+
+.godam-tech-icon {
+  width: 2.75rem;
+  height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #2563eb;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(147, 197, 253, 0.42);
+  box-shadow:
+    0 20px 46px -34px rgba(37, 99, 235, 0.62),
+    inset 0 1px 0 rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  animation: godam-tech-float 8s ease-in-out infinite;
+}
+
+.godam-tech-icon:nth-child(2n) {
+  animation-delay: -2.5s;
+}
+
+.godam-tech-icon:nth-child(3n) {
+  animation-delay: -4.5s;
+}
+
+.godam-login-status-row span:not([aria-hidden]) {
+  border: 1px solid rgba(147, 197, 253, 0.38);
+  background: rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  padding: 0.38rem 0.68rem;
+  box-shadow: 0 16px 34px -32px rgba(37, 99, 235, 0.55);
+}
+
+.godam-antigravity-root .godam-login-field {
+  min-height: 2.78rem;
+  border-radius: 0.95rem;
+  background: rgba(248, 250, 252, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  color: #0f172a;
+  padding: 0.78rem 0.95rem;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 14px 30px -28px rgba(15, 23, 42, 0.45);
+}
+
+.godam-antigravity-root .godam-login-field:focus {
+  border-color: rgba(37, 99, 235, 0.58);
+  background: #ffffff;
+  box-shadow:
+    0 0 0 4px rgba(37, 99, 235, 0.11),
+    0 18px 42px -34px rgba(37, 99, 235, 0.7);
+}
+
+.godam-antigravity-root .godam-login-submit {
+  min-height: 2.95rem;
+  border-radius: 999px;
+  color: #ffffff;
+  background: linear-gradient(135deg, #0f172a, #1d4ed8 54%, #0284c7);
+  box-shadow:
+    0 22px 45px -30px rgba(29, 78, 216, 0.85),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.godam-antigravity-root .godam-login-submit:hover:not(:disabled) {
+  filter: none;
+  transform: translateY(-2px);
+  box-shadow:
+    0 28px 58px -30px rgba(29, 78, 216, 0.92),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+}
+
+@keyframes godam-tech-float {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+  50% {
+    translate: 0 -10px;
+  }
+}
+
+@media (max-width: 640px) {
+  .godam-antigravity-static {
+    background-size:
+      34px 34px,
+      34px 34px,
+      42rem 42rem;
+    opacity: 0.7;
+  }
+
+  .godam-antigravity-field {
+    opacity: 0.68;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .godam-login-star-marquee-motion {
     animation: none !important;
@@ -477,5 +758,14 @@ html[data-card-scale='4'] {
   .godam-login-bg-shift,
   .godam-login-grid-x {
     animation: none !important;
+  }
+
+  .godam-antigravity-hero,
+  .godam-brand-mark,
+  .godam-login-card-shell,
+  .godam-tech-icon {
+    animation: none !important;
+    transform: none !important;
+    transition: none !important;
   }
 }
