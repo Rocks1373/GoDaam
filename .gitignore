@@ -14,12 +14,24 @@ build
 ~$*
 *.sqlite
 *.db
+*.sqlite-journal
 uploads/
 coverage/
 .DS_Store
 .vscode/
 .idea/
 .claude/
+
+# Editor/AI backup files — never commit
+*.bak
+*.bak.ai
+*.orig
+*.rej
+
+# Production-ish files that should never be in repo
+backend/backups/
+**/warehouse.db*
+**/huawei_godam.db*
 
 # Large APK hosted next to web app but not stored in Git (deploy via rsync/scp)
 frontend/public/downloads/*.apk
@@ -29,6 +41,9 @@ releases/*.apk
 /test/godam-mobile/
 /test/.pulled-backend.env
 /test/GoDam-test-release.apk
+
+# Local-only exports, temp tool output, and ad-hoc documents
+local-nonessential-archive/
 
 # Local tooling / logs
 .godam/
