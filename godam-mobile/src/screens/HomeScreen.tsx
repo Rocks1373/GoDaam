@@ -27,7 +27,7 @@ type QuickActionRoute =
   | 'PickedOrders'
   | 'ScanRack'
   | 'Receiving'
-  | 'Upcoming'
+  | 'Settings'
   | 'MainStockCheck'
   | 'StockByRackCheck'
   | 'DeliveryList';
@@ -38,6 +38,7 @@ type ActionItem = {
   subtitle: string;
   icon: keyof typeof Ionicons.glyphMap;
   route: QuickActionRoute;
+  badge?: number;
 };
 
 const ACTIONS: ActionItem[] = [
@@ -77,11 +78,11 @@ const ACTIONS: ActionItem[] = [
     route: 'Receiving',
   },
   {
-    key: 'upcoming',
-    title: 'Upcoming Orders',
-    subtitle: 'Plan ahead',
-    icon: 'calendar-outline',
-    route: 'Upcoming',
+    key: 'settings',
+    title: 'Settings',
+    subtitle: 'Change password & preferences',
+    icon: 'settings-outline',
+    route: 'Settings',
   },
   {
     key: 'mainStock',
@@ -111,6 +112,10 @@ export default function HomeScreen({ navigation }: Props) {
     notifications_unread: 0,
     orders_unseen: 0,
     inbound_putaway_pending: 0,
+    notif_unread_orders: 0,
+    notif_unread_delivery: 0,
+    notif_unread_inbound: 0,
+    notif_unread_picked: 0,
   });
   const [pushNote, setPushNote] = useState('');
   const [perms, setPerms] = useState<Record<string, boolean>>({});
@@ -145,7 +150,15 @@ export default function HomeScreen({ navigation }: Props) {
       setSummary(s);
       setOrderTotal(Array.isArray(list) ? list.length : 0);
     } catch {
-      setSummary({ notifications_unread: 0, orders_unseen: 0, inbound_putaway_pending: 0 });
+      setSummary({
+        notifications_unread: 0,
+        orders_unseen: 0,
+        inbound_putaway_pending: 0,
+        notif_unread_orders: 0,
+        notif_unread_delivery: 0,
+        notif_unread_inbound: 0,
+        notif_unread_picked: 0,
+      });
     }
   }, []);
 
@@ -164,6 +177,27 @@ export default function HomeScreen({ navigation }: Props) {
       };
     }, [refreshSummary])
   );
+
+  useEffect(() => {
+    let sub: { remove: () => void } | undefined;
+    let cancelled = false;
+    void (async () => {
+      if (shouldSkipExpoNotifications()) return;
+      try {
+        const Notifications = await import('expo-notifications');
+        if (cancelled) return;
+        sub = Notifications.addNotificationReceivedListener(() => {
+          void refreshSummary();
+        });
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+      sub?.remove();
+    };
+  }, [refreshSummary]);
 
   useLayoutEffect(() => {
     const n = summary.notifications_unread;
@@ -219,28 +253,58 @@ export default function HomeScreen({ navigation }: Props) {
   }, [perms, permissionsLoaded, roleLabel]);
 
   const actionItems = useMemo(() => {
+    const pickAlerts = summary.orders_unseen + (summary.notif_unread_orders ?? 0);
+    const deliveryAlerts = summary.notif_unread_delivery ?? 0;
+    const recvAlerts = summary.inbound_putaway_pending + (summary.notif_unread_inbound ?? 0);
+    const pickedAlerts = summary.notif_unread_picked ?? 0;
     return visibleActions.map((item) => {
       if (item.key === 'orders') {
         return {
           ...item,
+          badge: pickAlerts,
           subtitle:
-            summary.orders_unseen > 0
-              ? `${summary.orders_unseen} not opened · Assigned & pick lists`
+            pickAlerts > 0
+              ? `${summary.orders_unseen} queue not opened · ${summary.notif_unread_orders ?? 0} unread alerts`
               : item.subtitle,
+        };
+      }
+      if (item.key === 'delivery') {
+        return {
+          ...item,
+          badge: deliveryAlerts,
+          subtitle:
+            deliveryAlerts > 0 ? `${deliveryAlerts} unread delivery alerts` : item.subtitle,
+        };
+      }
+      if (item.key === 'pickedOrders') {
+        return {
+          ...item,
+          badge: pickedAlerts,
+          subtitle:
+            pickedAlerts > 0 ? `${pickedAlerts} unread pick confirmations` : item.subtitle,
         };
       }
       if (item.key === 'receiving') {
         return {
           ...item,
+          badge: recvAlerts,
           subtitle:
             summary.inbound_putaway_pending > 0
               ? `${summary.inbound_putaway_pending} batch(es) need putaway · Inbound & putaway`
               : item.subtitle,
         };
       }
-      return item;
+      return { ...item, badge: 0 };
     });
-  }, [visibleActions, summary.orders_unseen, summary.inbound_putaway_pending]);
+  }, [
+    visibleActions,
+    summary.orders_unseen,
+    summary.inbound_putaway_pending,
+    summary.notif_unread_orders,
+    summary.notif_unread_delivery,
+    summary.notif_unread_inbound,
+    summary.notif_unread_picked,
+  ]);
 
   return (
     <View style={styles.screen}>
@@ -299,8 +363,10 @@ export default function HomeScreen({ navigation }: Props) {
             <View>
               <Text style={styles.statLabel}>Assigned orders</Text>
               <Text style={styles.statValue}>{orderTotal}</Text>
-              {summary.orders_unseen > 0 ? (
-                <Text style={styles.statNewHint}>{summary.orders_unseen} new to open</Text>
+              {summary.orders_unseen + (summary.notif_unread_orders ?? 0) > 0 ? (
+                <Text style={styles.statNewHint}>
+                  {summary.orders_unseen} new to open · {summary.notif_unread_orders ?? 0} alerts
+                </Text>
               ) : null}
             </View>
           </View>
@@ -328,15 +394,10 @@ export default function HomeScreen({ navigation }: Props) {
                   </View>
                   <View style={styles.tileTitleRow}>
                     <Text style={styles.tileTitle}>{item.title}</Text>
-                    {item.key === 'orders' && summary.orders_unseen > 0 ? (
-                      <View style={styles.tileInlineBadge}>
-                        <Text style={styles.tileInlineBadgeText}>{String(summary.orders_unseen)}</Text>
-                      </View>
-                    ) : null}
-                    {item.key === 'receiving' && summary.inbound_putaway_pending > 0 ? (
+                    {typeof item.badge === 'number' && item.badge > 0 ? (
                       <View style={styles.tileInlineBadge}>
                         <Text style={styles.tileInlineBadgeText}>
-                          {String(summary.inbound_putaway_pending)}
+                          {item.badge > 99 ? '99+' : String(item.badge)}
                         </Text>
                       </View>
                     ) : null}

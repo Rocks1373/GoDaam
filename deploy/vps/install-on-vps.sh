@@ -28,7 +28,7 @@ JWT_SECRET=${JWT}
 CORS_ORIGIN=https://${DOMAIN},http://${DOMAIN}
 
 # Huawei module (optional Streamlit iframe at https://${DOMAIN}/huawei-godam-app → Node proxy → :8501)
-# Uncomment after copying GoDam/GoDam-1.0 or plugins/GoDam-1.0 and running: npm run setup:huawei-godam
+# Uncomment after copying **plugins/GoDam-1.0** (canonical) or legacy GoDam/GoDam-1.0 and running: npm run setup:huawei-godam
 # HUAWEI_GODAM_STREAMLIT_AUTOSTART=1
 # HUAWEI_GODAM_STREAMLIT_BASE_PATH=huawei-godam-app
 # HUAWEI_GODAM_STREAMLIT_PORT=8501
@@ -42,7 +42,7 @@ fi
 
 cd "$APP"
 # Huawei GoDam Python/Streamlit (skip if folder not present yet).
-if [[ -f "$APP/GoDam/GoDam-1.0/requirements.txt" ]] || [[ -f "$APP/plugins/GoDam-1.0/requirements.txt" ]]; then
+if [[ -f "$APP/plugins/GoDam-1.0/requirements.txt" ]] || [[ -f "$APP/GoDam/GoDam-1.0/requirements.txt" ]]; then
   npm run setup:huawei-godam
 else
   echo "No GoDam-1.0 on disk — install later, then: npm run setup:huawei-godam and enable HUAWEI_GODAM_STREAMLIT_AUTOSTART in /etc/godaam/backend.env"

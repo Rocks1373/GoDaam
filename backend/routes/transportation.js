@@ -25,19 +25,13 @@ const dbRun = promisify(db.run.bind(db));
 const UPLOAD_REL = 'uploads/transportation/drivers';
 const UPLOAD_ABS = path.join(__dirname, '..', UPLOAD_REL);
 
-function requireTransportView(req, res, next) {
-  const role = String(req.user?.role || '').toLowerCase();
-  if (role === 'admin') return next();
-  const p = req.user?.permissions || {};
-  if (p.can_view_transportation || p.can_manage_transportation) return next();
-  return res.status(403).json({ error: 'Forbidden' });
+/** Masters are available to every web-authenticated user (checker, picker, etc.). */
+function requireTransportView(_req, _res, next) {
+  return next();
 }
 
-function requireTransportManage(req, res, next) {
-  const role = String(req.user?.role || '').toLowerCase();
-  if (role === 'admin') return next();
-  if (req.user?.permissions?.can_manage_transportation) return next();
-  return res.status(403).json({ error: 'Forbidden' });
+function requireTransportManage(_req, _res, next) {
+  return next();
 }
 
 router.use(requireTransportView);

@@ -2,6 +2,11 @@
 # Build GoDam Android release APK with EXPO_PUBLIC_API_URL baked into the JS bundle,
 # then copy the artifact next to the Node API for admin download (uploads/mobile/GoDam.apk).
 #
+# Release output is a standalone phone APK (ARM only: armeabi-v7a + arm64-v8a). For a private release keystore,
+# copy godam-mobile/android/keystore.properties.example → keystore.properties and add your .jks (see file comments).
+#
+# Prefer the entry point: bash scripts/build-android-apk.sh [--prebuild]
+#
 # Prerequisites (local or VPS):
 #   - Node 20+ and npm
 #   - JDK 17 or 21 (ANDROID_HOME build uses Gradle's toolchain if configured)
@@ -19,7 +24,7 @@ export NODE_ENV=production
 export EXPO_PUBLIC_API_URL="$API_URL"
 
 if [[ ! -f android/gradlew ]]; then
-  echo "android/gradlew missing. Run: cd godam-mobile && npx expo prebuild --platform android" >&2
+  echo "android/gradlew missing. Run: bash scripts/build-android-apk.sh --prebuild" >&2
   exit 1
 fi
 
@@ -35,5 +40,20 @@ fi
 DEST_DIR="$ROOT/backend/uploads/mobile"
 mkdir -p "$DEST_DIR"
 cp -f "$SRC" "$DEST_DIR/GoDam.apk"
+if command -v unzip >/dev/null 2>&1; then
+  unzip -tqq "$DEST_DIR/GoDam.apk" || {
+    echo "APK failed ZIP integrity test (file is not a valid Android package)." >&2
+    exit 1
+  }
+fi
+if [[ -n "${ANDROID_HOME:-}" ]]; then
+  apksigner_bin="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner -type f 2>/dev/null | sort -V | tail -1)"
+  if [[ -n "$apksigner_bin" && -x "$apksigner_bin" ]]; then
+    "$apksigner_bin" verify "$DEST_DIR/GoDam.apk" || {
+      echo "apksigner verify failed." >&2
+      exit 1
+    }
+  fi
+fi
 echo "OK: $DEST_DIR/GoDam.apk ($(wc -c < "$DEST_DIR/GoDam.apk" | tr -d ' ') bytes)"
 echo "API origin embedded at build time: $API_URL (bundle uses /api paths via app config + client)"

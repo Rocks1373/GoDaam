@@ -18,6 +18,9 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+# Release signing (never commit real secrets)
+keystore.properties
+
 # Metro
 .metro-health-check*
 

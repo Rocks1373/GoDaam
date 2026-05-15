@@ -9,6 +9,7 @@
  * EAS cannot patch this file automatically; keep `extra.eas.projectId` in app.json when using EAS Build.
  */
 const appJson = require('./app.json');
+const { VPS_BASELINE_ORIGIN } = require('./baseline-api.js');
 
 function decodeEnvB64(name) {
   const v = process.env[name];
@@ -25,7 +26,7 @@ function decodeEnvB64(name) {
 const apiUrl =
   (process.env.EXPO_PUBLIC_API_URL && String(process.env.EXPO_PUBLIC_API_URL).trim()) ||
   decodeEnvB64('EXPO_PUBLIC_API_URL_B64') ||
-  '';
+  VPS_BASELINE_ORIGIN;
 
 const mobileApiKey =
   (process.env.EXPO_PUBLIC_MOBILE_API_KEY && String(process.env.EXPO_PUBLIC_MOBILE_API_KEY).trim()) ||

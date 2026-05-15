@@ -1,9 +1,8 @@
-const sqlite3 = require('sqlite3').verbose();
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
+const db = require('../db');
 
 class StockByRack {
   constructor() {
-    this.db = new sqlite3.Database(DB_PATH);
+    this.db = db;
   }
 
   tableName() {

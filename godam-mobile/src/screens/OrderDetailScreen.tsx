@@ -13,10 +13,14 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
+import { formatApiError } from '../api/client';
 import { getOrder, getOrderStockOverview, markOrderSeen, type StockOverviewLine } from '../api/ordersApi';
-import { confirmItem, confirmOrder, requestPickChange } from '../api/pickingApi';
+import { confirmItem, confirmOrder, confirmItemFromRack, confirmItemWithNewRack, requestPickChange } from '../api/pickingApi';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'OrderDetail'>;
+
+/** Float tolerance for qty comparisons (Hermes throws if an undeclared name is used). */
+const QTY_EPS = 1e-6;
 
 type ItemRow = {
   id: number;
@@ -35,13 +39,28 @@ type FifoRow = {
   outbound_item_id: number;
   material?: string;
   sap_part_number?: string;
+  description?: string;
+  parent_part_number?: string;
+  outbound_bom_requirement_id?: number;
+  is_bom_expansion?: number;
   rack_location: string;
   suggested_qty: number;
   fifo_sequence: number;
   fifo_picked_qty?: number;
 };
 
-const QTY_EPS = 1e-6;
+/** BOM FIFO lines are child qty; do not cap by parent remaining. */
+function exactPickQtyForFifo(
+  f: FifoRow & { max_for_rack?: number },
+  selectedItem: ItemRow | null
+): number {
+  const maxRack = Number((f as { max_for_rack?: number }).max_for_rack ?? 0);
+  if (!(maxRack > 0)) return 0;
+  const fifoBom = Boolean(f.outbound_bom_requirement_id || f.is_bom_expansion);
+  if (fifoBom) return maxRack;
+  const remaining = selectedItem ? remainingForLine(selectedItem) : 0;
+  return Math.max(0, Math.min(maxRack, remaining));
+}
 
 function parseQtyInput(s: string): number | null {
   const n = Number(String(s).trim().replace(',', '.'));
@@ -158,6 +177,15 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
   const [selectedFifoId, setSelectedFifoId] = useState<number | null>(null);
   const [changeReason, setChangeReason] = useState('');
   const [pickModalOpen, setPickModalOpen] = useState(false);
+  const [pickMode, setPickMode] = useState<'fifo' | 'single_rack' | 'add_rack'>('fifo');
+  const [selectedSingleRack, setSelectedSingleRack] = useState<{
+    rackId: number;
+    obrId: number | null;
+    rackLoc: string;
+    maxQty: number;
+  } | null>(null);
+  const [newRackLocation, setNewRackLocation] = useState('');
+  const [addRackBomReqId, setAddRackBomReqId] = useState<number | null>(null);
   const [pickQty, setPickQty] = useState('');
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [reqRack, setReqRack] = useState('');
@@ -170,8 +198,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
       void markOrderSeen(orderId).catch(() => {});
       return d;
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { error?: string } } };
-      Alert.alert('Load failed', err.response?.data?.error || 'Error');
+      Alert.alert('Load failed', formatApiError(e));
       return null;
     }
   };
@@ -241,7 +268,91 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
     [fifoOptionsForItem, selectedFifoId]
   );
 
+  type SingleRackOpt = {
+    key: string;
+    rackId: number;
+    rackLoc: string;
+    avail: number;
+    qty: number;
+    obrId: number | null;
+    label: string;
+  };
+
+  const singleRackOptions = useMemo((): SingleRackOpt[] => {
+    if (pickMode !== 'single_rack' || !selectedItemId) return [];
+    const sl = stockLines.find((x) => Number(x.outbound_item_id) === Number(selectedItemId));
+    if (!sl) return [];
+    const out: SingleRackOpt[] = [];
+    if (sl.is_bom_parent && Array.isArray(sl.bom_child_lines) && sl.bom_child_lines.length > 0) {
+      for (const bl of sl.bom_child_lines) {
+        const obrId = Number(bl.outbound_bom_requirement_id) || 0;
+        const remC = Number(bl.remaining_child_qty) || 0;
+        if (remC <= QTY_EPS) continue;
+        const racks = Array.isArray(bl.racks) ? bl.racks : [];
+        for (const raw of racks) {
+          const r = raw as Record<string, unknown>;
+          const rackId = Number(r.id);
+          const avail = Number(r.available_qty) || 0;
+          if (!(rackId > 0) || avail <= QTY_EPS) continue;
+          const rackLoc = String(r.rack_location || '').trim();
+          const qty = Math.min(remC, avail);
+          const cpn = String(bl.child_part_number || '').trim() || 'child';
+          out.push({
+            key: `obr${obrId}-rack${rackId}`,
+            rackId,
+            rackLoc,
+            avail,
+            qty,
+            obrId: obrId || null,
+            label: `${cpn} · ${rackLoc} · pick up to ${qty}`,
+          });
+        }
+      }
+    } else {
+      const selIt = items.find((it) => Number(it.id) === Number(selectedItemId)) || null;
+      const rem = selIt ? remainingForLine(selIt) : 0;
+      if (rem <= QTY_EPS) return [];
+      const racks = Array.isArray(sl.racks) ? sl.racks : [];
+      for (const raw of racks) {
+        const r = raw as Record<string, unknown>;
+        const rackId = Number(r.id);
+        const avail = Number(r.available_qty) || 0;
+        if (!(rackId > 0) || avail <= QTY_EPS) continue;
+        const rackLoc = String(r.rack_location || '').trim();
+        const qty = Math.min(rem, avail);
+        out.push({
+          key: `rack${rackId}`,
+          rackId,
+          rackLoc,
+          avail,
+          qty,
+          obrId: null,
+          label: `${rackLoc} · avail ${avail} · pick up to ${qty}`,
+        });
+      }
+    }
+    return out;
+  }, [pickMode, selectedItemId, stockLines, items]);
+
+  const bomChildPickOptions = useMemo(() => {
+    if (!selectedItemId || pickMode !== 'add_rack') return [];
+    const sl = stockLines.find((x) => Number(x.outbound_item_id) === Number(selectedItemId));
+    if (!sl?.bom_child_lines?.length) return [];
+    return sl.bom_child_lines
+      .filter((bl) => Number(bl.remaining_child_qty) > QTY_EPS)
+      .map((bl) => ({
+        id: Number(bl.outbound_bom_requirement_id) || 0,
+        label: `${String(bl.child_part_number || '').trim()} · rem ${String(bl.remaining_child_qty ?? '')}`,
+        rem: Number(bl.remaining_child_qty) || 0,
+      }))
+      .filter((o) => o.id > 0);
+  }, [pickMode, selectedItemId, stockLines]);
+
   const openPickModal = (itemId: number) => {
+    setPickMode('fifo');
+    setSelectedSingleRack(null);
+    setNewRackLocation('');
+    setAddRackBomReqId(null);
     setSelectedItemId(itemId);
     const opts = fifos
       .filter((f) => Number(f.outbound_item_id) === Number(itemId))
@@ -257,9 +368,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
     if (opts.length === 1) {
       const only = opts[0];
       setSelectedFifoId(Number(only.id));
-      const maxRack = Number(only.max_for_rack ?? 0);
-      const remaining = selItem ? remainingForLine(selItem) : 0;
-      const exact = Math.max(0, Math.min(maxRack, remaining));
+      const exact = exactPickQtyForFifo(only as FifoRow & { max_for_rack?: number }, selItem);
       setPickQty(exact ? String(exact) : '');
     } else {
       setSelectedFifoId(null);
@@ -268,7 +377,142 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
     setPickModalOpen(true);
   };
 
+  const openSingleRackPickModal = (itemId: number) => {
+    setPickMode('single_rack');
+    setSelectedFifoId(null);
+    setSelectedSingleRack(null);
+    setNewRackLocation('');
+    setAddRackBomReqId(null);
+    setSelectedItemId(itemId);
+    setPickQty('');
+    setPickModalOpen(true);
+  };
+
+  function computeAddRackDefaultsForItemId(itemId: number): { qty: string; bomReqId: number | null } {
+    const sel = items.find((x) => Number(x.id) === Number(itemId)) ?? null;
+    const sl = stockLines.find((x) => Number(x.outbound_item_id) === Number(itemId));
+    if (sl?.bom_child_lines?.length) {
+      const first = sl.bom_child_lines.find((bl) => Number(bl.remaining_child_qty) > QTY_EPS);
+      if (first) {
+        const bid = Number(first.outbound_bom_requirement_id) || 0;
+        return {
+          qty: String(Number(first.remaining_child_qty) || ''),
+          bomReqId: bid > 0 ? bid : null,
+        };
+      }
+      return { qty: '', bomReqId: null };
+    }
+    return { qty: sel ? String(remainingForLine(sel)) : '', bomReqId: null };
+  }
+
+  const openAddRackPickModal = (itemId: number) => {
+    setPickMode('add_rack');
+    setSelectedFifoId(null);
+    setSelectedSingleRack(null);
+    setNewRackLocation('');
+    setSelectedItemId(itemId);
+    const d = computeAddRackDefaultsForItemId(itemId);
+    setAddRackBomReqId(d.bomReqId);
+    setPickQty(d.qty);
+    setPickModalOpen(true);
+  };
+
+  const afterPickSuccess = async (fresh: Record<string, unknown> | null) => {
+    setPickModalOpen(false);
+    setPickQty('');
+    setPickMode('fifo');
+    setSelectedSingleRack(null);
+    setNewRackLocation('');
+    setAddRackBomReqId(null);
+    if (fresh && orderFullyPicked(fresh)) {
+      try {
+        await confirmOrder(orderId);
+        await load();
+        Alert.alert(
+          'Order confirmed picked',
+          'Every line is complete. The order is now Picked (rack stock was updated on each pick).'
+        );
+      } catch (e: unknown) {
+        Alert.alert(
+          'Saved pick',
+          `${formatApiError(e)} Tap “Confirm picked (whole order)” if the order should already be complete.`
+        );
+      }
+    } else {
+      Alert.alert('Saved pick');
+    }
+  };
+
+  const submitSingleRackFromModal = async () => {
+    const itId = Number(selectedItemId);
+    if (!itId) return Alert.alert('Select part number');
+    if (!selectedSingleRack) return Alert.alert('Select a rack');
+    const picked = parseQtyInput(pickQty);
+    if (picked == null) return Alert.alert('Enter quantity');
+    if (picked <= QTY_EPS) return Alert.alert('Enter quantity');
+    if (picked - selectedSingleRack.maxQty > QTY_EPS) {
+      return Alert.alert('Invalid qty', `Maximum from this rack for the line is ${selectedSingleRack.maxQty}`);
+    }
+    try {
+      await confirmItemFromRack({
+        outbound_order_id: orderId,
+        outbound_item_id: itId,
+        stock_by_rack_id: selectedSingleRack.rackId,
+        scanned_rack: selectedSingleRack.rackLoc,
+        picked_qty: picked,
+        outbound_bom_requirement_id:
+          selectedSingleRack.obrId != null ? selectedSingleRack.obrId : undefined,
+      });
+      const fresh = await load();
+      await afterPickSuccess(fresh);
+    } catch (e: unknown) {
+      Alert.alert('Pick failed', formatApiError(e));
+    }
+  };
+
+  const submitAddRackFromModal = async () => {
+    const itId = Number(selectedItemId);
+    if (!itId) return Alert.alert('Select part number');
+    const rack = newRackLocation.trim();
+    if (!rack) return Alert.alert('Enter rack location');
+    const picked = parseQtyInput(pickQty);
+    if (picked == null || picked <= QTY_EPS) return Alert.alert('Enter quantity');
+    const isBom = bomChildPickOptions.length > 0;
+    if (isBom) {
+      if (!addRackBomReqId) return Alert.alert('Select child part (BOM line)');
+      const opt = bomChildPickOptions.find((o) => o.id === addRackBomReqId);
+      if (!opt) return Alert.alert('Select child part (BOM line)');
+      if (picked - opt.rem > QTY_EPS) {
+        return Alert.alert('Invalid qty', `Maximum remaining for this child is ${opt.rem}`);
+      }
+    } else {
+      const rem = selectedItem ? remainingForLine(selectedItem) : 0;
+      if (picked - rem > QTY_EPS) {
+        return Alert.alert('Invalid qty', `Maximum remaining for this line is ${rem}`);
+      }
+    }
+    try {
+      await confirmItemWithNewRack({
+        outbound_order_id: orderId,
+        outbound_item_id: itId,
+        rack_location: rack,
+        picked_qty: picked,
+        outbound_bom_requirement_id: addRackBomReqId ?? undefined,
+      });
+      const fresh = await load();
+      await afterPickSuccess(fresh);
+    } catch (e: unknown) {
+      Alert.alert('Pick failed', formatApiError(e));
+    }
+  };
+
   const submitPickFromModal = async () => {
+    if (pickMode === 'single_rack') {
+      return submitSingleRackFromModal();
+    }
+    if (pickMode === 'add_rack') {
+      return submitAddRackFromModal();
+    }
     const itId = Number(selectedItemId);
     if (!itId) return Alert.alert('Select part number');
 
@@ -277,9 +521,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
       fifoOptionsForItem.find((x) => Number(x.id) === fidChosen) ||
       (fifoOptionsForItem.length === 1 ? fifoOptionsForItem[0] : null);
     if (!f) return Alert.alert('Select suggested rack');
-    const maxRack = Number((f as any).max_for_rack ?? 0);
-    const remaining = selectedItem ? remainingForLine(selectedItem) : 0;
-    const exact = Math.max(0, Math.min(maxRack, remaining));
+    const exact = exactPickQtyForFifo(f as FifoRow & { max_for_rack?: number }, selectedItem);
     const picked = parseQtyInput(pickQty);
 
     if (picked == null) return Alert.alert('Enter quantity');
@@ -296,37 +538,22 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
         picked_qty: picked,
       });
       const fresh = await load();
-      setPickModalOpen(false);
-      setPickQty('');
-      if (fresh && orderFullyPicked(fresh)) {
-        try {
-          await confirmOrder(orderId);
-          await load();
-          Alert.alert(
-            'Order confirmed picked',
-            'Every line is complete. The order is now Picked (rack stock was updated on each pick).'
-          );
-        } catch (e: unknown) {
-          const err = e as { response?: { data?: { error?: string } } };
-          Alert.alert(
-            'Saved pick',
-            err.response?.data?.error ||
-              'All lines look complete but auto-finalize failed. Tap “Confirm picked (whole order)”.'
-          );
-        }
-      } else {
-        Alert.alert('Saved pick');
-      }
+      await afterPickSuccess(fresh);
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { error?: string } } };
-      Alert.alert('Pick failed', err.response?.data?.error || 'Error');
+      Alert.alert('Pick failed', formatApiError(e));
     }
   };
 
   const openRequestModal = () => {
     if (!selectedItemId) return Alert.alert('Select part number first');
-    setReqRack(selectedFifo?.rack_location ? String(selectedFifo.rack_location) : '');
+    const rackFromFifo = selectedFifo?.rack_location ? String(selectedFifo.rack_location) : '';
+    const rackFromSingle = selectedSingleRack?.rackLoc ? String(selectedSingleRack.rackLoc) : '';
+    setReqRack(rackFromFifo || rackFromSingle);
     setReqQty('');
+    setPickMode('fifo');
+    setSelectedSingleRack(null);
+    setNewRackLocation('');
+    setAddRackBomReqId(null);
     // Android can ignore opening a second Modal on top of another.
     // Close the pick modal first, then open the request modal.
     setPickModalOpen(false);
@@ -351,8 +578,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
       setChangeReason('');
       Alert.alert('Request sent', 'Admin will review your request.');
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { error?: string } } };
-      Alert.alert('Request failed', err.response?.data?.error || 'Error');
+      Alert.alert('Request failed', formatApiError(e));
     }
   };
 
@@ -374,8 +600,7 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
       setChangeReason('');
       Alert.alert('Request sent', 'Admin will review your request.');
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { error?: string } } };
-      Alert.alert('Request failed', err.response?.data?.error || 'Error');
+      Alert.alert('Request failed', formatApiError(e));
     }
   };
 
@@ -499,22 +724,51 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
             return { ...f, max_for_rack: max };
           })
           .filter((f) => (f as any).max_for_rack > 0);
+        const isBomParent = Boolean((it as any).is_bom_parent);
 
         return (
           <View key={String(it.id)} style={styles.card}>
             <Text style={styles.bold}>{label}</Text>
+            {isBomParent ? (
+              <Text style={[styles.small, { color: '#92400e', fontWeight: '600' }]}>BOM parent — pick child lines below</Text>
+            ) : null}
             {desc ? <Text style={styles.small}>{desc}</Text> : null}
             <Text style={styles.small}>
               Req {String(req)} · Avl {String(avl)} · Picked {String(picked)} · Rem {String(rem)}
             </Text>
 
-            <Text style={[styles.smallLabel, { marginTop: 10 }]}>Suggested racks</Text>
-            {!fifoLines.length ? (
-              <Text style={styles.hint}>No FIFO suggestions left for this item.</Text>
+            <Text style={[styles.smallLabel, { marginTop: 10 }]}>Pick</Text>
+            {rem > QTY_EPS ? (
+              <View style={{ gap: 8, marginTop: 10 }}>
+                {fifoLines.length > 0 ? (
+                  <Pressable style={styles.btn} onPress={() => openPickModal(itemId)}>
+                    <Text style={styles.btnText}>Pick (FIFO)</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  style={[styles.btn, { backgroundColor: '#7c3aed', opacity: fifoLines.length > 0 ? 0.5 : 1 }]}
+                  onPress={() => {
+                    if (fifoLines.length > 0) {
+                      Alert.alert(
+                        'FIFO active',
+                        'Finish FIFO suggestions first, or use “Add new rack location” to declare stock at a new bin.'
+                      );
+                      return;
+                    }
+                    openSingleRackPickModal(itemId);
+                  }}
+                >
+                  <Text style={styles.btnText}>From existing rack</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.btnSecondary, { borderColor: '#047857', borderWidth: 2 }]}
+                  onPress={() => openAddRackPickModal(itemId)}
+                >
+                  <Text style={[styles.btnSecondaryText, { color: '#047857' }]}>Add new rack location</Text>
+                </Pressable>
+              </View>
             ) : (
-              <Pressable style={[styles.btn, { marginTop: 10 }]} onPress={() => openPickModal(itemId)}>
-                <Text style={styles.btnText}>Pick / Confirm for this part</Text>
-              </Pressable>
+              <Text style={[styles.hint, { marginTop: 8 }]}>Line complete or no remaining qty.</Text>
             )}
           </View>
         );
@@ -536,50 +790,239 @@ export default function OrderDetailScreen({ route, navigation }: Props) {
         </Text>
       ) : null}
 
-      <Modal visible={pickModalOpen} transparent animationType="slide" onRequestClose={() => setPickModalOpen(false)}>
+      <Modal
+        visible={pickModalOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          setPickModalOpen(false);
+          setPickMode('fifo');
+          setSelectedSingleRack(null);
+          setNewRackLocation('');
+          setAddRackBomReqId(null);
+        }}
+      >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Confirm pickup</Text>
+            <Text style={styles.modalTitle}>
+              {pickMode === 'single_rack'
+                ? 'Pick from existing rack'
+                : pickMode === 'add_rack'
+                  ? 'Add new rack location & pick'
+                  : 'Pick (FIFO)'}
+            </Text>
             <Text style={styles.small}>
               Part: {String(selectedItem?.material || selectedItem?.part_number || '')} · Req {String(selectedItem?.required_qty ?? '')} · Avl{' '}
               {String(selectedItem?.available_qty_main_stock ?? '')} · Rem{' '}
               {String(selectedItem ? remainingForLine(selectedItem) : '')}
             </Text>
 
-            <Text style={[styles.smallLabel, { marginTop: 10 }]}>Select suggested rack</Text>
-            <View style={styles.pills}>
-              {fifoOptionsForItem.map((f) => (
+            {selectedItemId && selectedItem && remainingForLine(selectedItem) > QTY_EPS ? (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
                 <Pressable
-                  key={String(f.id)}
-                  style={[styles.pill, selectedFifoId === Number(f.id) && styles.pillActive]}
+                  style={[styles.pill, pickMode === 'fifo' && styles.pillActive, fifoOptionsForItem.length === 0 && { opacity: 0.45 }]}
                   onPress={() => {
-                    setSelectedFifoId(Number(f.id));
-                    const maxRack = Number((f as any).max_for_rack ?? 0);
-                    const remaining = selectedItem ? remainingForLine(selectedItem) : 0;
-                    const exact = Math.max(0, Math.min(maxRack, remaining));
-                    setPickQty(exact ? String(exact) : '');
+                    if (fifoOptionsForItem.length === 0) return;
+                    setPickMode('fifo');
+                    setNewRackLocation('');
                   }}
                 >
-                  <Text style={styles.pillText}>
-                    {String(f.rack_location)} · Qty {String((f as any).max_for_rack)}
-                  </Text>
-                  <Text style={styles.pillSub}>Suggested {String(f.suggested_qty)} · Seq {String(f.fifo_sequence)}</Text>
+                  <Text style={styles.pillText}>FIFO</Text>
                 </Pressable>
-              ))}
-            </View>
+                <Pressable
+                  style={[styles.pill, pickMode === 'single_rack' && styles.pillActive, fifoOptionsForItem.length > 0 && { opacity: 0.45 }]}
+                  onPress={() => {
+                    if (fifoOptionsForItem.length > 0) {
+                      Alert.alert(
+                        'FIFO active',
+                        'Use FIFO or “New rack”. “Existing rack” is only when there are no FIFO lines with quantity left.'
+                      );
+                      return;
+                    }
+                    setPickMode('single_rack');
+                    setSelectedFifoId(null);
+                    setNewRackLocation('');
+                  }}
+                >
+                  <Text style={styles.pillText}>Existing rack</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.pill, pickMode === 'add_rack' && styles.pillActive]}
+                  onPress={() => {
+                    setPickMode('add_rack');
+                    setSelectedFifoId(null);
+                    setSelectedSingleRack(null);
+                    setNewRackLocation('');
+                    if (selectedItemId) {
+                      const d = computeAddRackDefaultsForItemId(selectedItemId);
+                      setAddRackBomReqId(d.bomReqId);
+                      setPickQty(d.qty);
+                    }
+                  }}
+                >
+                  <Text style={styles.pillText}>New rack</Text>
+                </Pressable>
+              </View>
+            ) : null}
 
-            <Text style={[styles.smallLabel, { marginTop: 10 }]}>Quantity (must match suggested)</Text>
-            <TextInput style={styles.input} value={pickQty} onChangeText={setPickQty} keyboardType="decimal-pad" placeholder="Qty" placeholderTextColor="#94a3b8" />
+            {pickMode === 'fifo' ? (
+              <>
+                <Text style={[styles.smallLabel, { marginTop: 10 }]}>Select suggested rack</Text>
+                {fifoOptionsForItem.length === 0 ? (
+                  <Text style={styles.hint}>No FIFO lines with quantity left — switch to Existing rack or New rack.</Text>
+                ) : (
+                  <View style={styles.pills}>
+                    {fifoOptionsForItem.map((f) => (
+                      <Pressable
+                        key={String(f.id)}
+                        style={[styles.pill, selectedFifoId === Number(f.id) && styles.pillActive]}
+                        onPress={() => {
+                          setSelectedFifoId(Number(f.id));
+                          const exact = exactPickQtyForFifo(f as FifoRow & { max_for_rack?: number }, selectedItem);
+                          setPickQty(exact ? String(exact) : '');
+                        }}
+                      >
+                        <Text style={styles.pillText}>
+                          {f.parent_part_number ? `${f.parent_part_number} → ` : ''}
+                          {String(f.material || '')} · {String(f.rack_location)}
+                        </Text>
+                        <Text style={styles.pillSub}>
+                          {f.description ? `${String(f.description)} · ` : ''}Suggested {String(f.suggested_qty)} · Seq{' '}
+                          {String(f.fifo_sequence)}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                )}
 
-            <Pressable style={styles.btn} onPress={submitPickFromModal}>
-              <Text style={styles.btnText}>Confirm pickup</Text>
-            </Pressable>
+                {fifoOptionsForItem.length > 0 ? (
+                  <>
+                    <Text style={[styles.smallLabel, { marginTop: 10 }]}>Quantity (must match suggested)</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={pickQty}
+                      onChangeText={setPickQty}
+                      keyboardType="decimal-pad"
+                      placeholder="Qty"
+                      placeholderTextColor="#94a3b8"
+                    />
+                  </>
+                ) : null}
+              </>
+            ) : pickMode === 'add_rack' ? (
+              <>
+                <Text style={[styles.smallLabel, { marginTop: 10 }]}>Rack location (bin / aisle)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={newRackLocation}
+                  onChangeText={setNewRackLocation}
+                  placeholder="e.g. A-12-03"
+                  placeholderTextColor="#94a3b8"
+                  autoCapitalize="characters"
+                />
+                {bomChildPickOptions.length > 0 ? (
+                  <>
+                    <Text style={[styles.smallLabel, { marginTop: 6 }]}>Child part (BOM)</Text>
+                    <View style={styles.pills}>
+                      {bomChildPickOptions.map((o) => (
+                        <Pressable
+                          key={String(o.id)}
+                          style={[styles.pill, addRackBomReqId === o.id && styles.pillActive]}
+                          onPress={() => {
+                            setAddRackBomReqId(o.id);
+                            setPickQty(String(o.rem));
+                          }}
+                        >
+                          <Text style={styles.pillText}>{o.label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </>
+                ) : null}
+                <Text style={[styles.smallLabel, { marginTop: 10 }]}>Pick quantity</Text>
+                <TextInput
+                  style={styles.input}
+                  value={pickQty}
+                  onChangeText={setPickQty}
+                  keyboardType="decimal-pad"
+                  placeholder="Qty"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={[styles.hint, { marginTop: 6 }]}>
+                  Saves a stock_by_rack row for this part at this location (if needed), then deducts the pick and records stock_out in one step.
+                </Text>
+                <Pressable style={[styles.btn, { marginTop: 10, backgroundColor: '#047857' }]} onPress={submitPickFromModal}>
+                  <Text style={styles.btnText}>Confirm add rack & pick</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={[styles.smallLabel, { marginTop: 10 }]}>Choose rack (existing stock)</Text>
+                {singleRackOptions.length === 0 ? (
+                  <Text style={styles.hint}>
+                    No rack rows with available stock in the overview. Use New rack tab, or refresh after stock is loaded.
+                  </Text>
+                ) : (
+                  <View style={styles.pills}>
+                    {singleRackOptions.map((o) => {
+                      const active =
+                        selectedSingleRack?.rackId === o.rackId &&
+                        (selectedSingleRack?.obrId ?? null) === (o.obrId ?? null);
+                      return (
+                        <Pressable
+                          key={o.key}
+                          style={[styles.pill, active && styles.pillActive]}
+                          onPress={() => {
+                            setSelectedSingleRack({
+                              rackId: o.rackId,
+                              obrId: o.obrId,
+                              rackLoc: o.rackLoc,
+                              maxQty: o.qty,
+                            });
+                            setPickQty(String(o.qty));
+                          }}
+                        >
+                          <Text style={styles.pillText}>{o.label}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                )}
+                <Text style={[styles.smallLabel, { marginTop: 10 }]}>Quantity (default = max from rack)</Text>
+                <TextInput
+                  style={styles.input}
+                  value={pickQty}
+                  onChangeText={setPickQty}
+                  keyboardType="decimal-pad"
+                  placeholder="Qty"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Pressable style={styles.btn} onPress={submitPickFromModal}>
+                  <Text style={styles.btnText}>Confirm pickup from rack</Text>
+                </Pressable>
+              </>
+            )}
+
+            {pickMode === 'fifo' && fifoOptionsForItem.length > 0 ? (
+              <Pressable style={[styles.btn, { marginTop: 10 }]} onPress={submitPickFromModal}>
+                <Text style={styles.btnText}>Confirm FIFO pickup</Text>
+              </Pressable>
+            ) : null}
 
             <Pressable style={styles.btnSecondary} onPress={openRequestModal}>
               <Text style={styles.btnSecondaryText}>Request change rack/qty</Text>
             </Pressable>
 
-            <Pressable style={[styles.btnSecondary, { marginTop: 8 }]} onPress={() => setPickModalOpen(false)}>
+            <Pressable
+              style={[styles.btnSecondary, { marginTop: 8 }]}
+              onPress={() => {
+                setPickModalOpen(false);
+                setPickMode('fifo');
+                setSelectedSingleRack(null);
+                setNewRackLocation('');
+                setAddRackBomReqId(null);
+              }}
+            >
               <Text style={styles.btnSecondaryText}>Close</Text>
             </Pressable>
           </View>

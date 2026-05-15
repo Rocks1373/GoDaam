@@ -1,7 +1,7 @@
 import { api } from './client';
 
 /**
- * Server-side OCR (Tesseract). Works in Expo Go when the backend is reachable and the user is logged in.
+ * Server-side OCR (Python service via backend). Works in Expo Go when the API is reachable and the user is logged in.
  */
 export async function extractTextRemote(imageUri: string): Promise<string[]> {
   const form = new FormData();

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Upload, Copy, Eye, Package, Truck, GitCompare, Plus } from 'lucide-react';
+import { toast } from 'sonner';
 import { mainStockApi, inboundApi, soldOutApi, stockComparisonApi, vendorItemsApi, vendorsApi } from '../services/api';
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
+import { reportUploadResult, reportUploadError } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
@@ -217,6 +219,11 @@ export default function MainStock() {
       setStocks(data);
     } catch (e) {
       console.error(e);
+      try {
+        toast.error(e?.response?.data?.error || e.message || 'Failed to load main stock');
+      } catch {
+        /* ignore */
+      }
     } finally {
       setLoading(false);
     }
@@ -955,10 +962,19 @@ export default function MainStock() {
                   const f = e.target.files?.[0];
                   if (!f) return;
                   try {
-                    await mainStockApi.upload(f);
+                    const summary = await mainStockApi.upload(f);
                     await loadStock(search);
+                    reportUploadResult(summary, {
+                      label: 'Main stock upload',
+                      filenamePrefix: 'main-stock-upload',
+                      notify: (msg) => (summary?.success === summary?.total ? toast.success(msg) : toast.warning(msg)),
+                    });
                   } catch (err) {
-                    alert(err.response?.data?.error || err.message);
+                    if (err?.code === 'ECONNABORTED') {
+                      alert('Request timed out — file may be too large or the server is busy.');
+                    } else {
+                      reportUploadError(err, { label: 'Main stock upload', filenamePrefix: 'main-stock-upload' });
+                    }
                   } finally {
                     e.target.value = '';
                   }
@@ -1060,10 +1076,11 @@ export default function MainStock() {
                   const f = e.target.files?.[0];
                   if (!f) return;
                   try {
-                    await inboundApi.upload(f);
+                    const summary = await inboundApi.upload(f);
                     await loadInbound();
+                    reportUploadResult(summary, { label: 'Inbound upload', filenamePrefix: 'inbound-upload' });
                   } catch (err) {
-                    alert(err.response?.data?.error || err.message);
+                    reportUploadError(err, { label: 'Inbound upload', filenamePrefix: 'inbound-upload' });
                   } finally {
                     e.target.value = '';
                   }
@@ -1143,10 +1160,11 @@ export default function MainStock() {
                   if (!f) return;
                   try {
                     const res = await soldOutApi.upload(f);
-                    if (res?.shortage_warnings?.length) alert(`Shortages: ${JSON.stringify(res.shortage_warnings)}`);
                     await loadSold();
+                    reportUploadResult(res, { label: 'Outbound / sold-out upload', filenamePrefix: 'sold-out-upload' });
+                    if (res?.shortage_warnings?.length) alert(`Shortages: ${JSON.stringify(res.shortage_warnings)}`);
                   } catch (err) {
-                    alert(err.response?.data?.error || err.message);
+                    reportUploadError(err, { label: 'Outbound / sold-out upload', filenamePrefix: 'sold-out-upload' });
                   } finally {
                     e.target.value = '';
                   }

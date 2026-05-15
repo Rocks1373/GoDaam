@@ -13,15 +13,11 @@ function isPastDate(iso) {
 }
 
 function canAccessPage(user) {
-  if (!user) return false;
-  if (String(user.role || '').toLowerCase() === 'admin') return true;
-  return !!(user.permissions?.can_view_transportation || user.permissions?.can_manage_transportation);
+  return !!user;
 }
 
 function canManage(user) {
-  if (!user) return false;
-  if (String(user.role || '').toLowerCase() === 'admin') return true;
-  return !!user.permissions?.can_manage_transportation;
+  return !!user;
 }
 
 const emptyCarrier = {

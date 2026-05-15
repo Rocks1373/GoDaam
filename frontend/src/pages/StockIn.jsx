@@ -3,20 +3,9 @@ import { Copy, Download, Eye, Pencil, Plus, Trash2, Upload } from 'lucide-react'
 import * as XLSX from 'xlsx';
 import { stockInApi } from '../services/api';
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
+import { reportUploadError, reportUploadResult } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
-
-function downloadErrorWorkbook({ failed, filename }) {
-  const rows = (failed || []).map((r) => ({
-    row_index: r.row_index,
-    error: r.error,
-    ...(r.row || {}),
-  }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Errors');
-  XLSX.writeFile(wb, filename);
-}
 
 /**
  * Tab-separated (Excel paste) or comma-separated TXT/CSV; delimiter chosen per line.
@@ -226,23 +215,11 @@ const StockIn = () => {
 
   const onUploadFile = async (file, { updateExisting }) => {
     try {
-      await stockInApi.upload(file, { update_existing: updateExisting });
+      const summary = await stockInApi.upload(file, { update_existing: updateExisting });
       fetchRows();
-      alert('Upload import completed.');
+      reportUploadResult(summary, { label: 'Stock In upload', filenamePrefix: 'stock-in-upload' });
     } catch (e) {
-      const data = e.response?.data;
-      const msg = data?.error || e.message;
-      const results = Array.isArray(data?.results) ? data.results : null;
-      const failed = results ? results.filter((r) => r && r.error) : [];
-      if (failed.length) {
-        downloadErrorWorkbook({
-          failed,
-          filename: `stock-in-upload-errors-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.xlsx`,
-        });
-        alert(`${msg}\n\nDownloaded an error-only Excel with ${failed.length} row(s) and an 'error' column.`);
-      } else {
-        alert(msg);
-      }
+      reportUploadError(e, { label: 'Stock In upload', filenamePrefix: 'stock-in-upload' });
     } finally {
       if (fileRef.current) fileRef.current.value = '';
     }
@@ -578,4 +555,3 @@ const StockIn = () => {
 };
 
 export default StockIn;
-

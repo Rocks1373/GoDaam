@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Free dev ports (backend, Vite, Streamlit, Expo, etc.). From repo root: ./stop
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+exec "$ROOT/dev.sh" stop

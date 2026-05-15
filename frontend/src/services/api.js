@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { toast } from 'sonner';
 
 const TOKEN_KEY = 'token';
 const TOKEN_EXPIRES_AT_KEY = 'token_expires_at';
@@ -23,16 +24,39 @@ function getStoredToken() {
 
 const api = axios.create({
   baseURL: '/api',
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  withCredentials: true,
+  /** No default Content-Type: axios sets JSON for plain-object bodies; leaving it unset avoids forcing JSON on FormData (multer needs multipart + boundary). */
 });
 
+/** Do not set Content-Type manually for FormData — the boundary must be set by the runtime. */
+const multipartFileUploadConfig = { timeout: 900_000 };
+
 api.interceptors.request.use((config) => {
+  config.headers = config.headers || {};
+  if (typeof FormData !== 'undefined' && config.data instanceof FormData) {
+    const h = config.headers;
+    if (typeof h.delete === 'function') {
+      h.delete('Content-Type');
+      h.delete('content-type');
+    } else {
+      delete h['Content-Type'];
+      delete h['content-type'];
+    }
+  }
   const token = getStoredToken();
   if (token) {
-    config.headers = config.headers || {};
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    const raw = localStorage.getItem('godam_web_warehouse_id');
+    if (raw && raw !== 'all') {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) {
+        config.headers['X-Warehouse-Id'] = String(n);
+      }
+    }
+  } catch {
+    /* ignore */
   }
   return config;
 });
@@ -41,6 +65,11 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error?.response?.status === 401) {
+      try {
+        toast.error('Session expired. Please sign in again.');
+      } catch {
+        /* ignore */
+      }
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(TOKEN_EXPIRES_AT_KEY);
     }
@@ -86,7 +115,8 @@ function downloadBlob(blob, filename) {
 }
 
 export const mainStockApi = {
-  list: async (search = '') => (await api.get('/main-stock', { params: { search, limit: 500 } })).data,
+  list: async (search = '') =>
+    (await api.get('/main-stock', { params: { search, limit: 500 }, timeout: 120_000 })).data,
   search: async (q) => (await api.get('/main-stock/search', { params: { q } })).data,
   addNewPart: async (payload) => (await api.post('/main-stock/add-new-part', payload)).data,
   manualStockIn: async (payload) => (await api.post('/main-stock/manual-stock-in', payload)).data,
@@ -95,7 +125,7 @@ export const mainStockApi = {
   upload: async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await api.post('/main-stock/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/main-stock/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
   downloadTemplateXlsx: async () => {
@@ -109,7 +139,7 @@ export const inboundApi = {
   upload: async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await api.post('/inbound/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/inbound/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
   bulkPaste: async (data) => (await api.post('/inbound/bulk-paste', { data })).data,
@@ -133,12 +163,16 @@ export const reportsApi = {
   sapStock: async (params = {}) => (await api.get('/reports/sap-stock', { params })).data,
   stockComparison: async (params = {}) => (await api.get('/reports/stock-comparison', { params })).data,
   rackBalanceAdjustments: async (params = {}) => (await api.get('/reports/rack-balance-adjustments', { params })).data,
+  auditLogs: async (params = {}) => (await api.get('/reports/audit-logs', { params })).data,
 };
 
 export const dashboardApi = {
   summary: async () => (await api.get('/dashboard/summary')).data,
   recentActivity: async () => (await api.get('/dashboard/recent-activity')).data,
   notifications: async () => (await api.get('/dashboard/notifications')).data,
+  rangeSummary: async ({ from, to } = {}) =>
+    (await api.get('/dashboard/range-summary', { params: { ...(from ? { from } : {}), ...(to ? { to } : {}) } })).data,
+  orderPipeline: async () => (await api.get('/dashboard/order-pipeline')).data,
 };
 
 export const soldOutApi = {
@@ -146,7 +180,7 @@ export const soldOutApi = {
   upload: async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await api.post('/sold-out/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/sold-out/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
   bulkPaste: async (data) => (await api.post('/sold-out/bulk-paste', { data })).data,
@@ -169,7 +203,7 @@ export const sapStockApi = {
   upload: async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await api.post('/sap-stock/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/sap-stock/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
   updateMainStockSapQty: async (batch_id) =>
@@ -202,7 +236,7 @@ export const stockInApi = {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('update_existing', String(update_existing));
-    const res = await api.post('/stock-in/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/stock-in/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
 };
@@ -218,7 +252,7 @@ export const stockOutApi = {
     const fd = new FormData();
     fd.append('file', file);
     fd.append('update_existing', String(update_existing));
-    const res = await api.post('/stock-out/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/stock-out/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
 };
@@ -232,7 +266,7 @@ export const customersApi = {
   upload: async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await api.post('/customers/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/customers/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
   byNumber: async (customer_number) =>
@@ -320,7 +354,7 @@ export const transportationApi = {
     fd.append('file', file);
     fd.append('attachment_type', attachment_type);
     const res = await api.post(`/transportation/drivers/${driverId}/attachments`, fd, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      ...multipartFileUploadConfig,
     });
     return res.data;
   },
@@ -349,7 +383,7 @@ export const vendorsApi = {
   upload: async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await api.post('/vendors/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/vendors/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
   downloadTemplateXlsx: async () => {
@@ -368,7 +402,7 @@ export const vendorItemsApi = {
   upload: async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await api.post('/vendor-items/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/vendor-items/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
   downloadTemplateXlsx: async () => {
@@ -388,7 +422,7 @@ export const outboundGodamApi = {
   uploadExcel: async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await api.post('/outbound/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+    const res = await api.post('/outbound/upload', fd, multipartFileUploadConfig);
     return res.data;
   },
   list: async (params = {}) => (await api.get('/outbound', { params })).data,
@@ -409,6 +443,17 @@ export const outboundGodamApi = {
   remove: async (id) => (await api.delete(`/outbound/${id}`)).data,
   updateItemQty: async (outboundId, itemId, required_qty) =>
     (await api.put(`/outbound/${outboundId}/items/${itemId}`, { required_qty })).data,
+  /** Multipart: file + upload_stage (order_created | post_delivery | other) */
+  uploadOrderDocument: async (outboundId, file, upload_stage = 'order_created') => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('upload_stage', upload_stage);
+    const res = await api.post(`/outbound/${outboundId}/order-documents`, fd, {
+      ...multipartFileUploadConfig,
+    });
+    return res.data;
+  },
+  deleteOrderDocument: async (outboundId, docId) => (await api.delete(`/outbound/${outboundId}/order-documents/${docId}`)).data,
 };
 
 export const usersApi = {
@@ -418,6 +463,13 @@ export const usersApi = {
   remove: async (id) => (await api.delete(`/users/${id}`)).data,
   disable: async (id) => (await api.post(`/users/${id}/disable`)).data,
   resetPassword: async (id, password) => (await api.post(`/users/${id}/reset-password`, { password })).data,
+  getWarehouseAssignments: async (id) => (await api.get(`/users/${id}/warehouse-assignments`)).data,
+};
+
+export const warehousesApi = {
+  list: async () => (await api.get('/warehouses')).data,
+  create: async (payload) => (await api.post('/warehouses', payload)).data,
+  update: async (id, payload) => (await api.patch(`/warehouses/${id}`, payload)).data,
 };
 
 export const rolesApi = {
@@ -474,43 +526,6 @@ export const adminMobileAppApi = {
   },
 };
 
-/** Admin-only: outbound SQLite domain stats, browse whitelist tables, wipe outbound workflow */
-export const maintenanceApi = {
-  outboundStats: async () => (await api.get('/admin/maintenance/outbound-stats')).data,
-  browseTable: async (table, limit = 100) =>
-    (await api.get(`/admin/maintenance/browse/${encodeURIComponent(table)}`, { params: { limit } })).data,
-  clearOutboundDomain: async (confirmPhrase) =>
-    (await api.post('/admin/maintenance/clear-outbound-domain', { confirmPhrase })).data,
-};
-
-/** Web OCR Center — templates, uploads, results (does not auto-post to stock). */
-export const ocrCenterApi = {
-  listTemplates: async (params = {}) => (await api.get('/ocr/templates', { params })).data,
-  createTemplate: async (payload) => (await api.post('/ocr/templates', payload)).data,
-  updateTemplate: async (id, payload) => (await api.put(`/ocr/templates/${id}`, payload)).data,
-  deleteTemplate: async (id) => (await api.delete(`/ocr/templates/${id}`)).data,
-  getSettings: async () => (await api.get('/ocr/settings')).data,
-  updateSettings: async (payload) => (await api.put('/ocr/settings', payload)).data,
-  upload: async (file, { document_type, template_id } = {}) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    if (document_type) fd.append('document_type', document_type);
-    if (template_id) fd.append('template_id', String(template_id));
-    const res = await api.post('/ocr/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
-    return res.data;
-  },
-  run: async (payload) => (await api.post('/ocr/run', payload)).data,
-  saveResult: async (payload) => (await api.post('/ocr/save-result', payload)).data,
-  listResults: async (limit = 100) => (await api.get('/ocr/results', { params: { limit } })).data,
-  getResult: async (id) => (await api.get(`/ocr/results/${id}`)).data,
-  exportExcel: async (id) => {
-    const res = await api.post(`/ocr/results/${id}/export-excel`, {}, { responseType: 'blob' });
-    downloadBlob(res.data, `ocr-result-${id}.xlsx`);
-  },
-  sendInbound: async (id) => (await api.post(`/ocr/results/${id}/send-to-inbound`)).data,
-  sendOutbound: async (id) => (await api.post(`/ocr/results/${id}/send-to-outbound`)).data,
-};
-
 /** Huawei GoDam batches → SQLite huawei_godam.db (server-side matcher + importer) */
 export const huaweiGodamApi = {
   health: async () => (await api.get('/huawei-godam/health')).data,
@@ -536,7 +551,7 @@ export const huaweiGodamApi = {
     if (rulesFile) fd.append('rules', rulesFile);
     for (const f of dnFiles || []) fd.append('dn', f);
     const res = await api.post('/huawei-godam/batches', fd, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      ...multipartFileUploadConfig,
     });
     return res.data;
   },
@@ -570,7 +585,7 @@ export const godamExcelApi = {
     }
     for (const f of dnFiles || []) fd.append('dn', f);
     const res = await api.post('/godam-excel/match', fd, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      ...multipartFileUploadConfig,
       responseType: 'blob',
     });
     const metaB64 = res.headers?.['x-godam-excel-meta'];
@@ -583,6 +598,99 @@ export const godamExcelApi = {
       }
     }
     return { blob: res.data, meta };
+  },
+};
+
+/** Admin: parent/child BOM definitions (optional outbound expansion) */
+export const bomApi = {
+  list: async () => (await api.get('/bom')).data,
+  getByParent: async (parentPart) => (await api.get(`/bom/${encodeURIComponent(parentPart)}`)).data,
+  create: async (payload) => (await api.post('/bom', payload)).data,
+  update: async (id, payload) => (await api.put(`/bom/${id}`, payload)).data,
+  deleteSet: async (id) => (await api.delete(`/bom/${id}`)).data,
+  addChild: async (bomSetId, payload) => (await api.post(`/bom/${bomSetId}/children`, payload)).data,
+  deleteChild: async (childId) => (await api.delete(`/bom/children/${childId}`)).data,
+  upload: async (file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return (await api.post('/bom/upload', fd, multipartFileUploadConfig)).data;
+  },
+  downloadTemplate: () => {
+    const a = document.createElement('a');
+    a.href = '/api/bom/template';
+    a.download = 'bom_template.xlsx';
+    a.click();
+  },
+  searchStock: async (q) => (await api.get('/bom/search-stock', { params: { q } })).data,
+};
+
+/** Sales order Google Drive document tree + uploads */
+async function salesOrderExportBlobErrorMessage(err) {
+  const data = err?.response?.data;
+  if (data instanceof Blob) {
+    try {
+      const text = await data.text();
+      const j = JSON.parse(text);
+      return j.error || text || err.message;
+    } catch {
+      return err.message || 'Export failed';
+    }
+  }
+  return err?.response?.data?.error || err.message || 'Export failed';
+}
+
+export const salesOrderDocumentsApi = {
+  listFolders: async (params) => (await api.get('/sales-order-folders', { params })).data,
+  getFolder: async (salesOrderNumber, params) =>
+    (await api.get(`/sales-order-folders/${encodeURIComponent(salesOrderNumber)}`, { params })).data,
+  ensureFolder: async (body) => (await api.post('/sales-order-folders/ensure', body)).data,
+  exportManifest: async (salesOrderNumber, body = {}) =>
+    (await api.post(`/sales-order-folders/${encodeURIComponent(salesOrderNumber)}/export-manifest`, body)).data,
+  listDocuments: async (salesOrderNumber) => (await api.get(`/sales-order-documents/${encodeURIComponent(salesOrderNumber)}`)).data,
+  status: async (salesOrderNumber) =>
+    (await api.get(`/sales-order-documents/${encodeURIComponent(salesOrderNumber)}/status`)).data,
+  report: async (params) => (await api.get('/sales-order-documents/report', { params })).data,
+  upload: async (formData) => (await api.post('/sales-order-documents/upload', formData)).data,
+  verify: async (id, payload) => (await api.post(`/sales-order-documents/by-id/${id}/verify`, payload)).data,
+  openLink: async (id) => (await api.get(`/sales-order-documents/by-id/${id}/open-link`)).data,
+  replace: async (id, formData) => (await api.post(`/sales-order-documents/by-id/${id}/replace`, formData)).data,
+  downloadCombinedPdf: async (salesOrderNumber, warehouseId) => {
+    const params = {};
+    if (warehouseId != null && warehouseId !== '') params.warehouse_id = warehouseId;
+    try {
+      const res = await api.get(
+        `/sales-order-documents/${encodeURIComponent(salesOrderNumber)}/export-combined.pdf`,
+        { params, responseType: 'blob' }
+      );
+      const base = String(salesOrderNumber).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'SO';
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${base}_combined.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      throw new Error(await salesOrderExportBlobErrorMessage(e));
+    }
+  },
+  downloadIndividualZip: async (salesOrderNumber, warehouseId) => {
+    const params = {};
+    if (warehouseId != null && warehouseId !== '') params.warehouse_id = warehouseId;
+    try {
+      const res = await api.get(
+        `/sales-order-documents/${encodeURIComponent(salesOrderNumber)}/export-individual.zip`,
+        { params, responseType: 'blob' }
+      );
+      const base = String(salesOrderNumber).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'SO';
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${base}_documents.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      throw new Error(await salesOrderExportBlobErrorMessage(e));
+    }
   },
 };
 

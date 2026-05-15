@@ -3,32 +3,7 @@ import { CardDisplayProvider } from './context/CardDisplayContext';
 import { ThemeProvider } from './context/ThemeContext';
 import CardSizeControls from './components/CardSizeControls';
 import ThemeSwitcher from './components/ThemeSwitcher';
-import {
-  Package,
-  Layers,
-  Truck,
-  BarChart3,
-  LogOut,
-  Users,
-  FileText,
-  UploadCloud,
-  KeySquare,
-  ShieldCheck,
-  ClipboardList,
-  UserCog,
-  GripVertical,
-  Database,
-  PieChart,
-  LineChart,
-  FileSpreadsheet,
-  Image,
-  ScanLine,
-  GitCompare,
-  ExternalLink,
-  ClipboardPenLine,
-  Boxes,
-  Smartphone,
-} from 'lucide-react';
+import { LogOut, Warehouse } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Dashboard from './pages/Dashboard';
 import MainStock from './pages/MainStock';
@@ -37,12 +12,12 @@ import Customers from './pages/Customers';
 import DeliveryNote from './pages/DeliveryNote';
 import OutboundUpload from './pages/OutboundUpload';
 import UsersAdmin from './pages/UsersAdmin';
+import WarehousesAdmin from './pages/WarehousesAdmin';
 import RolePermissions from './pages/RolePermissions';
-import PickedOrdersAdmin from './pages/PickedOrdersAdmin';
 import PickChangeRequests from './pages/PickChangeRequests';
 import Notifications from './pages/Notifications';
 import PodInbox from './pages/PodInbox';
-import AdminMaintenance from './pages/AdminMaintenance';
+import AdminBomParts from './pages/AdminBomParts';
 import Login from './pages/Login';
 import TransportationDetails from './pages/TransportationDetails';
 import VendorMaster from './pages/VendorMaster';
@@ -51,67 +26,67 @@ import InboundReport from './pages/InboundReport';
 import OutboundReport from './pages/OutboundReport';
 import DeliveryReport from './pages/DeliveryReport';
 import ReportExportPage from './pages/ReportExportPage';
-import OcrCenter from './pages/OcrCenter';
 import SapStock from './pages/SapStock';
 import StockComparisonReport from './pages/StockComparisonReport';
-import HuaweiGodamUpload from './pages/HuaweiGodamUpload';
+import AuditLogReport from './pages/AuditLogReport';
+import SalesOrderDocuments from './pages/SalesOrderDocuments';
+import SalesOrderDocumentsReport from './pages/SalesOrderDocumentsReport';
+import UnderConstruction from './pages/UnderConstruction';
 import MobileApps from './pages/MobileApps';
-import { authApi, notificationsApi, huaweiModuleApi } from './services/api';
+import PuterTools from './pages/PuterTools';
+import { authApi, notificationsApi } from './services/api';
 import FloatingAIAgent from './components/FloatingAIAgent';
+import AppTopNav from './components/AppTopNav';
+import { WarehouseProvider, useWarehouse } from './context/WarehouseContext';
 import './index.css';
 
-const SIDEBAR_WIDTH_KEY = 'godam_sidebar_width_px';
-const SIDEBAR_MIN = 120;
-const SIDEBAR_MAX = 440;
-const SIDEBAR_DEFAULT = 160;
-const GODAM_1_EXTERNAL_URL = import.meta.env.VITE_GODAM_1_EXTERNAL_URL;
-const HUAWEI_STREAMLIT_BASE =
-  import.meta.env.VITE_HUAWEI_GODAM_STREAMLIT_BASE || 'huawei-godam-app';
-
-/** Opens Streamlit GoDam in a new tab (proxied under HUAWEI_STREAMLIT_BASE), never embedded in SPA shell. */
-async function openGoDamOneNewTab() {
-  const ext = String(GODAM_1_EXTERNAL_URL || '').trim();
-  if (ext) {
-    window.open(ext, '_blank', 'noopener,noreferrer');
-    return;
-  }
-  try {
-    const data = await huaweiModuleApi.grantStreamlitAccess();
-    const slug =
-      String(data?.basePath || '')
-        .replace(/^\/+|\/+$/g, '')
-        .trim() || String(HUAWEI_STREAMLIT_BASE).replace(/^\/+|\/+$/g, '');
-    const path = slug.startsWith('/') ? slug : `/${slug}`;
-    window.open(`${window.location.origin}${path}/`, '_blank', 'noopener,noreferrer');
-  } catch {
-    /* optional UI toast elsewhere */
-  }
-}
-
-function readSidebarWidth() {
-  try {
-    const v = localStorage.getItem(SIDEBAR_WIDTH_KEY);
-    const n = v ? parseInt(v, 10) : SIDEBAR_DEFAULT;
-    if (!Number.isFinite(n)) return SIDEBAR_DEFAULT;
-    return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, n));
-  } catch {
-    return SIDEBAR_DEFAULT;
-  }
+function sessionUserIsValid(user) {
+  const id = user && typeof user === 'object' ? Number(user.id) : NaN;
+  return Number.isFinite(id) && id > 0;
 }
 
 /** Stable wrapper — must NOT be defined inside App (polling/state updates would remount all routes). */
 function RequireAuth({ checking, user, children }) {
   if (checking) return <div className="p-4 text-xs">Loading…</div>;
-  if (!user) return <Navigate to="/login" replace />;
+  if (!sessionUserIsValid(user)) return <Navigate to="/login" replace />;
   return children;
 }
 
 function RequireAdmin({ user, children }) {
-  if (!user) return <Navigate to="/login" replace />;
+  if (!sessionUserIsValid(user)) return <Navigate to="/login" replace />;
   if (String(user.role || '').toLowerCase() !== 'admin') {
     return <Navigate to="/dashboard" replace />;
   }
   return children;
+}
+
+
+function WarehouseToolbar() {
+  const { warehouses, selectedWarehouseId, setSelectedWarehouse, isAllWarehouses, isAdmin } = useWarehouse();
+  const val = isAllWarehouses ? 'all' : String(selectedWarehouseId || '');
+  return (
+    <label className="flex items-center gap-1 text-[10px] text-theme-fg-muted">
+      <Warehouse className="w-3.5 h-3.5" aria-hidden />
+      <span className="hidden md:inline">Warehouse</span>
+      <select
+        className="text-[10px] border border-theme-border rounded-md px-1.5 py-0.5 bg-theme-card shadow-sm max-w-[140px] transition-[border-color,box-shadow] duration-200"
+        value={val}
+        onChange={(e) => {
+          const v = e.target.value;
+          setSelectedWarehouse(v === 'all' ? 'all' : Number(v));
+          window.dispatchEvent(new Event('godam-warehouse-changed'));
+        }}
+      >
+        {isAdmin ? <option value="all">All warehouses</option> : null}
+        {(warehouses || []).map((w) => (
+          <option key={w.id} value={String(w.id)}>
+            {w.warehouse_code || w.id} — {w.warehouse_name || ''}
+            {isAdmin && w.warehouse_number ? ` (${w.warehouse_number})` : ''}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
 function App() {
@@ -141,58 +116,6 @@ function App() {
       document.removeEventListener('keydown', onKey);
     };
   }, [notifOpen]);
-  const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
-  const sidebarDrag = useRef(false);
-  const dragStartX = useRef(0);
-  const dragStartWidth = useRef(SIDEBAR_DEFAULT);
-  const sidebarWidthRef = useRef(sidebarWidth);
-
-  sidebarWidthRef.current = sidebarWidth;
-
-  useEffect(() => {
-    const onMove = (e) => {
-      if (!sidebarDrag.current) return;
-      const dx = e.clientX - dragStartX.current;
-      const next = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, dragStartWidth.current + dx));
-      setSidebarWidth(next);
-    };
-    const onUp = () => {
-      if (!sidebarDrag.current) return;
-      sidebarDrag.current = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      try {
-        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidthRef.current));
-      } catch {
-        // ignore
-      }
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, []);
-
-  const startSidebarResize = (e) => {
-    e.preventDefault();
-    sidebarDrag.current = true;
-    dragStartX.current = e.clientX;
-    dragStartWidth.current = sidebarWidthRef.current;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  };
-
-  const resetSidebarWidth = () => {
-    setSidebarWidth(SIDEBAR_DEFAULT);
-    sidebarWidthRef.current = SIDEBAR_DEFAULT;
-    try {
-      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(SIDEBAR_DEFAULT));
-    } catch {
-      // ignore
-    }
-  };
 
   useEffect(() => {
     const boot = async () => {
@@ -203,9 +126,15 @@ function App() {
       }
       try {
         const me = await authApi.me();
-        setUser(me.user);
+        if (me?.user && sessionUserIsValid(me.user)) {
+          setUser(me.user);
+        } else {
+          authApi.logout();
+          setUser(null);
+        }
       } catch {
         authApi.logout();
+        setUser(null);
       } finally {
         setChecking(false);
       }
@@ -299,25 +228,28 @@ function App() {
       <Routes>
         <Route
           path="/login"
-          element={user ? <Navigate to="/dashboard" replace /> : <Login onLoggedIn={setUser} />}
+          element={sessionUserIsValid(user) ? <Navigate to="/dashboard" replace /> : <Login onLoggedIn={setUser} />}
         />
         <Route
           path="/*"
           element={
             <RequireAuth checking={checking} user={user}>
+              <WarehouseProvider user={user}>
               <CardDisplayProvider>
               <div className="app-shell min-h-screen bg-theme-page text-xs">
-                <header className="app-topbar bg-theme-header border-b border-theme-border">
-                  <div className="max-w-[1920px] mx-auto px-2 sm:px-3">
-                    <div className="flex justify-between items-center py-1.5 gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
+                <header className="app-topbar">
+                  <div className="app-topbar__inner max-w-[1920px] mx-auto px-2 sm:px-3">
+                    <div className="app-topbar__row flex justify-between items-center py-2 gap-2">
+                      <div className="app-topbar__brand flex items-center gap-2.5 min-w-0">
                         <img
                           src="/LOGO.png"
                           alt="GoDaam"
-                          className="h-9 w-auto max-w-[140px] object-contain flex-shrink-0"
+                          className="h-9 w-auto max-w-[140px] object-contain flex-shrink-0 drop-shadow-sm"
                         />
+                        <span className="app-topbar__product hidden md:inline">Warehouse</span>
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
+                        <WarehouseToolbar />
                         <div className="text-[10px] font-semibold text-theme-fg-muted hidden sm:block">
                           {user?.username} ({user?.role})
                         </div>
@@ -338,12 +270,15 @@ function App() {
                             ) : null}
                           </button>
                           {notifOpen ? (
-                            <div className="absolute right-0 mt-2 w-[360px] max-w-[85vw] rounded-lg border border-theme-border bg-theme-card shadow-lg overflow-hidden z-50">
+                            <div
+                              className="absolute right-0 mt-2 w-[360px] max-w-[85vw] rounded-xl border border-theme-border bg-theme-elevate overflow-hidden z-50"
+                              style={{ boxShadow: 'var(--shadow-raised)' }}
+                            >
                               <div className="px-3 py-2 flex items-center justify-between bg-theme-muted border-b border-theme-border">
                                 <div className="text-[11px] font-bold text-theme-fg-secondary">Unread</div>
                                 <NavLink
                                   to="/notifications"
-                                  className="text-[11px] font-bold text-primary-700 hover:underline"
+                                  className="text-[11px] font-bold text-theme-primary hover:underline"
                                   onClick={() => setNotifOpen(false)}
                                 >
                                   View all
@@ -390,351 +325,19 @@ function App() {
                         </button>
                       </div>
                     </div>
+                    <AppTopNav user={user} />
                   </div>
                 </header>
 
-                <div className="app-workspace flex w-full px-2 sm:px-3 py-2 gap-2 items-stretch">
-                  <div
-                    className="app-sidebar-shell hidden lg:flex shrink-0 sticky top-2 self-start max-h-[calc(100vh-2.75rem)] rounded-lg border border-theme-border bg-theme-card overflow-hidden"
-                    style={{ '--sidebar-expanded-width': `${sidebarWidth}px` }}
-                  >
-                    <aside className="flex-1 min-w-0 p-2 overflow-y-auto overflow-x-hidden">
-                    <nav className="space-y-1">
-                      <NavLink
-                        to="/dashboard"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <BarChart3 className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Dashboard</span>
-                      </NavLink>
-
-                      <NavLink
-                        to="/main-stock"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <Package className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Main Stock</span>
-                      </NavLink>
-
-                      <NavLink
-                        to="/stock-by-rack/summary"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <Layers className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Stock By Rack</span>
-                      </NavLink>
-
-                      {(user?.role === 'admin' || user?.permissions?.can_upload_outbound) && (
-                        <NavLink
-                          to="/outbound-upload"
-                          className={({ isActive }) =>
-                            `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                          }
-                        >
-                          <UploadCloud className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="truncate">Outbound Upload</span>
-                        </NavLink>
-                      )}
-
-                      {(user?.role === 'admin' || user?.permissions?.can_view_picked_table) && (
-                        <NavLink
-                          to="/picked-orders"
-                          className={({ isActive }) =>
-                            `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                          }
-                        >
-                          <ClipboardList className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="truncate">Pickup / Picked Orders</span>
-                        </NavLink>
-                      )}
-
-                      <NavLink
-                        to="/customers"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <Users className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Customers</span>
-                      </NavLink>
-
-                      <NavLink
-                        to="/delivery-note"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Delivery Order / Delivery Note</span>
-                      </NavLink>
-
-                      <NavLink
-                        to="/pod-inbox"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <Image className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">POD inbox</span>
-                      </NavLink>
-
-                      <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
-                        <PieChart className="w-3 h-3" />
-                        Reports
-                      </div>
-                      <NavLink
-                        to="/reports/inbound"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <Truck className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Inbound Report</span>
-                      </NavLink>
-                      <NavLink
-                        to="/reports/outbound"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <LineChart className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Outbound Report</span>
-                      </NavLink>
-                      <NavLink
-                        to="/reports/delivery"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <FileSpreadsheet className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Delivery Report</span>
-                      </NavLink>
-                      <NavLink
-                        to="/reports/stock-by-rack-report"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <Layers className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Stock By Rack Report</span>
-                      </NavLink>
-                      <NavLink
-                        to="/reports/rack-balance-adjustments"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <ClipboardPenLine className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Rack balance adjustments</span>
-                      </NavLink>
-                      <NavLink
-                        to="/reports/main-stock-report"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <Package className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Main Stock Report</span>
-                      </NavLink>
-                      <NavLink
-                        to="/reports/stock-comparison"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <GitCompare className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">Stock Comparison Report</span>
-                      </NavLink>
-
-                      <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
-                        <FileSpreadsheet className="w-3 h-3" />
-                        SAP Stock
-                      </div>
-                      <NavLink
-                        to="/sap-stock"
-                        className={({ isActive }) =>
-                          `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                        }
-                      >
-                        <Database className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">SAP Stock</span>
-                      </NavLink>
-
-                      <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
-                        <Boxes className="w-3 h-3" />
-                        Plugins
-                      </div>
-                      <button
-                        type="button"
-                        className="nav-sidebar-link w-full text-left cursor-pointer"
-                        title={
-                          GODAM_1_EXTERNAL_URL
-                            ? 'Opens separately hosted GoDam 1.0 in a new browser tab'
-                            : 'Opens GoDam 1.0 (Streamlit) in a new browser tab — Python UI served via this site'
-                        }
-                        onClick={() => {
-                          void openGoDamOneNewTab();
-                        }}
-                      >
-                        <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span className="truncate">GoDam 1.0</span>
-                      </button>
-
-                      {user?.role === 'admin' && (
-                        <>
-                          <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-amber-600 uppercase tracking-wide">
-                            <Boxes className="w-3 h-3" />
-                            Under Construction
-                          </div>
-                          <NavLink
-                            to="/ocr-center"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <ScanLine className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">OCR Center</span>
-                          </NavLink>
-                          <a
-                            href={import.meta.env.VITE_OCR_TOOL_URL || 'https://godam.divadivya.cloud/ocr'}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="nav-sidebar-link"
-                          >
-                            <ExternalLink className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">OCR Tool</span>
-                          </a>
-                          <NavLink
-                            to="/huawei-godam"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <UploadCloud className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Huawei · Upload files</span>
-                          </NavLink>
-                        </>
-                      )}
-
-                      {(user?.role === 'admin' ||
-                        user?.permissions?.can_view_transportation ||
-                        user?.permissions?.can_manage_transportation) && (
-                        <>
-                          <div className="app-sidebar-section-label flex items-center gap-2 px-2 py-1 mt-2 text-[10px] font-bold text-theme-fg-muted uppercase tracking-wide">
-                            <ShieldCheck className="w-3 h-3" />
-                            Admin
-                          </div>
-                          <NavLink
-                            to="/transportation-details"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <Truck className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Transportation Details</span>
-                          </NavLink>
-                        </>
-                      )}
-                      {user?.role === 'admin' && (
-                        <>
-                          <NavLink
-                            to="/vendor-master"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <Truck className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Vendor Master</span>
-                          </NavLink>
-                          <NavLink
-                            to="/vendor-items"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <Truck className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Vendor Items</span>
-                          </NavLink>
-                          <NavLink
-                            to="/users"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <UserCog className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Users</span>
-                          </NavLink>
-                          <NavLink
-                            to="/role-permissions"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <KeySquare className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Role Permissions</span>
-                          </NavLink>
-                          <NavLink
-                            to="/pick-change-requests"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <Truck className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Pick Requests</span>
-                          </NavLink>
-                          <NavLink
-                            to="/admin-maintenance"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <Database className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Outbound DB</span>
-                          </NavLink>
-                          <NavLink
-                            to="/mobile-apps"
-                            className={({ isActive }) =>
-                              `nav-sidebar-link ${isActive ? 'nav-sidebar-link-active' : ''}`
-                            }
-                          >
-                            <Smartphone className="w-3.5 h-3.5 flex-shrink-0" />
-                            <span className="truncate">Mobile Apps</span>
-                          </NavLink>
-                        </>
-                      )}
-                    </nav>
-                    </aside>
-                    <button
-                      type="button"
-                      aria-label="Drag to resize sidebar"
-                      title="Drag to resize · Double-click to reset width"
-                      onMouseDown={startSidebarResize}
-                      onDoubleClick={(e) => {
-                        e.preventDefault();
-                        resetSidebarWidth();
-                      }}
-                      className="group relative w-3 shrink-0 cursor-col-resize border-l border-theme-border bg-gradient-to-b from-theme-muted to-theme-page hover:opacity-90 flex flex-col items-center justify-center gap-0.5 touch-none select-none outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring-primary)] focus-visible:ring-inset"
-                    >
-                      <span className="pointer-events-none flex flex-col items-center gap-0.5 text-[10px] leading-none font-bold text-theme-fg-muted group-hover:text-theme-primary" aria-hidden>
-                        <span className="opacity-70">+</span>
-                        <GripVertical className="w-3 h-3" strokeWidth={2.5} />
-                        <span className="opacity-70">+</span>
-                      </span>
-                    </button>
-                  </div>
-
-                  <main className="app-main flex-1 min-w-0 pb-4">
+                <div className="app-workspace app-workspace--topnav-only flex w-full px-2 sm:px-3 py-2">
+                  <main className="app-main flex-1 min-w-0 pb-4 w-full">
                     <Routes>
-                      <Route path="/dashboard" element={<Dashboard />} />
+                      <Route path="/dashboard" element={<Dashboard currentUser={user} />} />
                       <Route path="/reports/inbound" element={<InboundReport />} />
                       <Route path="/reports/outbound" element={<OutboundReport />} />
                       <Route path="/reports/delivery" element={<DeliveryReport />} />
+                      <Route path="/reports/audit-log" element={<AuditLogReport />} />
+                      <Route path="/reports/sales-order-documents" element={<SalesOrderDocumentsReport />} />
                       <Route
                         path="/reports/stock-by-rack-report"
                         element={<ReportExportPage title="Stock By Rack Report" fileSlug="stock-by-rack" endpoint="/reports/stock-by-rack" />}
@@ -768,38 +371,35 @@ function App() {
                       <Route path="/reports/stock-comparison" element={<StockComparisonReport />} />
                       <Route path="/sap-stock" element={<SapStock />} />
                       <Route path="/godam-plugin" element={<Navigate to="/dashboard" replace />} />
-                      <Route
-                        path="/ocr-center"
-                        element={
-                          <RequireAdmin user={user}>
-                            <OcrCenter />
-                          </RequireAdmin>
-                        }
-                      />
+                      <Route path="/puter-tools" element={<PuterTools />} />
                       <Route
                         path="/huawei-godam"
                         element={
-                          <RequireAdmin user={user}>
-                            <HuaweiGodamUpload currentUser={user} />
-                          </RequireAdmin>
+                          <UnderConstruction
+                            title="Huawei · Upload files"
+                            detail="GoDam Huawei uploads and matching are under construction. OCR / large PDF tooling is paused here as well."
+                          />
                         }
                       />
                       <Route path="/main-stock" element={<MainStock />} />
                       <Route path="/stock-by-rack/*" element={<StockByRack currentUser={user} />} />
                       <Route path="/pick-suggestion" element={<Navigate to="/dashboard" replace />} />
-                      <Route path="/outbound-upload" element={<OutboundUpload currentUser={user} />} />
-                      <Route path="/picked-orders" element={<PickedOrdersAdmin />} />
+                      <Route path="/outbound-pick" element={<OutboundUpload currentUser={user} />} />
+                      <Route path="/outbound-upload" element={<Navigate to="/outbound-pick" replace />} />
+                      <Route path="/picked-orders" element={<Navigate to="/outbound-pick" replace />} />
                       <Route path="/customers" element={<Customers />} />
                       <Route path="/delivery-note" element={<DeliveryNote />} />
+                      <Route path="/sales-order-documents" element={<SalesOrderDocuments />} />
                       <Route path="/pod-inbox" element={<PodInbox />} />
                       <Route path="/carrier-master" element={<Navigate to="/transportation-details" replace />} />
                       <Route path="/transportation-details" element={<TransportationDetails user={user} />} />
                       <Route path="/vendor-master" element={<VendorMaster />} />
                       <Route path="/vendor-items" element={<VendorItems />} />
                       <Route path="/users" element={<UsersAdmin />} />
+                      <Route path="/warehouses" element={<WarehousesAdmin />} />
                       <Route path="/role-permissions" element={<RolePermissions />} />
                       <Route path="/pick-change-requests" element={<PickChangeRequests />} />
-                      <Route path="/admin-maintenance" element={<AdminMaintenance />} />
+                      <Route path="/admin-bom-parts" element={<AdminBomParts />} />
                       <Route
                         path="/mobile-apps"
                         element={
@@ -816,6 +416,7 @@ function App() {
                 <FloatingAIAgent user={user} />
               </div>
               </CardDisplayProvider>
+              </WarehouseProvider>
             </RequireAuth>
           }
         />

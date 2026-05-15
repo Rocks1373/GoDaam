@@ -34,6 +34,10 @@ export type MobileSummary = {
   orders_unseen: number;
   /** Inbound batches that still have remaining qty to put away */
   inbound_putaway_pending: number;
+  notif_unread_orders?: number;
+  notif_unread_delivery?: number;
+  notif_unread_inbound?: number;
+  notif_unread_picked?: number;
 };
 
 export async function getMobileSummary() {

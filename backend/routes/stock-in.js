@@ -1,14 +1,12 @@
 const express = require('express');
 const multer = require('multer');
-const XLSX = require('xlsx');
-const sqlite3 = require('sqlite3').verbose();
-
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
 
 const router = express.Router();
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const { normalizeExcelRows } = require('../utils/excelDates');
+const { readFirstSheetAsObjects } = require('../utils/readXlsxFirstSheetExceljs');
+const { resolveWarehouseIdForRequest } = require('../services/warehouseContext');
 
 function pick(row, ...names) {
   for (const n of names) {
@@ -21,7 +19,8 @@ function pick(row, ...names) {
 }
 
 function openDb() {
-  return new sqlite3.Database(DB_PATH);
+  // Shared warehouse Postgres pool (`backend/db`). Never call `db.close()` per request — it runs `pool.end()` and breaks all later requests (including JWT revocation checks in `requireAuth`).
+  return require('../db');
 }
 
 function toNumber(v) {
@@ -56,7 +55,16 @@ function normalizeRow(row) {
     source_type: source_type || null,
     reference_no: reference_no || null,
     remarks: remarks || null,
+    warehouse_id: Number(pick(row, 'warehouse_id', 'Warehouse ID', 'Warehouse Id') || row.warehouse_id) || null,
   };
+}
+
+async function resolveStockInWarehouseId(req) {
+  return resolveWarehouseIdForRequest({
+    userId: req.user?.sub,
+    role: req.user?.role,
+    explicitWarehouseId: req.body?.warehouse_id ?? req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
+  });
 }
 
 async function applyStockIn(db, row, { updateExisting = false } = {}) {
@@ -66,6 +74,14 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
   if (!r.part_number) throw new Error('part_number is required');
   if (!r.rack_location) throw new Error('rack_location is required');
   if (!(r.qty_in > 0)) throw new Error('qty_in must be > 0');
+  if (!r.warehouse_id) {
+    r.warehouse_id = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM warehouses ORDER BY id LIMIT 1`, [], (err, found) =>
+        err ? reject(err) : resolve(Number(found?.id) || null)
+      );
+    });
+  }
+  if (!r.warehouse_id) throw new Error('warehouse_id is required');
 
   const existing = await new Promise((resolve, reject) => {
     if (!updateExisting) return resolve(null);
@@ -77,9 +93,10 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
          AND rack_location = ?
          AND COALESCE(source_type,'') = COALESCE(?, '')
          AND COALESCE(reference_no,'') = COALESCE(?, '')
+         AND warehouse_id = ?
        ORDER BY id DESC
        LIMIT 1`,
-      [r.transaction_date, r.part_number, r.rack_location, r.source_type, r.reference_no],
+      [r.transaction_date, r.part_number, r.rack_location, r.source_type, r.reference_no, r.warehouse_id],
       (err, found) => (err ? reject(err) : resolve(found || null))
     );
   });
@@ -114,8 +131,8 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO stock_in
-          (transaction_date, part_number, sap_part_number, description, rack_location, qty_in, source_type, reference_no, remarks)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (transaction_date, part_number, sap_part_number, description, rack_location, qty_in, source_type, reference_no, remarks, warehouse_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           r.transaction_date,
           r.part_number,
@@ -126,6 +143,7 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
           r.source_type,
           r.reference_no,
           r.remarks,
+          r.warehouse_id,
         ],
         (err) => (err ? reject(err) : resolve())
       );
@@ -137,8 +155,8 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
     db.get(
       `SELECT id, total_in_qty, total_out_qty, available_qty, first_entry_date
        FROM stock_by_rack
-       WHERE part_number = ? AND rack_location = ?`,
-      [r.part_number, r.rack_location],
+       WHERE part_number = ? AND rack_location = ? AND warehouse_id = ?`,
+      [r.part_number, r.rack_location, r.warehouse_id],
       (err, found) => (err ? reject(err) : resolve(found || null))
     );
   });
@@ -150,8 +168,8 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO stock_by_rack
-          (part_number, sap_part_number, description, rack_location, total_in_qty, total_out_qty, available_qty, first_entry_date, last_updated)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?, CURRENT_TIMESTAMP)`,
+          (part_number, sap_part_number, description, rack_location, total_in_qty, total_out_qty, available_qty, first_entry_date, last_updated, warehouse_id)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, CURRENT_TIMESTAMP, ?)`,
         [
           r.part_number,
           r.sap_part_number,
@@ -160,6 +178,7 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
           initialIn,
           initialIn,
           r.transaction_date,
+          r.warehouse_id,
         ],
         (err) => (err ? reject(err) : resolve())
       );
@@ -203,13 +222,13 @@ async function getStockInById(db, id) {
   });
 }
 
-async function updateStockByRackInDelta(db, { part_number, rack_location, deltaQty, sap_part_number, description, transaction_date }) {
+async function updateStockByRackInDelta(db, { part_number, rack_location, warehouse_id, deltaQty, sap_part_number, description, transaction_date }) {
   const current = await new Promise((resolve, reject) => {
     db.get(
       `SELECT id, total_in_qty, total_out_qty
        FROM stock_by_rack
-       WHERE part_number = ? AND rack_location = ?`,
-      [part_number, rack_location],
+       WHERE part_number = ? AND rack_location = ? AND warehouse_id = ?`,
+      [part_number, rack_location, warehouse_id],
       (err, found) => (err ? reject(err) : resolve(found || null))
     );
   });
@@ -257,8 +276,6 @@ router.get('/', async (req, res) => {
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -267,8 +284,9 @@ router.post('/', async (req, res) => {
   const db = openDb();
   const updateExisting = !!req.body?.update_existing;
   try {
+    const warehouseId = await resolveStockInWarehouseId(req);
     await new Promise((resolve, reject) => db.run('BEGIN IMMEDIATE', (err) => (err ? reject(err) : resolve())));
-    const result = await applyStockIn(db, req.body, { updateExisting });
+    const result = await applyStockIn(db, { ...req.body, warehouse_id: warehouseId }, { updateExisting });
     await new Promise((resolve, reject) => db.run('COMMIT', (err) => (err ? reject(err) : resolve())));
     res.status(201).json(result);
   } catch (e) {
@@ -279,8 +297,6 @@ router.post('/', async (req, res) => {
       // ignore
     }
     res.status(400).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -337,6 +353,7 @@ router.put('/:id', async (req, res) => {
     await updateStockByRackInDelta(db, {
       part_number: updated.part_number,
       rack_location: updated.rack_location,
+      warehouse_id: existing.warehouse_id,
       deltaQty,
       sap_part_number: updated.sap_part_number,
       description: updated.description,
@@ -352,8 +369,6 @@ router.put('/:id', async (req, res) => {
       // ignore
     }
     res.status(400).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -376,6 +391,7 @@ router.delete('/:id', async (req, res) => {
     await updateStockByRackInDelta(db, {
       part_number: existing.part_number,
       rack_location: existing.rack_location,
+      warehouse_id: existing.warehouse_id,
       deltaQty: -toNumber(existing.qty_in),
       sap_part_number: existing.sap_part_number,
       description: existing.description,
@@ -391,8 +407,6 @@ router.delete('/:id', async (req, res) => {
       // ignore
     }
     res.status(400).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -402,14 +416,14 @@ router.post('/bulk-paste', async (req, res) => {
   const updateExisting = !!req.body?.update_existing;
   try {
     if (!Array.isArray(req.body?.data)) return res.status(400).json({ error: 'data must be an array' });
+    const warehouseId = await resolveStockInWarehouseId(req);
     const data = normalizeExcelRows(req.body.data);
 
     await new Promise((resolve, reject) => db.run('BEGIN IMMEDIATE', (err) => (err ? reject(err) : resolve())));
     const results = [];
     for (let i = 0; i < data.length; i += 1) {
       try {
-        // eslint-disable-next-line no-await-in-loop
-        const r = await applyStockIn(db, data[i], { updateExisting });
+        const r = await applyStockIn(db, { ...data[i], warehouse_id: warehouseId }, { updateExisting });
         results.push({ ...r, row_index: i });
       } catch (e) {
         results.push({ error: e.message, row_index: i, row: data[i] });
@@ -430,8 +444,6 @@ router.post('/bulk-paste', async (req, res) => {
       // ignore
     }
     res.status(500).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -440,17 +452,19 @@ router.post('/upload', upload.single('file'), async (req, res) => {
   const db = openDb();
   const updateExisting = req.body?.update_existing === 'true' || req.body?.update_existing === true;
   try {
-    const workbook = XLSX.readFile(req.file.path);
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const data = normalizeExcelRows(XLSX.utils.sheet_to_json(sheet, { defval: '' }));
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: 'file is required (multipart field: file)' });
+    }
+    const warehouseId = await resolveStockInWarehouseId(req);
+    const rawRows = await readFirstSheetAsObjects(req.file.buffer);
+    const data = normalizeExcelRows(rawRows);
 
     await new Promise((resolve, reject) => db.run('BEGIN IMMEDIATE', (err) => (err ? reject(err) : resolve())));
     const results = [];
     for (let i = 0; i < data.length; i += 1) {
       const row = data[i];
       try {
-        // eslint-disable-next-line no-await-in-loop
-        const r = await applyStockIn(db, row, { updateExisting });
+        const r = await applyStockIn(db, { ...row, warehouse_id: warehouseId }, { updateExisting });
         results.push({ ...r, row_index: i });
       } catch (e) {
         results.push({ error: e.message, row_index: i, row });
@@ -472,11 +486,8 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       // ignore
     }
     res.status(500).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
 module.exports = router;
 module.exports.applyStockIn = applyStockIn;
-

@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const { recognize } = require('tesseract.js');
+const { imageLines } = require('../services/ocrPythonClient');
 
 const router = express.Router();
 
@@ -11,23 +11,26 @@ const upload = multer({
 
 /**
  * POST multipart/form-data field `image` — returns recognized text lines (English).
- * Uses Tesseract on the server so Expo Go can OCR without native modules.
+ * Delegates to the HTTP OCR service (system Tesseract). Requires OCR_PYTHON_SERVICE_URL on the backend.
  */
 router.post('/image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file?.buffer) {
       return res.status(400).json({ error: 'Missing image (multipart field: image)' });
     }
-    const { data } = await recognize(req.file.buffer, 'eng');
-    const raw = data?.text || '';
-    const lines = raw
-      .split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const data = await imageLines(req.file.buffer, req.file.originalname || 'capture.jpg');
+    const raw = data?.raw ?? '';
+    const lines = Array.isArray(data?.lines)
+      ? data.lines.map((s) => String(s).trim()).filter(Boolean)
+      : String(raw)
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean);
     res.json({ lines, raw });
   } catch (e) {
     console.error('[ocr]', e);
-    res.status(500).json({ error: e.message || 'OCR failed' });
+    const code = e.code === 'OCR_PYTHON_UNCONFIGURED' ? 503 : 500;
+    res.status(code).json({ error: e.message || 'OCR failed' });
   }
 });
 

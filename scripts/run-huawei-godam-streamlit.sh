@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Streams Huawei GoDam-1.0 Streamlit UI (GoDam/GoDam-1.0 or plugins/GoDam-1.0).
+# Streams Huawei GoDam-1.0 Streamlit UI. Canonical path: **plugins/GoDam-1.0** (legacy: GoDam/GoDam-1.0).
 # - Used directly: bash scripts/run-huawei-godam-streamlit.sh
 # - Or started automatically by the Node backend when HUAWEI_GODAM_STREAMLIT_AUTOSTART=1
 #   (see backend/huaweiStreamlitAutostart.js and npm run dev:web:huawei / ./dev.sh).
@@ -9,12 +9,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-if [[ -f "$ROOT/GoDam/GoDam-1.0/Home.py" ]]; then
-  GODAM="$ROOT/GoDam/GoDam-1.0"
-elif [[ -f "$ROOT/plugins/GoDam-1.0/Home.py" ]]; then
+if [[ -f "$ROOT/plugins/GoDam-1.0/Home.py" ]]; then
   GODAM="$ROOT/plugins/GoDam-1.0"
+elif [[ -f "$ROOT/GoDam/GoDam-1.0/Home.py" ]]; then
+  GODAM="$ROOT/GoDam/GoDam-1.0"
 else
-  echo "Missing GoDam-1.0 Home.py — use GoDam/GoDam-1.0 or plugins/GoDam-1.0"
+  echo "Missing GoDam-1.0 Home.py — install under plugins/GoDam-1.0 (preferred) or GoDam/GoDam-1.0"
   exit 1
 fi
 cd "$GODAM"
@@ -59,11 +59,13 @@ if ! "$PY" -c "import streamlit" 2>/dev/null; then
   echo "[godam] streamlit missing for: $PY"
   echo "[godam] Homebrew blocks global pip (PEP 668). From repo root run:"
   echo "        bash scripts/setup-huawei-godam-venv.sh"
-  echo "    Then restart ./dev.sh (uses GoDam/GoDam-1.0/.venv or plugins/GoDam-1.0/.venv)."
+  echo "    Then restart ./dev.sh (venv under plugins/GoDam-1.0/.venv or legacy GoDam/GoDam-1.0/.venv)."
   exit 1
 fi
 
 exec "$PY" -m streamlit run Home.py \
   --server.port "$PORT" \
   --server.headless true \
-  --server.baseUrlPath "$BASE_PATH"
+  --server.baseUrlPath "$BASE_PATH" \
+  --server.enableXsrfProtection false \
+  --server.enableCORS false

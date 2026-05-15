@@ -6,7 +6,9 @@ import StockOut from './StockOut';
 
 const tabClass = ({ isActive }) =>
   `px-2 py-1 rounded-md text-[11px] font-bold transition-all border ${
-    isActive ? 'bg-primary-50 text-primary-700 border-primary-200' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+    isActive
+      ? 'bg-theme-primary/15 text-theme-primary border-[var(--color-primary-border)]'
+      : 'bg-theme-card text-theme-fg-secondary border-theme-border hover:bg-theme-muted'
   }`;
 
 const StockByRack = ({ currentUser }) => {
@@ -14,8 +16,8 @@ const StockByRack = ({ currentUser }) => {
     <div>
       <div className="flex flex-col md:flex-row md:items-start justify-between mb-2 gap-2">
         <div className="min-w-0">
-          <h2 className="text-base font-bold text-gray-900 leading-tight">Stock By Rack</h2>
-          <p className="text-[11px] text-gray-600">Summary / Stock In / Stock Out</p>
+          <h2 className="text-base font-bold text-theme-fg leading-tight">Stock By Rack</h2>
+          <p className="text-[11px] text-theme-fg-muted">Summary / Stock In / Stock Out</p>
         </div>
         <div className="hidden md:flex items-center gap-1 text-[10px] font-semibold text-gray-500">
           <Layers size={12} />

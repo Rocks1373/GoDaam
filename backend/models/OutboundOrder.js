@@ -1,10 +1,8 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
+const db = require('../db');
 
 class OutboundOrder {
   constructor() {
-    this.db = new sqlite3.Database(DB_PATH);
+    this.db = db;
   }
 
   // Create new outbound order
@@ -25,6 +23,7 @@ class OutboundOrder {
         gross_weight,
         volume,
         dn_status,
+        warehouse_id,
       } = orderData;
 
       this.db.run(
@@ -32,8 +31,8 @@ class OutboundOrder {
          (outbound_number, sales_order_number, customer_po_number, 
           customer_name, vendor_name,
           dn_date, gapp_po, invoice_number, delivery_address, contact_person,
-          total_cases, gross_weight, volume, dn_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          total_cases, gross_weight, volume, dn_status, warehouse_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           outbound_number,
           sales_order_number,
@@ -49,6 +48,7 @@ class OutboundOrder {
           gross_weight,
           volume,
           dn_status,
+          warehouse_id,
         ],
         function(err) {
           if (err) reject(err);
@@ -59,7 +59,7 @@ class OutboundOrder {
   }
 
   // Get all orders with pagination and search
-  async findAll({ search = '', status = '', page = 1, limit = 20 }) {
+  async findAll({ search = '', status = '', page = 1, limit = 20, warehouse_id } = {}) {
     return new Promise((resolve, reject) => {
       const offset = (page - 1) * limit;
       let query = `
@@ -70,6 +70,10 @@ class OutboundOrder {
       `;
       const params = [];
 
+      if (warehouse_id != null && Number(warehouse_id) > 0) {
+        query += ' AND warehouse_id = ?';
+        params.push(Number(warehouse_id));
+      }
       if (search) {
         query += ' AND (outbound_number LIKE ? OR customer_name LIKE ? OR sales_order_number LIKE ?)';
         params.push(`%${search}%`, `%${search}%`, `%${search}%`);

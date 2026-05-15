@@ -1,11 +1,9 @@
-const sqlite3 = require('sqlite3').verbose();
+const db = require('../db');
 const StockByRack = require('./StockByRack');
-
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
 
 class PickSuggestion {
   constructor() {
-    this.db = new sqlite3.Database(DB_PATH);
+    this.db = db;
     this.stockByRack = new StockByRack();
   }
 

@@ -31,7 +31,7 @@ function startHuaweiStreamlitIfEnabled() {
   const godamDir = resolveGoDamPluginDir(root);
   if (!fs.existsSync(script) || !godamDir) {
     console.warn(
-      '[huawei] Streamlit autostart skipped (missing GoDam-1.0). Expected GoDam/GoDam-1.0 or plugins/GoDam-1.0 — run npm run setup:huawei-godam'
+      '[huawei] Streamlit autostart skipped (missing GoDam-1.0). Expected plugins/GoDam-1.0 (canonical) or legacy GoDam/GoDam-1.0 — run npm run setup:huawei-godam'
     );
     return;
   }

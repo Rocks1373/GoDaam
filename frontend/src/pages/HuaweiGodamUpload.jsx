@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { UploadCloud, RefreshCw, Activity, FileText } from 'lucide-react';
-import { huaweiGodamApi } from '../services/api';
+import api, { huaweiGodamApi } from '../services/api';
 
 const MASTER_FIELDS = [
   { key: 'summary', label: 'Summary', required: true },
@@ -181,11 +181,26 @@ export default function HuaweiGodamUpload({ currentUser }) {
     }
   };
 
-  const artifactUrl = (rel) => {
+  /**
+   * Uploaded files are served only via the authenticated /api/files/uploads/*
+   * route. We can't use a plain <a href> (browsers won't send the bearer token),
+   * so artifact links go through axios as a blob and trigger a client-side download.
+   */
+  const downloadArtifact = async (rel, suggestedName) => {
     const s = String(rel || '');
-    if (!s) return '';
-    // backend serves /uploads static from backend/uploads
-    return s.startsWith('uploads/') ? `/${s}` : `/uploads/${s.replace(/^\/+/, '')}`;
+    if (!s) return;
+    const stripped = s.replace(/^uploads\//, '').replace(/^\/+/, '');
+    try {
+      const res = await api.get(`/files/uploads/${stripped}`, { responseType: 'blob' });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = suggestedName || stripped.split('/').pop() || 'download';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setMsg(`Download failed: ${e?.response?.status || ''} ${e?.message || e}`);
+    }
   };
 
   return (
@@ -418,17 +433,15 @@ export default function HuaweiGodamUpload({ currentUser }) {
                   {(selected?.artifacts || []).length ? (
                     <div className="mt-2 flex flex-wrap gap-2">
                       {selected.artifacts.map((a) => (
-                        <a
+                        <button
+                          type="button"
                           key={a.id}
                           className="btn-secondary text-[11px] !py-1.5 !px-2"
-                          href={artifactUrl(a.relative_path)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          download
+                          onClick={() => downloadArtifact(a.relative_path, a.original_filename)}
                           title={a.relative_path}
                         >
                           Download {a.kind}
-                        </a>
+                        </button>
                       ))}
                     </div>
                   ) : (

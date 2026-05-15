@@ -7,6 +7,10 @@ function asNum(v) {
 
 /**
  * Increment main_stock.received_qty on shared DB connection (matches inbound / transactional flows).
+ * @param {*} db
+ * @param {string} part_number
+ * @param {number} inboundQty
+ * @param {object} patch optional: warehouse_id (required for multi-warehouse), sap_part_number, etc.
  */
 async function incrementReceivedOnDb(db, part_number, inboundQty, patch = {}) {
   const dbRun = promisify(db.run.bind(db));
@@ -16,7 +20,14 @@ async function incrementReceivedOnDb(db, part_number, inboundQty, patch = {}) {
   const d = asNum(inboundQty);
   if (!pn || !(d > 0)) throw new Error('Invalid part_number or inbound_qty');
 
-  const row = await dbGet('SELECT * FROM main_stock WHERE part_number = ?', [pn]);
+  let wh = Number(patch.warehouse_id) || null;
+  if (!wh) {
+    const w = await dbGet(`SELECT id FROM warehouses ORDER BY id LIMIT 1`);
+    wh = Number(w?.id) || null;
+  }
+  if (!wh) throw new Error('No warehouse configured for main stock increment');
+
+  const row = await dbGet('SELECT * FROM main_stock WHERE part_number = ? AND warehouse_id = ?', [pn, wh]);
   const sold = row ? asNum(row.sold_out_qty ?? row.issued_qty) : 0;
   const pend = row ? asNum(row.pending_delivery_qty) : 0;
 
@@ -30,8 +41,8 @@ async function incrementReceivedOnDb(db, part_number, inboundQty, patch = {}) {
       `INSERT INTO main_stock (
         product, vendor_name, vendor_number, sap_part_number, sap_qty, part_number, description,
         received_qty, issued_qty, sold_out_qty, pending_delivery_qty, available_qty, uom, remarks,
-        last_updated, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        last_updated, created_at, updated_at, warehouse_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)`,
       [
         patch.product ?? null,
         vn,
@@ -44,6 +55,7 @@ async function incrementReceivedOnDb(db, part_number, inboundQty, patch = {}) {
         avail,
         patch.uom ?? null,
         patch.remarks ?? null,
+        wh,
       ]
     );
     return;
@@ -62,7 +74,7 @@ async function incrementReceivedOnDb(db, part_number, inboundQty, patch = {}) {
        description = COALESCE(?, description),
        last_updated = CURRENT_TIMESTAMP,
        updated_at = CURRENT_TIMESTAMP
-     WHERE part_number = ?`,
+     WHERE part_number = ? AND warehouse_id = ?`,
     [
       d,
       d,
@@ -70,6 +82,7 @@ async function incrementReceivedOnDb(db, part_number, inboundQty, patch = {}) {
       patch.sap_part_number !== undefined ? patch.sap_part_number : null,
       patch.description !== undefined ? patch.description : null,
       pn,
+      wh,
     ]
   );
 }

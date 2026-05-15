@@ -17,13 +17,13 @@ async function notifyWebDeliveryStaff(title, body, data = {}) {
   for (const r of [...(rowsP || []), ...(rowsC || [])]) {
     if (r.expo_push_token) map.set(r.expo_push_token, r);
   }
-  await sendExpoPushToTokens([...map.values()], title, body, { ...data, channel: 'delivery' });
+  await sendExpoPushToTokens([...map.values()], title, body, { ...data, channel: 'delivery', notif_category: 'delivery' });
   const userIds = await getUserIdsWhoHaveAnyPermission(permKeys);
   const seen = new Set();
   for (const uid of userIds) {
     if (seen.has(uid)) continue;
     seen.add(uid);
-    await logNotification(uid, title, body, { ...data, channel: 'delivery' });
+    await logNotification(uid, title, body, { ...data, channel: 'delivery', notif_category: 'delivery' });
   }
 }
 

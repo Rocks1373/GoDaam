@@ -1,12 +1,41 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Search, Printer, CheckCircle2, FileSpreadsheet } from 'lucide-react';
-import { buildDeliveryNoteFilename, downloadDeliveryNoteExcel } from '../utils/deliveryNoteExport';
+import { buildDeliveryNoteFilenameBase, downloadDeliveryNoteExcel } from '../utils/deliveryNoteExport';
 import { authApi, carriersApi, customersApi, deliveryNotesApi } from '../services/api';
-import { useLocation } from 'react-router-dom';
+import { useLocation, Link } from 'react-router-dom';
+import { useWarehouse } from '../context/WarehouseContext';
+import ScanDocumentPanel from '../components/ScanDocumentPanel';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
+function pickQtyDn(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : 0;
+}
+
+const DN_PRINT_LS_KEY = 'gapp_dn_print_setup';
+
+function readInitialDnPrintSetup() {
+  try {
+    const j = JSON.parse(localStorage.getItem(DN_PRINT_LS_KEY) || '{}');
+    return {
+      marginMm:
+        typeof j.marginMm === 'number' && Number.isFinite(j.marginMm)
+          ? Math.min(22, Math.max(4, j.marginMm))
+          : 10,
+      zoomPct:
+        typeof j.zoomPct === 'number' && Number.isFinite(j.zoomPct)
+          ? Math.min(100, Math.max(72, j.zoomPct))
+          : 100,
+      compact: typeof j.compact === 'boolean' ? j.compact : false,
+    };
+  } catch {
+    return { marginMm: 10, zoomPct: 100, compact: false };
+  }
+}
+
 export default function DeliveryNote() {
+  const { selectedWarehouseId, isAllWarehouses, isAdmin: isAdminWh } = useWarehouse();
   const location = useLocation();
   const [outboundNumber, setOutboundNumber] = useState('');
   const [loading, setLoading] = useState(false);
@@ -42,6 +71,8 @@ export default function DeliveryNote() {
   const [holdRows, setHoldRows] = useState([]);
   const [outboundOptions, setOutboundOptions] = useState([]);
   const [outboundTyped, setOutboundTyped] = useState('');
+  /** Filter outbound dropdown by combined Sales Doc / SO / GAPP PO (from outbound upload / picked list). */
+  const [salesDocFilter, setSalesDocFilter] = useState('');
   const [deliveryToOpen, setDeliveryToOpen] = useState(false);
   const [deliveryToLoading, setDeliveryToLoading] = useState(false);
   const [deliveryToCtx, setDeliveryToCtx] = useState(null);
@@ -52,6 +83,11 @@ export default function DeliveryNote() {
   const [timeline, setTimeline] = useState(null);
   const [adminCloseOverride, setAdminCloseOverride] = useState(false);
   const [showAdminCloseDialog, setShowAdminCloseDialog] = useState(false);
+  /** A4 print / PDF: sheet margins (mm), content zoom %, compact table (saved in localStorage). */
+  const [printPageMarginMm, setPrintPageMarginMm] = useState(() => readInitialDnPrintSetup().marginMm);
+  const [printZoomPercent, setPrintZoomPercent] = useState(() => readInitialDnPrintSetup().zoomPct);
+  const [printCompactTable, setPrintCompactTable] = useState(() => readInitialDnPrintSetup().compact);
+
   const [addAddrForm, setAddAddrForm] = useState({
     city_name: '',
     address: '',
@@ -80,6 +116,21 @@ export default function DeliveryNote() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        DN_PRINT_LS_KEY,
+        JSON.stringify({
+          marginMm: printPageMarginMm,
+          zoomPct: printZoomPercent,
+          compact: printCompactTable,
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [printPageMarginMm, printZoomPercent, printCompactTable]);
 
   const fmtDt = (v) => {
     if (!v) return '—';
@@ -124,7 +175,7 @@ export default function DeliveryNote() {
     if (has2) setShowContact2(true);
     setCp2DraftName(trim(dn.contact_person_2));
     setCp2DraftPhone(trim(dn.contact_number_2));
-  }, [dn?.id, dn?.contact_person_2, dn?.contact_number_2]);
+  }, [dn]);
 
   const filteredDeliveryAddresses = useMemo(() => {
     const list = deliveryToCtx?.addresses || [];
@@ -156,6 +207,7 @@ export default function DeliveryNote() {
 
   const isGapp = String(dn?.transportation_type || '').trim().toLowerCase() === 'gapp';
   const isAdmin = String(me?.role || '').toLowerCase() === 'admin';
+  const scanWhOk = isAdminWh || (!isAllWarehouses && selectedWarehouseId);
   const canUploadOutbound =
     Boolean(me?.permissions?.can_upload_outbound) ||
     Boolean(me?.permissions?.can_confirm_picked) ||
@@ -267,9 +319,12 @@ export default function DeliveryNote() {
 
   const deliver = async () => {
     try {
-      if (!dnId) return;
-      if (gappMarkDeliveredBlocked) {
-        alert('GAPP: wait for driver close (POD) after Confirm before Mark Delivered.');
+      if (!dnId || !dn) {
+        alert('Load a delivery note first.');
+        return;
+      }
+      if (dnLocked && String(dn?.status || '').toLowerCase() === 'delivered') {
+        alert('This delivery note is already marked as Delivered.');
         return;
       }
       if (!hasTransportation) {
@@ -277,9 +332,25 @@ export default function DeliveryNote() {
         setShowTransportPrompt(true);
         return;
       }
-      if (!hasInvoice || !hasPackageType) {
-        alert('Invoice number and Package Type are required before marking delivered.');
+      if (!hasInvoice) {
+        alert('Invoice Number is required before marking delivered.');
         setShowInvoicePrompt(true);
+        return;
+      }
+      if (!hasPackageType) {
+        alert('Package Type is required before marking delivered.');
+        setShowInvoicePrompt(true);
+        return;
+      }
+      if (isGapp && !dn.confirmed_at) {
+        alert('GAPP: Click "Confirm for Delivery" first to notify the driver, then complete the driver flow before Mark Delivered.');
+        return;
+      }
+      if (isGapp && !Number(dn.is_closed)) {
+        alert(
+          'GAPP: Driver has not closed this delivery yet.\n' +
+            'Wait for the driver to upload POD and close, or use "Close Order (Admin)" before Mark Delivered.'
+        );
         return;
       }
       const result = await deliveryNotesApi.markDelivered(dnId);
@@ -296,19 +367,22 @@ export default function DeliveryNote() {
       }
       alert(
         result?.outbound_stock_already_finalized
-          ? 'Delivery note marked Delivered. Stock for this outbound was already finalized earlier (no second deduction).'
+          ? 'Delivery note marked as Delivered. Stock for this outbound was already finalized earlier (no second deduction).'
           : 'Marked as Delivered. Stock deducted from main stock (guarded against duplicate deduction).'
       );
     } catch (e) {
       const data = e?.response?.data;
       const shortages = data?.shortages;
-      let msg = data?.error || e.message || 'Request failed';
+      let msg = data?.error || e.message || 'Mark Delivered failed.';
       if (Array.isArray(shortages) && shortages.length) {
         const lines = shortages.map(
           (s) =>
             `${s.part_number}: need ${s.required_qty}, available ${s.available_qty} (short ${s.shortage_qty})`
         );
         msg = `${msg}\n\n${lines.join('\n')}`;
+      }
+      if (data?.code === 'MAIN_STOCK_PART_MISSING' && data?.part_number) {
+        msg = `${msg}\n\nAdd or align part ${data.part_number} in Main Stock before retrying.`;
       }
       alert(msg);
     }
@@ -418,11 +492,29 @@ export default function DeliveryNote() {
     const sp = new URLSearchParams(location.search || '');
     const ob = String(sp.get('outbound') || '').trim();
     if (!ob) return;
+    setSalesDocFilter('');
     setOutboundNumber(ob);
     setOutboundTyped(ob);
     setTimeout(() => load(), 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
+
+  const trimStr = (v) => String(v ?? '').trim();
+
+  const salesDocChoices = useMemo(() => {
+    const s = new Set();
+    for (const o of outboundOptions) {
+      const v = trimStr(o?.sales_doc);
+      if (v) s.add(v);
+    }
+    return [...s].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+  }, [outboundOptions]);
+
+  const outboundFiltered = useMemo(() => {
+    const f = trimStr(salesDocFilter);
+    if (!f) return outboundOptions;
+    return outboundOptions.filter((o) => trimStr(o?.sales_doc) === f);
+  }, [outboundOptions, salesDocFilter]);
 
   /** Load drivers: for GAPP with no carrier selected, merge all GAPP carriers' drivers (default "GAPP" option has empty id). */
   useEffect(() => {
@@ -657,16 +749,41 @@ export default function DeliveryNote() {
     return '';
   }, [view?.package_type, view?.pallet_qty, view?.box_qty]);
 
+  const dnPrintDynamicCss = useMemo(() => {
+    const m = Math.min(22, Math.max(4, Number(printPageMarginMm) || 10));
+    const z = Math.min(1, Math.max(0.72, (Number(printZoomPercent) || 100) / 100));
+    const zoomLine = z < 0.999 ? `zoom: ${z};` : '';
+    const compactBlock = printCompactTable
+      ? `
+      .dn-print-compact .dn-grid { font-size: 9px !important; }
+      .dn-print-compact .dn-grid th,
+      .dn-print-compact .dn-grid td { padding: 2px 4px !important; }
+      .dn-print-compact .dn-row { height: 22px !important; }
+      .dn-print-compact .dn-company-name { font-size: 15px !important; }
+      .dn-print-compact .dn-title { font-size: 20px !important; }
+    `
+      : '';
+    return `
+@page { size: A4; margin: ${m}mm; }
+@media print {
+  .dn-page { ${zoomLine} }
+  ${compactBlock}
+}
+`;
+  }, [printPageMarginMm, printZoomPercent, printCompactTable]);
+
   const handlePrintA4 = () => {
     const prevTitle = document.title;
-    const base = buildDeliveryNoteFilename(view, '.pdf').replace(/\.pdf$/i, '');
-    document.title = base;
+    // Chrome / Edge / Brave "Save as PDF" default filename follows document.title; use same base as Excel + ".pdf".
+    // Omit the ".pdf" suffix in the tab title so the saved file is usually "Name.pdf" not "Name.pdf.pdf".
+    const base = buildDeliveryNoteFilenameBase(view);
+    document.title = base || 'Delivery-Note';
     const restore = () => {
       document.title = prevTitle;
     };
     window.addEventListener('afterprint', restore, { once: true });
     window.print();
-    setTimeout(restore, 3000);
+    setTimeout(restore, 4000);
   };
 
   const handleExportExcel = () => {
@@ -724,33 +841,217 @@ export default function DeliveryNote() {
   };
 
   return (
-    <div>
+    <div className="dn-screen-root">
       <div className="mb-2 dn-no-print">
         <h2 className="text-base font-bold text-gray-900 leading-tight">Delivery Note (DN)</h2>
+        {dn && trim(view?.gapp_po) ? (
+          <div className="mt-1">
+            <Link
+              className="text-[11px] font-semibold text-primary-700 hover:underline"
+              to={`/sales-order-documents?so=${encodeURIComponent(trim(view.gapp_po))}`}
+            >
+              Sales Order Documents (GAPP PO {trim(view.gapp_po)})
+            </Link>
+          </div>
+        ) : null}
         <p className="text-[11px] text-gray-600">
-          A4 print / Save as PDF, and Excel export (same structure). File names: RG_Invoice_Outbound_CustomerPO_CustomerName_GappPO
+          A4 print / Save as PDF, and Excel export (same layout). File names use the same pattern:{' '}
+          <strong>RG_Invoice_Outbound_CustomerPO_CustomerName_GappPO</strong> (<code>.xlsx</code> on export;{' '}
+          <strong>Save as PDF</strong> suggests <code>.pdf</code> from the page title—same fields as Excel).{' '}
+          <strong>Print / Save PDF</strong> uses this tab only. Use <strong>Page setup</strong> below to tighten margins or scale the
+          sheet. <strong>Brave / Chrome / Edge:</strong> in the print dialog open <strong>More settings</strong> and turn off{' '}
+          <strong>Headers and footers</strong> so the URL and date are not added in the margin (the browser adds those when that option
+          is on).
         </p>
+        <details className="mt-2 rounded-lg border border-gray-200 bg-gray-50/80 px-3 py-2 text-[11px] text-gray-800">
+          <summary className="cursor-pointer font-bold text-gray-900 select-none">Page setup (print / Save as PDF)</summary>
+          <div className="mt-2 grid gap-3 sm:grid-cols-3">
+            <label className="flex flex-col gap-1">
+              <span className="font-semibold text-gray-700">Sheet margin (mm)</span>
+              <input
+                type="number"
+                min={4}
+                max={22}
+                step={1}
+                className="input-field"
+                value={printPageMarginMm}
+                onChange={(e) => setPrintPageMarginMm(Number(e.target.value))}
+              />
+              <span className="text-[10px] text-gray-500">Smaller margin = more room for content (4–22).</span>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="font-semibold text-gray-700">Content scale (%)</span>
+              <input
+                type="number"
+                min={72}
+                max={100}
+                step={1}
+                className="input-field"
+                value={printZoomPercent}
+                onChange={(e) => setPrintZoomPercent(Number(e.target.value))}
+              />
+              <span className="text-[10px] text-gray-500">Below 100% shrinks the whole note to reduce page breaks.</span>
+            </label>
+            <label className="flex items-end gap-2 pb-1">
+              <input
+                type="checkbox"
+                checked={printCompactTable}
+                onChange={(e) => setPrintCompactTable(e.target.checked)}
+                className="rounded border-gray-300"
+              />
+              <span className="font-semibold text-gray-700">Compact line-items table</span>
+            </label>
+          </div>
+          <p className="mt-2 text-[10px] text-gray-500">
+            Settings are saved in this browser. They apply when you use Print / Save PDF.
+          </p>
+        </details>
+        {dn && trim(dn.outbound_number) && dn.pick_footprint ? (
+          <details className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-[11px] text-emerald-950 dn-no-print">
+            <summary className="cursor-pointer font-bold text-emerald-900 select-none">
+              Pick &amp; rack (live){' '}
+              {dn.pick_footprint.pick_progress?.fully_picked ? (
+                <span className="font-normal text-emerald-700">· Fully picked</span>
+              ) : (
+                <span className="font-normal text-amber-800">· In progress</span>
+              )}
+            </summary>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded border border-emerald-100 bg-white/90 px-2 py-1.5">
+                <div className="text-[9px] font-semibold text-emerald-800 uppercase">Total qty</div>
+                <div>
+                  Picked <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.total_picked_qty).toLocaleString()}</strong> /{' '}
+                  <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.total_required_qty).toLocaleString()}</strong> required
+                </div>
+                <div className="mt-0.5">
+                  Remaining: <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.remaining_qty).toLocaleString()}</strong>
+                </div>
+              </div>
+              <div className="rounded border border-emerald-100 bg-white/90 px-2 py-1.5">
+                <div className="text-[9px] font-semibold text-emerald-800 uppercase">Lines</div>
+                <div>
+                  Complete <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.lines_complete)}</strong> /{' '}
+                  <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.lines_total)}</strong>
+                </div>
+              </div>
+              <div className="rounded border border-emerald-100 bg-white/90 px-2 py-1.5 sm:col-span-2">
+                <div className="text-[9px] font-semibold text-emerald-800 uppercase">Pick confirmed</div>
+                {dn.pick_footprint.picked_order ? (
+                  <div>
+                    <span className="font-semibold">{dn.pick_footprint.picked_order.confirmed_by_user_name || '—'}</span>
+                    {dn.pick_footprint.picked_order.confirmed_at ? (
+                      <span className="text-gray-600"> · {String(dn.pick_footprint.picked_order.confirmed_at).slice(0, 19)}</span>
+                    ) : null}
+                  </div>
+                ) : (
+                  <span className="text-gray-600">Not confirmed yet</span>
+                )}
+              </div>
+            </div>
+            <div className="mt-2 max-h-[200px] overflow-auto rounded border border-emerald-100 bg-white">
+              <table className="min-w-full text-[10px]">
+                <thead className="bg-emerald-100/80 sticky top-0">
+                  <tr>
+                    <th className="tbl-th text-left">When</th>
+                    <th className="tbl-th text-left">Picker</th>
+                    <th className="tbl-th text-left">Part</th>
+                    <th className="tbl-th text-right">Qty</th>
+                    <th className="tbl-th text-left">Rack</th>
+                    <th className="tbl-th text-left">Method</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(dn.pick_footprint.picked_transactions || []).length ? (
+                    dn.pick_footprint.picked_transactions.map((t) => (
+                      <tr key={t.id} className="border-b border-emerald-50">
+                        <td className="tbl-td-nowrap">{t.picked_at ? String(t.picked_at).slice(0, 19) : '—'}</td>
+                        <td className="tbl-td max-w-[7rem] truncate" title={t.user_name || ''}>
+                          {t.user_name || `user #${t.user_id || '—'}`}
+                        </td>
+                        <td className="tbl-td max-w-[9rem] truncate">{t.material || t.sap_part_number || '—'}</td>
+                        <td className="tbl-td text-right">{pickQtyDn(t.picked_qty)}</td>
+                        <td className="tbl-td font-mono max-w-[7rem] truncate" title={t.rack_location || ''}>
+                          {t.rack_location || '—'}
+                        </td>
+                        <td className="tbl-td-nowrap">
+                          {t.picked_method || '—'}
+                          {Number(t.is_manual_pick) ? ' · admin' : ''}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td className="tbl-td text-gray-500 py-2" colSpan={6}>
+                        No pick transactions yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-2 text-[10px] text-emerald-900/80">
+              Full FIFO &amp; workflow: open{' '}
+              <Link className="font-semibold underline" to="/outbound-pick">
+                Outbound &amp; pick
+              </Link>{' '}
+              and click this delivery number.
+            </p>
+          </details>
+        ) : null}
       </div>
 
       {/* Search bar (required on screens) */}
       <div className="app-page-toolbar dn-screen-toolbar">
         <div className="flex flex-col md:flex-row md:items-center gap-3">
-          <div className="flex items-center gap-3 max-w-lg flex-1">
-            <Search size={14} className="text-gray-400 flex-shrink-0" />
-            <div className="flex gap-2 flex-1">
+          <div className="flex flex-col gap-2 max-w-3xl flex-1 w-full">
+            <label className="flex flex-col text-[10px] font-semibold text-gray-600 max-w-xs">
+              Sales doc / GAPP PO / SO (filter)
               <select
-                className="input-field flex-1"
+                className="input-field mt-0.5"
+                value={salesDocFilter}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSalesDocFilter(v);
+                  setOutboundTyped('');
+                  const f = trimStr(v);
+                  if (!f) return;
+                  setOutboundNumber((prev) => {
+                    const row = outboundOptions.find((o) => trimStr(o.outbound_number) === trimStr(prev));
+                    if (!row) return prev;
+                    return trimStr(row.sales_doc) === f ? prev : '';
+                  });
+                }}
+                onFocus={refreshOutboundOptions}
+              >
+                <option value="">Any</option>
+                {salesDocChoices.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="flex items-center gap-3 flex-1">
+            <Search size={14} className="text-gray-400 flex-shrink-0" />
+            <div className="flex gap-2 flex-1 min-w-0">
+              <select
+                className="input-field flex-1 min-w-0"
                 value={outboundNumber}
                 onChange={(e) => {
-                  setOutboundNumber(e.target.value);
+                  const v = e.target.value;
+                  setOutboundNumber(v);
                   setOutboundTyped('');
+                  const row = outboundFiltered.find((o) => trimStr(o.outbound_number) === trimStr(v));
+                  if (row && trimStr(row.sales_doc)) setSalesDocFilter(trimStr(row.sales_doc));
                 }}
                 onFocus={refreshOutboundOptions}
               >
                 <option value="">Select Outbound Number…</option>
-                {outboundOptions.slice(0, 500).map((o, idx) => (
+                {outboundFiltered.slice(0, 500).map((o, idx) => (
                   <option key={`${o.outbound_number}-${idx}`} value={o.outbound_number}>
-                    {o.outbound_number} · {o.customer_name || ''}{o.customer_reference ? ` · ${o.customer_reference}` : ''}
+                    {o.outbound_number}
+                    {o.sales_doc ? ` · ${o.sales_doc}` : ''} · {o.customer_name || ''}
+                    {o.customer_reference ? ` · ${o.customer_reference}` : ''}
                   </option>
                 ))}
               </select>
@@ -767,6 +1068,7 @@ export default function DeliveryNote() {
               <button type="button" className="btn-secondary whitespace-nowrap" onClick={refreshOutboundOptions}>
                 Refresh
               </button>
+            </div>
             </div>
           </div>
           <div className="flex flex-wrap gap-1.5">
@@ -848,19 +1150,19 @@ export default function DeliveryNote() {
               className="btn-secondary flex items-center gap-1"
               type="button"
               onClick={deliver}
-              disabled={!dn || !hasInvoice || !hasPackageType || !hasTransportation || gappMarkDeliveredBlocked}
+              disabled={!dn}
               title={
                 !dn
                   ? 'Load a delivery note first'
                   : !hasInvoice
-                    ? 'Add an invoice number before marking delivered'
+                    ? 'Click to see why: invoice number is required'
                     : !hasPackageType
-                      ? 'Package type is required'
+                      ? 'Click to see why: package type is required'
                       : !hasTransportation
-                        ? 'Save transportation method first'
+                        ? 'Click to see why: transportation method is required'
                         : gappMarkDeliveredBlocked
                           ? 'GAPP: Confirm for delivery → driver uploads POD → driver closes (or Admin close). Then Mark Delivered.'
-                          : ''
+                          : 'Mark this delivery note as Delivered and deduct main stock'
               }
             >
               <CheckCircle2 size={14} />
@@ -868,6 +1170,23 @@ export default function DeliveryNote() {
             </button>
           </div>
         </div>
+        {dn && scanWhOk ? (
+          <div className="mt-2">
+            <ScanDocumentPanel
+              warehouseId={selectedWarehouseId}
+              salesOrderNumber={trim(dn.gapp_po || dn.sales_order_number || '')}
+              outboundNumber={trim(dn.outbound_number || '')}
+              dnNumber={trim(dn.dn_number || dn.outbound_number || '')}
+              invoiceNumber={effectiveInvoice}
+              customerPo={trim(dn.customer_po || '')}
+              gappPo={trim(dn.gapp_po || '')}
+              customerName={trim(dn.customer_name || '')}
+              whOk={scanWhOk}
+              onSuccess={() => void refreshDnOnly(dnId, { silent: true })}
+              title="Scan document → Sales Order folder"
+            />
+          </div>
+        ) : null}
         <div className="mt-2 space-y-2">
           <div className="flex flex-wrap gap-1 items-center">
             <button
@@ -1814,12 +2133,13 @@ export default function DeliveryNote() {
       ) : null}
 
       {/* A4 Printable DN */}
-      <div className="dn-wrap bg-white border rounded-xl shadow-sm p-4">
+      <div className={`dn-wrap bg-white border rounded-xl shadow-sm p-4${printCompactTable ? ' dn-print-compact' : ''}`}>
         <div className="dn-page" aria-label="Delivery Note A4 Page">
+          <div className="dn-page-body">
           {/* TOP HEADER */}
           <div className="dn-top">
             <div className="dn-company">
-              <img className="dn-logo" src="/LOGO.png" alt="GoDaam" />
+              <img className="dn-logo" src="/LOGO.png" alt="Gulf Applications (GAPP)" />
               <div className="dn-company-text">
                 <div className="dn-company-name dn-company-name-red">Gulf Applications</div>
                 <div className="dn-company-address">
@@ -1827,7 +2147,13 @@ export default function DeliveryNote() {
                   <br />
                   P.O Box 89098, Riyadh, Saudi Arabia
                 </div>
-                <div className="dn-company-tel">Tel / Fax</div>
+                <div className="dn-company-contact-lines">
+                  <div>Tel.: +966 11 47 28 256</div>
+                  <div>Fax: +966 11 47 81 503</div>
+                  <a className="dn-company-site" href="https://www.gapp.sa" target="_blank" rel="noreferrer">
+                    https://www.gapp.sa
+                  </a>
+                </div>
               </div>
             </div>
 
@@ -1855,11 +2181,11 @@ export default function DeliveryNote() {
                 ))}
               </div>
 
-              {/* Only SPO is boxed */}
+              {/* Only SPO is boxed — vendor is resolved from the first item's part number */}
               <div className="dn-spo-only">
                 <div className="dn-spo-row">
                   <div className="dn-spo-key">SPO</div>
-                  <div className="dn-spo-val">{view?.spo || 'SCHNEIDER STOCK'}</div>
+                  <div className="dn-spo-val">{view?.spo || '—'}</div>
                 </div>
               </div>
             </div>
@@ -1882,7 +2208,7 @@ export default function DeliveryNote() {
                   <div className="dn-delivery-addr">{view.city_name}</div>
                 ) : null}
                 {String(view?.gps || '').trim() ? (
-                  <a className="dn-link" href={view.gps} target="_blank" rel="noreferrer">
+                  <a className="dn-link dn-no-print" href={view.gps} target="_blank" rel="noreferrer">
                     {view.gps}
                   </a>
                 ) : null}
@@ -2046,6 +2372,7 @@ export default function DeliveryNote() {
           </div>
 
           {/* No extra receiver name footer (already captured above) */}
+          </div>
         </div>
       </div>
 
@@ -2062,21 +2389,77 @@ export default function DeliveryNote() {
           font-family: Arial, sans-serif;
           color: #000;
           background: #fff;
+          display: flex;
+          flex-direction: column;
         }
-        .dn-top { display: grid; grid-template-columns: 1fr 0.9fr 0.85fr; gap: 10px; align-items: start; }
-        /* Logo + company first line — slightly larger for readability */
-        .dn-company { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
-        .dn-logo { width: 200px; height: 72px; object-fit: contain; }
-        .dn-company-text { padding-top: 0; }
+        .dn-page-body {
+          flex: 1 1 auto;
+          min-height: 0;
+        }
+        .dn-top {
+          display: grid;
+          /* Row 1: title full width. Row 2: company (flex) | DN fields (fixed-ish width). Stops title painting over GAPP block. */
+          grid-template-columns: minmax(0, 1fr) auto;
+          grid-template-rows: auto auto;
+          column-gap: 14px;
+          row-gap: 10px;
+          align-items: start;
+        }
+        .dn-company {
+          grid-column: 1;
+          grid-row: 2;
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 8px;
+          min-width: 0;
+        }
+        .dn-logo {
+          width: 210px;
+          height: auto;
+          max-height: 140px;
+          object-fit: contain;
+          flex-shrink: 0;
+        }
+        .dn-company-text { padding-top: 0; min-width: 0; width: 100%; max-width: 100%; }
         .dn-company-name { font-weight: 700; font-size: 17px; }
         .dn-company-name-red { color: #c1121f; }
         .dn-company-address { font-size: 11px; line-height: 1.2; margin-top: 2px; }
-        .dn-company-tel { font-size: 11px; margin-top: 4px; }
-        .dn-title-block { text-align: center; padding-top: 8px; align-self: start; }
-        /* Prevent DELIVERY NOTE wrapping/overlapping */
-        .dn-title { font-weight: 900; font-size: 24px; letter-spacing: 1px; line-height: 1; white-space: nowrap; }
+        .dn-company-contact-lines {
+          font-size: 10px;
+          line-height: 1.35;
+          margin-top: 4px;
+          color: #000;
+        }
+        .dn-company-site {
+          display: inline-block;
+          margin-top: 2px;
+          color: #0b5bd3;
+          text-decoration: underline;
+          word-break: break-all;
+        }
+        .dn-title-block {
+          grid-column: 1 / -1;
+          grid-row: 1;
+          text-align: center;
+          width: 100%;
+          min-width: 0;
+          padding-top: 0;
+          align-self: center;
+        }
+        /* Full-width row — no overlap into company column */
+        .dn-title { font-weight: 900; font-size: 22px; letter-spacing: 1px; line-height: 1.15; white-space: nowrap; }
         .dn-declaration-line { display: none; }
-        .dn-right-stack { display: flex; flex-direction: column; gap: 14px; align-items: flex-end; }
+        .dn-right-stack {
+          grid-column: 2;
+          grid-row: 2;
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+          align-items: flex-end;
+          justify-self: end;
+          min-width: 0;
+        }
 
         /* Header: labels outside, only value boxes bordered (like screenshot) */
         .dn-headgrid { width: 270px; font-size: 11px; }
@@ -2170,25 +2553,37 @@ export default function DeliveryNote() {
           pointer-events: none;
         }
 
-        /* A4: let the browser apply sheet margins; content then fits the printable area */
-        @page {
-          size: A4;
-          margin: 10mm;
-        }
+        /* @page margin is injected by dnPrintDynamicCss (Page setup) */
         @media print {
-          html, body {
+          /* Kill themed page gradients on in-tab print fallback (see index.css body / .app-shell). */
+          html, body, #root, .app-shell, .app-workspace, .app-main {
             background: #fff !important;
+            background-image: none !important;
+            box-shadow: none !important;
             height: auto !important;
             margin: 0 !important;
             padding: 0 !important;
           }
-          body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+          /* Default print mode: do not force tinted backgrounds from the UI onto paper/PDF. */
+          html, body {
+            print-color-adjust: economy;
+            -webkit-print-color-adjust: economy;
+          }
+          .dn-logo {
+            print-color-adjust: exact;
+            -webkit-print-color-adjust: exact;
+          }
+          .dn-wrap,
+          .dn-wrap * {
+            font-family: Arial, Helvetica, sans-serif !important;
+          }
           .dn-wrap {
             border: none !important;
             box-shadow: none !important;
             padding: 0 !important;
             overflow: visible !important;
             max-width: none !important;
+            background: #fff !important;
           }
           /* Single page when content fits: no forced full-page min-height (that caused a blank 2nd page) */
           .dn-page {
@@ -2202,6 +2597,8 @@ export default function DeliveryNote() {
             box-shadow: none !important;
             border: none !important;
             page-break-after: auto;
+            display: flex !important;
+            flex-direction: column !important;
           }
           /* Long tables: continue on additional sheets only when needed */
           .dn-grid {
@@ -2213,6 +2610,7 @@ export default function DeliveryNote() {
           .btn-primary, .btn-secondary, header, aside, .dn-screen-toolbar, .dn-no-print { display: none !important; }
         }
       `}</style>
+      <style>{dnPrintDynamicCss}</style>
     </div>
   );
 }

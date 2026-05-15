@@ -12,24 +12,34 @@ export function sanitizeFilenameSegment(s) {
 }
 
 /**
- * RG_{invoice}_{outbound}_{customer_po}_{customer_name}_{gapp_po}.pdf|.xlsx
- * Empty segments become "-" so positions stay readable.
+ * RG_{invoice}_{outbound}_{customer_po}_{customer_name}_{gapp_po} (no extension).
+ * Same segments as Excel / Save-as-PDF naming. Empty segments become "-".
  */
-export function buildDeliveryNoteFilename(view, ext) {
+export function buildDeliveryNoteFilenameBase(view) {
   const seg = (v) => {
     const t = sanitizeFilenameSegment(v);
     return t.length ? t : '-';
   };
+  const inv = view?.invoice_number ?? view?.outbound_invoice_number ?? view?.header?.invoice_number;
   const parts = [
     'RG',
-    seg(view?.invoice_number ?? view?.header?.invoice_number),
+    seg(inv),
     seg(view?.outbound_number),
     seg(view?.customer_po ?? view?.customer_reference),
     seg(view?.customer_name),
     seg(view?.gapp_po),
   ];
-  const base = parts.join('_').replace(/_+/g, '_');
-  const e = String(ext || '.xlsx').startsWith('.') ? ext : `.${ext}`;
+  return parts.join('_').replace(/_+/g, '_');
+}
+
+/**
+ * RG_{invoice}_{outbound}_{customer_po}_{customer_name}_{gapp_po}.pdf|.xlsx
+ * @param {string} [ext='.xlsx']  Pass ".pdf" for PDF; omit or pass "" for base-only (rare).
+ */
+export function buildDeliveryNoteFilename(view, ext = '.xlsx') {
+  const base = buildDeliveryNoteFilenameBase(view);
+  if (ext === '' || ext == null) return base;
+  const e = String(ext).startsWith('.') ? ext : `.${ext}`;
   return `${base}${e}`;
 }
 
@@ -60,7 +70,7 @@ export function buildDeliveryNoteExcelSheet({
   pushRow(rows, 'OUTBOUND', view?.outbound_number ?? '');
   pushRow(rows, 'INVOICE', view?.invoice_number ?? '');
   pushRow(rows);
-  pushRow(rows, 'SPO', view?.spo ?? 'SCHNEIDER STOCK');
+  pushRow(rows, 'SPO', view?.spo ?? '');
   pushRow(rows);
   pushRow(rows, 'Delivery to:', '');
   pushRow(rows, '', view?.customer_name ?? '');

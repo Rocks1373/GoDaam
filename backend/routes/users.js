@@ -12,14 +12,74 @@ const dbAll = promisify(db.all.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const dbRun = promisify(db.run.bind(db));
 
+/** Replace user_warehouses rows and set users.default_warehouse_id. Admins may have none (all warehouses). */
+async function syncUserWarehouses(userId, role, body) {
+  const r = String(role || '').toLowerCase();
+  let ids;
+  if (Array.isArray(body.warehouse_ids)) {
+    ids = [...new Set(body.warehouse_ids.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0))];
+  } else if (r === 'admin') {
+    ids = [];
+  } else {
+    const existing = await dbAll(`SELECT warehouse_id FROM user_warehouses WHERE user_id = ?`, [userId]);
+    ids = (existing || []).map((row) => Number(row.warehouse_id)).filter((n) => Number.isFinite(n) && n > 0);
+  }
+  let def = body.default_warehouse_id != null && body.default_warehouse_id !== '' ? Number(body.default_warehouse_id) : null;
+  if (def && !ids.includes(def)) def = ids[0] || null;
+  if (!def && ids.length) def = ids[0];
+
+  await dbRun(`DELETE FROM user_warehouses WHERE user_id = ?`, [userId]);
+
+  if (r === 'admin') {
+    await dbRun(`UPDATE users SET default_warehouse_id = ? WHERE id = ?`, [def || null, userId]);
+    return;
+  }
+  if (!ids.length) {
+    const err = new Error('Non-admin users must be assigned at least one warehouse');
+    err.status = 400;
+    throw err;
+  }
+  const rw = r || 'member';
+  for (const wid of ids) {
+    const isDef = def && wid === def ? 1 : 0;
+    await dbRun(
+      `INSERT OR IGNORE INTO user_warehouses (user_id, warehouse_id, role_in_warehouse, is_default)
+       VALUES (?, ?, ?, ?)`,
+      [userId, wid, rw, isDef]
+    );
+  }
+  if (def) {
+    await dbRun(`UPDATE user_warehouses SET is_default = 0 WHERE user_id = ? AND warehouse_id != ?`, [userId, def]);
+    await dbRun(`UPDATE user_warehouses SET is_default = 1 WHERE user_id = ? AND warehouse_id = ?`, [userId, def]);
+  }
+  await dbRun(`UPDATE users SET default_warehouse_id = ? WHERE id = ?`, [def || null, userId]);
+}
+
 router.get('/', async (_req, res) => {
   try {
     const rows = await dbAll(
       `SELECT id, full_name, username, mobile_number, email, role, is_active,
-              token_expiry_days, can_access_web, can_access_mobile, created_at, updated_at
+              token_expiry_days, can_access_web, can_access_mobile, default_warehouse_id,
+              created_at, updated_at
        FROM users ORDER BY id ASC`
     );
     res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/:id/warehouse-assignments', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid id' });
+    const u = await dbGet(`SELECT id, default_warehouse_id, role FROM users WHERE id = ?`, [id]);
+    if (!u) return res.status(404).json({ error: 'Not found' });
+    const rows = await dbAll(`SELECT * FROM user_warehouses WHERE user_id = ? ORDER BY warehouse_id`, [id]);
+    res.json({
+      default_warehouse_id: u.default_warehouse_id ?? null,
+      warehouse_ids: (rows || []).map((x) => x.warehouse_id),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -53,11 +113,18 @@ router.post('/', async (req, res) => {
       ]
     );
     const row = await dbGet(`SELECT id FROM users WHERE username = ?`, [username]);
+    const uid = Number(row?.id);
+    try {
+      await syncUserWarehouses(uid, role, b);
+    } catch (e2) {
+      await dbRun(`DELETE FROM users WHERE id = ?`, [uid]).catch(() => {});
+      return res.status(e2.status || 400).json({ error: e2.message });
+    }
     const created = await dbGet(
       `SELECT id, full_name, username, mobile_number, email, role, is_active,
-              token_expiry_days, can_access_web, can_access_mobile, created_at
+              token_expiry_days, can_access_web, can_access_mobile, default_warehouse_id, created_at
        FROM users WHERE id = ?`,
-      [row.id]
+      [uid]
     );
     res.status(201).json(created);
   } catch (e) {
@@ -70,6 +137,7 @@ router.put('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
     const b = req.body || {};
+    const prev = await dbGet(`SELECT role FROM users WHERE id = ?`, [id]);
     await dbRun(
       `UPDATE users SET
         full_name = COALESCE(?, full_name),
@@ -98,12 +166,23 @@ router.put('/:id', async (req, res) => {
     );
     const row = await dbGet(
       `SELECT id, full_name, username, mobile_number, email, role, is_active,
-              token_expiry_days, can_access_web, can_access_mobile, created_at, updated_at
+              token_expiry_days, can_access_web, can_access_mobile, default_warehouse_id, created_at, updated_at
        FROM users WHERE id = ?`,
       [id]
     );
     if (!row) return res.status(404).json({ error: 'Not found' });
-    res.json(row);
+    if (b.warehouse_ids !== undefined || b.default_warehouse_id !== undefined) {
+      await syncUserWarehouses(id, row.role || b.role, b);
+    } else if (String(row.role || '').toLowerCase() === 'admin' && String(prev?.role || '').toLowerCase() !== 'admin') {
+      await dbRun(`DELETE FROM user_warehouses WHERE user_id = ?`, [id]);
+    }
+    const out = await dbGet(
+      `SELECT id, full_name, username, mobile_number, email, role, is_active,
+              token_expiry_days, can_access_web, can_access_mobile, default_warehouse_id, created_at, updated_at
+       FROM users WHERE id = ?`,
+      [id]
+    );
+    res.json(out);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

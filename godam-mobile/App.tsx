@@ -15,7 +15,7 @@ import PickedOrderDetailScreen from './src/screens/PickedOrderDetailScreen';
 import StockPeekScreen from './src/screens/StockPeekScreen';
 import ScanRackScreen from './src/screens/ScanRackScreen';
 import ReceivingScreen from './src/screens/ReceivingScreen';
-import UpcomingOrdersScreen from './src/screens/UpcomingOrdersScreen';
+import SettingsScreen from './src/screens/SettingsScreen';
 import MainStockCheckScreen from './src/screens/MainStockCheckScreen';
 import StockByRackCheckScreen from './src/screens/StockByRackCheckScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
@@ -100,7 +100,7 @@ function AppNavigator() {
               <Stack.Screen name="Receiving" component={ReceivingScreen} />
               <Stack.Screen name="MainStockCheck" component={MainStockCheckScreen} options={{ title: 'Main stock (view)' }} />
               <Stack.Screen name="StockByRackCheck" component={StockByRackCheckScreen} options={{ title: 'Stock by rack (view)' }} />
-              <Stack.Screen name="Upcoming" component={UpcomingOrdersScreen} />
+              <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
               <Stack.Screen name="DeliveryList" component={DeliveryListScreen} options={{ title: 'Delivery' }} />
               <Stack.Screen name="DeliveryDetail" component={DeliveryDetailScreen} />
               <Stack.Screen name="RoutePlanner" component={RoutePlannerScreen} options={{ title: 'Route planner' }} />

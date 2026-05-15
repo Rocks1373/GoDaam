@@ -1,6 +1,18 @@
 require('dotenv').config();
+
+// IMPORTANT: middleware/auth performs JWT_SECRET preflight on require — keep this near the top.
+// If the secret is missing/weak/placeholder the process will exit(1) before any port is opened.
+require('./middleware/auth');
+
 const express = require('express');
+require('express-async-errors');
 const cors = require('cors');
+const helmet = require('helmet');
+const hpp = require('hpp');
+const compression = require('compression');
+const pino = require('pino');
+const pinoHttp = require('pino-http');
+const crypto = require('crypto');
 const path = require('path');
 const cookieParser = require('cookie-parser');
 
@@ -16,13 +28,24 @@ const huaweiStreamlitProxyBundle = createHuaweiGodamStreamlitProxy();
 const HUAWEI_GODAM_STREAMLIT_BASE = huaweiStreamlitProxyBundle.base;
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = Number(process.env.PORT) || 3001;
+const NODE_ENV = String(process.env.NODE_ENV || 'development').toLowerCase();
+const IS_PROD = NODE_ENV === 'production';
 
-// Initialize DB (creates tables if missing)
-require('./db');
-require('./huaweiGodamDb');
+// Express runs behind nginx/Caddy in production; trust the first proxy so
+// rate-limiter sees the real client IP and req.ip is correct.
+app.set('trust proxy', 1);
 
-// Middleware — browser clients only; native apps often omit Origin (allowed below).
+// Initialize DBs (creates tables if missing).
+require('./db');             // Postgres only — see backend/db.js
+require('./huaweiGodamDb');  // Huawei plugin store (separate, still SQLite by design — internal-only)
+
+/**
+ * CORS configuration.
+ *
+ * Production hardening: refuse to use CORS_ORIGIN=* (or CORS_ALLOW_ALL=1) when
+ * NODE_ENV=production. In dev we keep the wildcard for ergonomics.
+ */
 const DEFAULT_CORS_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
@@ -35,9 +58,19 @@ const DEFAULT_CORS_ORIGINS = [
 ];
 
 function buildCorsOptions() {
-  const allowAll =
-    process.env.CORS_ALLOW_ALL === '1' || process.env.CORS_ORIGIN === '*';
-  if (allowAll) {
+  const rawOrigin = String(process.env.CORS_ORIGIN || '').trim();
+  const allowAllRequested =
+    process.env.CORS_ALLOW_ALL === '1' || rawOrigin === '*';
+
+  if (allowAllRequested && IS_PROD) {
+    console.error(
+      'FATAL: CORS_ORIGIN=* / CORS_ALLOW_ALL=1 is not allowed in production. ' +
+        'Set CORS_ORIGIN to a comma-separated list of allowed origins (e.g. https://app.example.com).'
+    );
+    process.exit(1);
+  }
+
+  if (allowAllRequested) {
     return {
       origin: '*',
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -46,157 +79,149 @@ function buildCorsOptions() {
         'Authorization',
         'X-Mobile-Api-Key',
         'X-Requested-With',
+        'X-Warehouse-Id',
       ],
     };
   }
-  const raw = process.env.CORS_ORIGIN;
-  const list = raw
-    ? raw.split(',').map((s) => s.trim()).filter(Boolean)
+
+  const list = rawOrigin
+    ? rawOrigin.split(',').map((s) => s.trim()).filter(Boolean)
     : DEFAULT_CORS_ORIGINS;
+
   return {
     origin(origin, cb) {
+      // Allow non-browser clients (mobile, server-to-server) which omit Origin.
       if (!origin) return cb(null, true);
-      return cb(null, list.includes(origin));
+      if (list.includes(origin)) return cb(null, true);
+      return cb(new Error(`CORS: origin ${origin} is not allowed`));
     },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Mobile-Api-Key',
+      'X-Requested-With',
+      'X-Warehouse-Id',
+    ],
     credentials: true,
   };
 }
 
+// --- Security middleware (mounted first) ---
+app.use(
+  helmet({
+    // We serve JSON APIs + a Streamlit reverse proxy; the strictest defaults
+    // (notably crossOriginEmbedderPolicy) break iframe embedding, so we keep
+    // CSP turned off here and rely on nginx CSP headers in production.
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
 app.use(cors(buildCorsOptions()));
 app.use(cookieParser());
+app.use(hpp());
+app.use(compression());
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+app.use(
+  pinoHttp({
+    logger,
+    genReqId: (req) => String(req.headers['x-request-id'] || '').trim() || crypto.randomUUID(),
+  })
+);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Huawei Streamlit reverse proxy — auth-gated via cookie.
 app.use(
   `/${HUAWEI_GODAM_STREAMLIT_BASE}`,
   streamlitProxyGate,
   huaweiStreamlitProxyBundle.proxy
 );
 
-// Public routes
+// --- Public routes ---
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
     message: 'GoDam API running',
+    env: IS_PROD ? 'production' : NODE_ENV,
   });
 });
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/mobile-app', require('./routes/mobile-app-public'));
 
-// Protected routes (login required)
+// --- Protected routes (login required) ---
 const {
-  requireAuth,
-  requireWebAccess,
-  requireAdmin,
-  requirePermission,
-  requireMobileAccess,
-  requireMobileAppKey,
-} = require('./middleware/auth');
-const { markOutboundDelivered, reverseOutboundDelivered } = require('./services/markOutboundDelivered');
+  markOutboundDelivered,
+  reverseOutboundDelivered,
+} = require('./services/markOutboundDelivered');
 const db = require('./db');
+const { mountApiRoutes } = require('./mountApiRoutes');
 
-const webAuth = [requireAuth, requireWebAccess];
+mountApiRoutes(app, { db, markOutboundDelivered, reverseOutboundDelivered });
 
-app.use('/api/main-stock', ...webAuth, require('./routes/main-stock'));
-app.use('/api/inbound', ...webAuth, require('./routes/inbound'));
-app.use('/api/reports', ...webAuth, require('./routes/reports'));
-app.use('/api/ocr', ...webAuth, require('./routes/ocr-center'));
-app.use('/api/dashboard', ...webAuth, require('./routes/dashboard'));
-app.use('/api/sold-out', ...webAuth, require('./routes/sold-out'));
-app.use('/api/stock-comparison-report', ...webAuth, require('./routes/stock-comparison-report'));
-app.use('/api/sap-stock', ...webAuth, require('./routes/sap-stock'));
-app.use('/api/huawei-module', ...webAuth, require('./routes/huawei-module'));
-app.use('/api/huawei-godam', ...webAuth, require('./routes/huawei-godam'));
-app.use('/api/godam-excel', ...webAuth, require('./routes/godam-excel'));
-app.use('/api/stock-by-rack', ...webAuth, require('./routes/stock-by-rack'));
-app.use('/api/stock-in', ...webAuth, require('./routes/stock-in'));
-app.use('/api/stock-out', ...webAuth, require('./routes/stock-out'));
-app.use('/api/outbound', ...webAuth, require('./routes/outbound'));
-app.use('/api/pick-suggestion', ...webAuth, require('./routes/pick-suggestion'));
-app.use('/api/customers', ...webAuth, require('./routes/customers'));
-app.use('/api/delivery-note', ...webAuth, require('./routes/delivery-note'));
-app.use('/api/delivery-notes', ...webAuth, require('./routes/delivery-notes'));
-app.use('/api/mobile', require('./routes/mobile'));
-app.use('/api/mobile/ocr', requireMobileAppKey, requireAuth, requireMobileAccess, require('./routes/ocr'));
-app.use('/api', ...webAuth, require('./routes/customer-locations'));
-app.use('/api/vendors', ...webAuth, require('./routes/vendors'));
-app.use('/api/vendor-items', ...webAuth, require('./routes/vendor-items'));
-app.use('/api/carriers', ...webAuth, require('./routes/carriers'));
-app.use('/api/drivers', ...webAuth, require('./routes/drivers'));
-app.use('/api/transportation', ...webAuth, require('./routes/transportation'));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Serve downloadable templates (CSV/XLSX). These are public, read-only,
+// non-sensitive seed files shipped with the backend.
+app.use('/templates', express.static(path.join(__dirname, 'templates'), {
+  fallthrough: false,
+  index: false,
+}));
 
-app.use('/api/users', ...webAuth, require('./routes/users'));
-app.use('/api/roles', ...webAuth, require('./routes/roles'));
-app.use('/api/admin/picked-orders', ...webAuth, requireAdmin, require('./routes/admin-picked'));
-app.use('/api/admin/maintenance', ...webAuth, requireAdmin, require('./routes/admin-maintenance'));
-app.use('/api/admin/mobile-app', ...webAuth, requireAdmin, require('./routes/admin-mobile-app'));
-app.use('/api/pick-change-requests', ...webAuth, requireAdmin, require('./routes/pick-change-requests'));
-app.use('/api/ai', ...webAuth, require('./routes/ai'));
-
-app.use('/api/notifications', requireAuth, require('./routes/notifications'));
-
-app.post(
-  '/api/orders/:id/mark-delivered',
-  requireAuth,
-  requireWebAccess,
-  requirePermission('can_upload_outbound'),
-  async (req, res) => {
-    const orderId = Number(req.params.id);
-    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
-    try {
-      const result = await markOutboundDelivered(db, orderId, { requireInvoice: true });
-      res.json(result);
-    } catch (e) {
-      const code = e.statusCode || 500;
-      res.status(code).json({ error: e.message, shortages: e.shortages });
-    }
-  }
-);
-
-app.post(
-  '/api/orders/:id/reverse-delivery',
-  requireAuth,
-  requireWebAccess,
-  requirePermission('can_upload_outbound'),
-  async (req, res) => {
-    const orderId = Number(req.params.id);
-    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
-    try {
-      const result = await reverseOutboundDelivered(db, orderId);
-      res.json(result);
-    } catch (e) {
-      const code = e.statusCode || 500;
-      res.status(code).json({ error: e.message });
-    }
-  }
-);
-
-// Serve downloadable templates (CSV/XLSX) if present
-app.use('/templates', express.static(path.join(__dirname, 'templates')));
-
-// Basic error handler
-// eslint-disable-next-line no-unused-vars
-app.use((err, _req, res, _next) => {
-  console.error(err);
-  res.status(500).json({ error: 'Internal Server Error' });
+// Central 404 for unhandled /api/* routes.
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'Not found' });
 });
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Backend listening on 0.0.0.0:${PORT}`);
-  attachStreamlitUpgrade(server, huaweiStreamlitProxyBundle.proxy, HUAWEI_GODAM_STREAMLIT_BASE);
-  huaweiStreamlit.startHuaweiStreamlitIfEnabled();
+// Central error handler. Logs server-side, returns a generic message in production.
+ 
+app.use((err, req, res, _next) => {
+  const reqId = req.id || req.headers['x-request-id'] || undefined;
+   
+  console.error('[unhandled]', reqId || '', err);
+  const status = err.statusCode && Number.isInteger(err.statusCode) ? err.statusCode : 500;
+  const message = IS_PROD
+    ? status >= 500
+      ? 'Internal server error'
+      : err.message || 'Request failed'
+    : err.message || 'Internal server error';
+  const body = { error: message };
+  if (reqId) body.requestId = String(reqId);
+  res.status(status).json(body);
 });
 
-server.on('error', (err) => {
-  if (err && err.code === 'EADDRINUSE') {
-    console.error(
-      `\n❌ Port ${PORT} is already in use (another backend or ./dev.sh is running).\n` +
-        `   Fix: stop the other process, or use a different port:\n` +
-        `   PORT=3002 npm run start --workspace backend\n` +
-        `   → then point EXPO_PUBLIC_API_URL / Vite proxy at that port.\n`
-    );
+module.exports = app;
+
+if (require.main === module) {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+     
+    console.log(`Backend listening on 0.0.0.0:${PORT}  (env=${IS_PROD ? 'production' : NODE_ENV})`);
+    attachStreamlitUpgrade(server, huaweiStreamlitProxyBundle.proxy, HUAWEI_GODAM_STREAMLIT_BASE);
+    huaweiStreamlit.startHuaweiStreamlitIfEnabled();
+  });
+
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+       
+      console.error(`Port ${PORT} is already in use. Stop the other process or run with PORT=<n>.`);
+      process.exit(1);
+    }
+     
+    console.error(err);
     process.exit(1);
+  });
+
+  function shutdown(signal) {
+     
+    console.log(`Received ${signal}, shutting down...`);
+    server.close(() => {
+      process.exit(0);
+    });
+    setTimeout(() => {
+       
+      console.error('Forced shutdown after timeout.');
+      process.exit(1);
+    }, 10_000).unref();
   }
-  console.error(err);
-  process.exit(1);
-});
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+}

@@ -18,6 +18,7 @@ router.get('/', async (req, res) => {
       search: '',
       search_part_number: searchPn,
       search_sap_part_number: searchSap,
+      vendor_number: String(req.query.vendor_number || '').trim(),
     });
 
     res.json({ rows, filter: filter === 'match' || filter === 'mismatch' ? filter : 'all' });

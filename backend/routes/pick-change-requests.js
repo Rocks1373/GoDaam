@@ -1,8 +1,11 @@
 const express = require('express');
 const { promisify } = require('util');
+const { z } = require('zod');
 
 const db = require('../db');
 const { requireAuth, requireAdmin, requireWebAccess } = require('../middleware/auth');
+const { zodValidate } = require('../middleware/zodValidate');
+const { logAudit } = require('../services/auditLogger');
 
 const router = express.Router();
 const dbAll = promisify(db.all.bind(db));
@@ -37,16 +40,24 @@ router.get('/', requireAdmin, async (req, res) => {
   }
 });
 
+const resolveBodySchema = z.object({
+  status: z.enum(['Approved', 'Rejected']),
+  resolution_note: z.union([z.string().max(2000), z.null()]).optional(),
+});
+
 // POST /api/pick-change-requests/:id/resolve
-router.post('/:id/resolve', requireAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const { status, resolution_note } = req.body || {};
-    if (!id) return res.status(400).json({ error: 'Invalid id' });
+router.post(
+  '/:id/resolve',
+  requireAdmin,
+  zodValidate(resolveBodySchema),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { status, resolution_note } = req.validatedBody;
+      if (!id) return res.status(400).json({ error: 'Invalid id' });
     const row = await dbGet(`SELECT * FROM pick_change_requests WHERE id = ?`, [id]);
     if (!row) return res.status(404).json({ error: 'Not found' });
-    const next = status === 'Approved' ? 'Approved' : status === 'Rejected' ? 'Rejected' : null;
-    if (!next) return res.status(400).json({ error: 'status must be Approved or Rejected' });
+    const next = status === 'Approved' ? 'Approved' : 'Rejected';
 
     // If approved, apply changes directly to FIFO suggestions when possible.
     if (next === 'Approved') {
@@ -84,7 +95,7 @@ router.post('/:id/resolve', requireAdmin, async (req, res) => {
               `SELECT * FROM stock_by_rack
                WHERE UPPER(TRIM(rack_location)) = UPPER(TRIM(?))
                  AND available_qty > 0
-                 AND (part_number IN (${keys.map(() => '?').join(',')}) OR IFNULL(sap_part_number,'') IN (${keys
+                 AND (part_number IN (${keys.map(() => '?').join(',')}) OR COALESCE(sap_part_number,'') IN (${keys
                 .map(() => '?')
                 .join(',')}))
                ORDER BY date(COALESCE(first_entry_date, '1970-01-01')) ASC, id ASC
@@ -125,12 +136,33 @@ router.post('/:id/resolve', requireAdmin, async (req, res) => {
        WHERE id = ?`,
       [next, req.user.sub, resolution_note || null, id]
     );
+    const order = await dbGet(
+      `SELECT warehouse_id, outbound_number, delivery FROM outbound_orders WHERE id = ?`,
+      [row.outbound_order_id]
+    );
+    logAudit({
+      warehouse_id: order?.warehouse_id,
+      req,
+      module_name: 'ADMIN',
+      action_type: next === 'Approved' ? 'PICK_CHANGE_APPROVED' : 'PICK_CHANGE_REJECTED',
+      reference_type: 'pick_change_request',
+      reference_id: id,
+      reference_number: order?.outbound_number || order?.delivery || String(id),
+      status_before: row.status,
+      status_after: next,
+      remarks: resolution_note ? String(resolution_note).slice(0, 500) : null,
+      new_value: {
+        outbound_order_id: row.outbound_order_id,
+        outbound_item_id: row.outbound_item_id,
+        fifo_suggestion_id: row.fifo_suggestion_id || null,
+      },
+    });
     const updated = await dbGet(`SELECT * FROM pick_change_requests WHERE id = ?`, [id]);
     res.json(updated);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
-});
+  }
+);
 
 module.exports = router;
-

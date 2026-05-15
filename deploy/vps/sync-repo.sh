@@ -20,7 +20,7 @@ git checkout "$BRANCH"
 git pull --ff-only "${REMOTE}" "$BRANCH"
 
 # Refresh Huawei Streamlit/Python venv when GoDam-1.0 is present (copy or submodule).
-if [[ -f "$APP/GoDam/GoDam-1.0/requirements.txt" ]] || [[ -f "$APP/plugins/GoDam-1.0/requirements.txt" ]]; then
+if [[ -f "$APP/plugins/GoDam-1.0/requirements.txt" ]] || [[ -f "$APP/GoDam/GoDam-1.0/requirements.txt" ]]; then
   npm run setup:huawei-godam
 else
   echo "No GoDam-1.0 requirements.txt — skipping npm run setup:huawei-godam (matcher may still fail until you add it)."

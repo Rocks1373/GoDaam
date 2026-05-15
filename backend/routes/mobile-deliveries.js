@@ -14,6 +14,8 @@ const {
   relPathForUpload,
 } = require('../services/deliveryWorkflow');
 const { notifyWebDeliveryStaff } = require('../services/deliveryNotifications');
+const { logAudit } = require('../services/auditLogger');
+const { finalizePodAsPdf } = require('../services/salesOrderDocumentPdf');
 
 const router = express.Router();
 const dbGet = promisify(db.get.bind(db));
@@ -96,7 +98,6 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Task not found' });
     }
 
-    const uid = Number(req.user.sub);
     const role = String(req.user.role || '').toLowerCase();
     const staff = role === 'admin' || req.user.permissions?.can_confirm_picked;
     if (!staff && !(await canMutateTask(req, task, dn))) {
@@ -143,6 +144,19 @@ router.post('/:id/open', async (req, res) => {
       await dbRun('ROLLBACK').catch(() => {});
       throw e;
     }
+
+    logAudit({
+      warehouse_id: dn.warehouse_id,
+      req,
+      module_name: 'DELIVERY',
+      action_type: 'DRIVER_OPENED',
+      reference_type: 'delivery_note',
+      reference_id: dn.id,
+      reference_number: dn.outbound_number || null,
+      status_before: st,
+      status_after: DS.OPENED,
+      new_value: { driver_delivery_task_id: tid },
+    });
 
     const { name: selfName } = await loadUserPhone(Number(req.user.sub));
     const driverName = selfName || trimStr(task.driver_name);
@@ -205,6 +219,19 @@ router.post('/:id/confirm-pickup', async (req, res) => {
       throw e;
     }
 
+    logAudit({
+      warehouse_id: dn.warehouse_id,
+      req,
+      module_name: 'DELIVERY',
+      action_type: 'PICKUP_CONFIRMED',
+      reference_type: 'delivery_note',
+      reference_id: dn.id,
+      reference_number: dn.outbound_number || null,
+      status_before: st,
+      status_after: DS.OUT,
+      new_value: { driver_delivery_task_id: tid },
+    });
+
     const driverName = trimStr(task.driver_name);
     const ob = trimStr(dn.outbound_number);
     await notifyWebDeliveryStaff(
@@ -242,10 +269,14 @@ router.post('/:id/upload-pod', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: `POD requires status "${DS.OUT}" (out for delivery).` });
     }
 
-    const ext = path.extname(req.file.originalname || '') || '.jpg';
-    const safeName = `pod_${tid}_${Date.now()}${ext}`;
-    const finalAbs = path.join(POD_DIR, safeName);
-    fs.renameSync(req.file.path, finalAbs);
+    const destPdf = path.join(POD_DIR, `pod_${tid}_${Date.now()}.pdf`);
+    try {
+      await finalizePodAsPdf(req.file.path, req.file.mimetype, destPdf);
+    } catch (convErr) {
+      await fs.promises.unlink(req.file.path).catch(() => {});
+      return res.status(400).json({ error: String(convErr.message || convErr) });
+    }
+    const finalAbs = destPdf;
     const rel = relPathForUpload(finalAbs);
 
     await dbRun('BEGIN IMMEDIATE');
@@ -273,6 +304,37 @@ router.post('/:id/upload-pod', upload.single('file'), async (req, res) => {
       fs.unlink(finalAbs, () => {});
       await dbRun('ROLLBACK').catch(() => {});
       throw e;
+    }
+
+    logAudit({
+      warehouse_id: dn.warehouse_id,
+      req,
+      module_name: 'DELIVERY',
+      action_type: 'POD_UPLOADED',
+      reference_type: 'delivery_note',
+      reference_id: dn.id,
+      reference_number: dn.outbound_number || null,
+      status_before: st,
+      status_after: DS.POD,
+      new_value: {
+        driver_delivery_task_id: tid,
+        pod_rel: rel,
+        original_filename: String(req.file?.originalname || '').slice(0, 240) || null,
+      },
+    });
+
+    try {
+      const { syncDriverPodFileToDrive } = require('../services/salesOrderDocumentsService');
+      await syncDriverPodFileToDrive({
+        dn,
+        task,
+        localAbsPath: finalAbs,
+        originalName: req.file?.originalname,
+        mimeType: 'application/pdf',
+        userId: Number(req.user.sub),
+      });
+    } catch (e) {
+      console.warn('[salesOrderDocuments] driver POD sync:', e.message);
     }
 
     const ob = trimStr(dn.outbound_number);
@@ -343,6 +405,22 @@ router.post('/:id/close', async (req, res) => {
       await dbRun('ROLLBACK').catch(() => {});
       throw e;
     }
+
+    logAudit({
+      warehouse_id: dn.warehouse_id,
+      req,
+      module_name: 'DELIVERY',
+      action_type: 'DRIVER_CLOSED',
+      reference_type: 'delivery_note',
+      reference_id: dn.id,
+      reference_number: dn.outbound_number || null,
+      status_before: st,
+      status_after: DS.CLOSED,
+      new_value: {
+        driver_delivery_task_id: tid,
+        pod_rel: trimStr(task.pod_file_path || dn.pod_file_path || '') || null,
+      },
+    });
 
     const ob = trimStr(dn.outbound_number);
     const inv = trimStr(dn.invoice_number);

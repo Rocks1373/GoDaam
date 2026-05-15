@@ -1,10 +1,14 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const { promisify } = require('util');
+const { z } = require('zod');
 
 const db = require('../db');
 const { requirePermission, requireAdmin, requireAnyPermission } = require('../middleware/auth');
+const { zodValidate } = require('../middleware/zodValidate');
 const MainStock = require('../models/MainStock');
 const OutboundOrder = require('../models/OutboundOrder');
 const OutboundItem = require('../models/OutboundItem');
@@ -12,6 +16,17 @@ const { generateFifoForOutboundOrder, listFifoForOrder } = require('../services/
 const { notifyPickOrder, notifyPickProgress } = require('../services/notificationService');
 const { normalizeExcelRows } = require('../utils/excelDates');
 const { markOutboundDelivered, reverseOutboundDelivered } = require('../services/markOutboundDelivered');
+const {
+  expandOutboundBomForOrder,
+  refreshAllOutboundItemsStock,
+  listBomRequirementsForOrder,
+  syncBomRequirementPickedFromTransactions,
+  recomputeParentPickedFromBom,
+  outboundItemLineIsFullyPicked,
+} = require('../services/bomOutboundService');
+const { resolveWarehouseIdForRequest, assertExplicitWarehouseParamAllowed, resolveReadWarehouseScope, userHasWarehouseAccess } = require('../services/warehouseContext');
+const { logAudit } = require('../services/auditLogger');
+const { loadOutboundPickFootprint } = require('../services/outboundPickFootprint');
 
 const router = express.Router();
 const outboundOrder = new OutboundOrder();
@@ -23,6 +38,134 @@ const dbRun = promisify(db.run.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const dbAll = promisify(db.all.bind(db));
 const QTY_EPS = 1e-6;
+
+/** Admin manual pick / confirm: ensure picked_orders row exists (Postgres-safe upsert). */
+async function upsertPickedOrderRow(dbRun, dbGet, { orderId, order, userId, confirmedByName }) {
+  const existing = await dbGet(`SELECT id FROM picked_orders WHERE outbound_order_id = ? ORDER BY id DESC LIMIT 1`, [
+    orderId,
+  ]);
+  const delivery = order.delivery || order.outbound_number;
+  const salesDoc = order.sales_doc || order.sales_order_number;
+  const customerRef = order.customer_reference || order.customer_po_number;
+  const soldTo = order.sold_to || order.vendor_name;
+  const name1 = order.name_1 || order.customer_name;
+  const byName = confirmedByName || 'Admin Manual';
+
+  if (existing?.id) {
+    await dbRun(
+      `UPDATE picked_orders SET
+        delivery = ?, sales_doc = ?, customer_reference = ?, sold_to = ?, name_1 = ?,
+        confirmed_by_user_id = ?, confirmed_by_user_name = ?, confirmed_at = CURRENT_TIMESTAMP, status = 'Picked'
+       WHERE id = ?`,
+      [delivery, salesDoc, customerRef, soldTo, name1, userId, byName, existing.id]
+    );
+    return;
+  }
+
+  await dbRun(
+    `INSERT INTO picked_orders (
+      outbound_order_id, delivery, sales_doc, customer_reference, sold_to, name_1,
+      confirmed_by_user_id, confirmed_by_user_name, confirmed_at, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Picked')`,
+    [orderId, delivery, salesDoc, customerRef, soldTo, name1, userId, byName]
+  );
+}
+
+/** When admin override is on, mark line qty columns fully picked (physical txs may be partial). */
+async function forceOutboundLinesFullyPickedForAdminOverride(dbRun, dbGet, dbAll, orderId) {
+  const items = await dbAll(`SELECT id, required_qty FROM outbound_items WHERE outbound_id = ?`, [orderId]);
+  for (const it of items) {
+    const bom = await dbGet(`SELECT 1 AS x FROM outbound_bom_requirements WHERE outbound_item_id = ? LIMIT 1`, [it.id]);
+    if (bom?.x != null) {
+      const obrList = await dbAll(
+        `SELECT id, required_child_qty FROM outbound_bom_requirements WHERE outbound_item_id = ? ORDER BY id`,
+        [it.id]
+      );
+      for (const br of obrList) {
+        const reqC = Number(br.required_child_qty) || 0;
+        await dbRun(
+          `UPDATE outbound_bom_requirements SET picked_child_qty = ?, status = 'Picked', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [reqC, br.id]
+        );
+      }
+      await recomputeParentPickedFromBom(dbGet, dbAll, dbRun, it.id);
+    } else {
+      await dbRun(`UPDATE outbound_items SET picked_qty = ? WHERE id = ?`, [Number(it.required_qty) || 0, it.id]);
+    }
+  }
+}
+
+const OUTBOUND_DOC_STAGE_PRESETS = new Set(['order_created', 'post_delivery', 'other']);
+
+const UPLOAD_DOC_REL = 'uploads/outbound-documents';
+const UPLOAD_DOC_ABS = path.join(__dirname, '..', UPLOAD_DOC_REL);
+
+const orderDocumentUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      try {
+        fs.mkdirSync(UPLOAD_DOC_ABS, { recursive: true });
+      } catch (e) {
+        return cb(e);
+      }
+      cb(null, UPLOAD_DOC_ABS);
+    },
+    filename: (req, file, cb) => {
+      const oid = Number(req.params.id);
+      const ext = path.extname(file.originalname || '') || '';
+      cb(null, `ob_${Number.isFinite(oid) ? oid : 0}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+  }),
+  limits: { fileSize: 12 * 1024 * 1024 },
+});
+
+function normalizeOutboundDocStage(raw) {
+  const s = String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+  if (OUTBOUND_DOC_STAGE_PRESETS.has(s)) return s;
+  if (!s) return 'order_created';
+  if (/^[a-z][a-z0-9_]{0,39}$/.test(s)) return s.slice(0, 40);
+  return 'other';
+}
+
+function unlinkOutboundStoredFile(relPath) {
+  const rel = String(relPath || '')
+    .replace(/^\//, '')
+    .replace(/\\/g, '/');
+  if (!rel.startsWith('uploads/')) return;
+  const abs = path.join(__dirname, '..', rel);
+  fs.unlink(abs, () => {});
+}
+
+async function assertOutboundWarehouseReadable(req, orderRow) {
+  if (!orderRow) return { ok: false, status: 404, message: 'Order not found' };
+  const role = String(req.user?.role || '').toLowerCase();
+  if (role === 'admin') return { ok: true };
+  const wid = Number(orderRow.warehouse_id);
+  const ok = await userHasWarehouseAccess(req.user.sub, req.user.role, wid);
+  if (!ok) return { ok: false, status: 403, message: 'Forbidden for this warehouse' };
+  return { ok: true };
+}
+
+async function listOutboundOrderDocuments(orderId) {
+  return dbAll(
+    `SELECT d.id, d.outbound_order_id, d.upload_stage, d.file_name, d.file_path, d.file_mime_type,
+            d.uploaded_at, d.uploaded_by, u.username AS uploaded_by_username
+       FROM outbound_order_documents d
+       LEFT JOIN users u ON u.id = d.uploaded_by
+      WHERE d.outbound_order_id = ?
+   ORDER BY CASE d.upload_stage WHEN 'order_created' THEN 0 WHEN 'post_delivery' THEN 1 ELSE 2 END,
+            d.uploaded_at ASC, d.id ASC`,
+    [orderId]
+  );
+}
+
+const changePickBodySchema = z.object({
+  fifo_suggestion_id: z.coerce.number().int().positive(),
+  stock_by_rack_id: z.coerce.number().int().positive(),
+});
 
 function pick(row, ...names) {
   for (const n of names) {
@@ -106,12 +249,28 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
     if (!byDelivery.size) return res.status(400).json({ error: 'No Delivery column values found' });
 
     const userId = req.user?.sub || null;
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId,
+      role: req.user?.role,
+      explicitWarehouseId: req.body?.warehouse_id ?? req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id could not be resolved for this upload' });
     const created = [];
+    const results = [];
+    const { fireAndForgetEnsureFromOutboundOrder } = require('../services/salesOrderDocumentsService');
 
     for (const [, groupRows] of byDelivery) {
       const head = headerFromRows(groupRows);
       const items = mergeLinesForDelivery(groupRows);
-      if (!items.length) continue;
+      if (!items.length) {
+        results.push({
+          ok: false,
+          error: 'No valid item rows found for this delivery',
+          delivery: head.delivery || String(pick(groupRows[0], 'Delivery')).trim(),
+          row: groupRows[0],
+        });
+        continue;
+      }
 
       const deliveryKey = head.delivery || String(pick(groupRows[0], 'Delivery')).trim();
 
@@ -147,6 +306,7 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
                  vendor_name = ?,
                  status = 'Uploaded',
                  uploaded_by_user_id = ?,
+                 warehouse_id = ?,
                  updated_at = CURRENT_TIMESTAMP
              WHERE id = ?`,
             [
@@ -162,6 +322,7 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
               head.name_1,
               head.sold_to,
               userId,
+              warehouseId,
               orderId,
             ]
           );
@@ -174,8 +335,8 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
               `INSERT INTO outbound_orders (
               outbound_number, delivery, sales_doc, gapp_po, customer_reference, sold_to, name_1,
               sales_order_number, customer_po_number, customer_name, vendor_name,
-              status, uploaded_by_user_id, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Uploaded', ?, CURRENT_TIMESTAMP)`,
+              status, uploaded_by_user_id, warehouse_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Uploaded', ?, ?, CURRENT_TIMESTAMP)`,
               [
                 deliveryKey,
                 deliveryKey,
@@ -189,6 +350,7 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
                 head.name_1,
                 head.sold_to,
                 userId,
+                warehouseId,
               ],
               function (err) {
                 if (err) reject(err);
@@ -203,38 +365,51 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
           await dbRun(
             `INSERT INTO outbound_items (
               outbound_id, part_number, sap_part_number, material, description,
-              required_qty, picked_qty, status
-            ) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending')`,
-            [orderId, pn, it.sap_part_number, it.material || pn, it.description || '', it.required_qty]
+              required_qty, picked_qty, status, warehouse_id
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?)`,
+            [orderId, pn, it.sap_part_number, it.material || pn, it.description || '', it.required_qty, warehouseId]
           );
         }
 
         await dbRun('COMMIT');
-        // Auto check-stock + FIFO immediately after upload.
-        await (async () => {
-          const orderItems = await dbAll('SELECT * FROM outbound_items WHERE outbound_id = ?', [orderId]);
-          for (const item of orderItems) {
-            const ms = await mainStock.findByPartOrSap(item.material || item.part_number, item.sap_part_number);
-            const avail = ms ? Number(ms.available_qty) || 0 : 0;
-            const reqQ = Number(item.required_qty) || 0;
-            const fifo_status = reqQ <= avail ? 'Available' : 'Shortage';
-            const shortage_qty = Math.max(0, reqQ - avail);
-            await dbRun(
-              `UPDATE outbound_items SET available_qty_main_stock = ?, fifo_status = ?, shortage_qty = ? WHERE id = ?`,
-              [avail, fifo_status, shortage_qty, item.id]
-            );
-          }
-        })();
+        await expandOutboundBomForOrder(dbRun, dbAll, dbGet, orderId);
+        await refreshAllOutboundItemsStock(mainStock, dbAll, dbRun, orderId);
         await generateFifoForOutboundOrder(orderId);
         const order = await outboundOrder.findById(orderId);
         created.push(order);
+        results.push({
+          ok: true,
+          delivery: deliveryKey,
+          order_id: order.id,
+          item_count: items.length,
+          status: order.status,
+        });
+        logAudit({
+          warehouse_id: order.warehouse_id || warehouseId,
+          req,
+          module_name: 'OUTBOUND',
+          action_type: existing ? 'UPDATED' : 'UPLOADED',
+          reference_type: 'outbound_order',
+          reference_id: order.id,
+          reference_number: order.outbound_number || order.delivery,
+          status_before: existing ? existing.status : null,
+          status_after: order.status,
+          new_value: { source: 'excel_upload', filename: req.file?.originalname || null },
+        });
+        void fireAndForgetEnsureFromOutboundOrder(order);
       } catch (e) {
         await dbRun('ROLLBACK').catch(() => {});
-        throw e;
+        results.push({
+          ok: false,
+          error: e.message,
+          delivery: deliveryKey,
+          part_number: items[0]?.material || items[0]?.sap_part_number || '',
+          row: groupRows[0],
+        });
       }
     }
 
-    res.status(201).json({ orders: created });
+    res.status(201).json({ orders: created, success: created.length, total: results.length, results });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -243,22 +418,25 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
 router.post('/:id/check-stock', requirePermission('can_upload_outbound'), async (req, res) => {
   try {
     const orderId = Number(req.params.id);
-    const items = await dbAll('SELECT * FROM outbound_items WHERE outbound_id = ?', [orderId]);
-    for (const item of items) {
-      const ms = await mainStock.findByPartOrSap(item.material || item.part_number, item.sap_part_number);
-      const avail = ms ? Number(ms.available_qty) || 0 : 0;
-      const reqQ = Number(item.required_qty) || 0;
-      const fifo_status = reqQ <= avail ? 'Available' : 'Shortage';
-      const shortage_qty = Math.max(0, reqQ - avail);
-      await dbRun(
-        `UPDATE outbound_items SET available_qty_main_stock = ?, fifo_status = ?, shortage_qty = ? WHERE id = ?`,
-        [avail, fifo_status, shortage_qty, item.id]
-      );
-    }
+    const before = await dbGet(`SELECT status, outbound_number, delivery, warehouse_id FROM outbound_orders WHERE id = ?`, [orderId]);
+    await expandOutboundBomForOrder(dbRun, dbAll, dbGet, orderId);
+    await refreshAllOutboundItemsStock(mainStock, dbAll, dbRun, orderId);
     await dbRun(`UPDATE outbound_orders SET status = 'Stock Checked', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
       orderId,
     ]);
     const order = await outboundOrder.findById(orderId);
+    logAudit({
+      warehouse_id: order.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'UPDATED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: order.outbound_number || order.delivery,
+      status_before: before?.status,
+      status_after: 'Stock Checked',
+      remarks: 'Stock check completed',
+    });
     res.json(order);
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -268,8 +446,49 @@ router.post('/:id/check-stock', requirePermission('can_upload_outbound'), async 
 router.post('/:id/generate-fifo', requirePermission('can_upload_outbound'), async (req, res) => {
   try {
     const orderId = Number(req.params.id);
+    const order0 = await dbGet(`SELECT outbound_number, delivery, warehouse_id, status FROM outbound_orders WHERE id = ?`, [orderId]);
     const fifo = await generateFifoForOutboundOrder(orderId);
+    logAudit({
+      warehouse_id: order0?.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'UPDATED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: order0?.outbound_number || order0?.delivery,
+      status_before: order0?.status,
+      status_after: order0?.status,
+      remarks: 'FIFO generated',
+      new_value: { fifo_lines: Array.isArray(fifo) ? fifo.length : null },
+    });
     res.json({ ok: true, fifo_suggestions: fifo });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.get('/:id/bom-requirements', requireAnyPermission(['can_upload_outbound', 'can_view_orders', 'can_pick_orders']), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+    const rows = await listBomRequirementsForOrder(dbAll, orderId);
+    res.json({ outbound_order_id: orderId, bom_requirements: rows });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/:id/expand-bom', requirePermission('can_upload_outbound'), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+    await expandOutboundBomForOrder(dbRun, dbAll, dbGet, orderId);
+    await refreshAllOutboundItemsStock(mainStock, dbAll, dbRun, orderId);
+    await generateFifoForOutboundOrder(orderId);
+    const order = await outboundOrder.findById(orderId);
+    const fifo = await listFifoForOrder(orderId);
+    const bom_requirements = await listBomRequirementsForOrder(dbAll, orderId);
+    res.json({ ok: true, order: { ...order, fifo_suggestions: fifo, bom_requirements } });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -294,6 +513,18 @@ router.post('/:id/send-for-pick', requireAdmin, async (req, res) => {
     const body = `Prepare: ${sold_to}_${delivery}_${sales_doc}`;
 
     await notifyPickOrder('New Pick Order', body, { outbound_order_id: orderId, type: 'send_for_pick' });
+
+    logAudit({
+      warehouse_id: order.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'SENT_FOR_PICK',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: order.outbound_number || order.delivery,
+      status_before: order.status,
+      status_after: 'Sent For Pick',
+    });
 
     res.json({ ok: true, status: 'Sent For Pick', notification_preview: { title: 'New Pick Order', body } });
   } catch (e) {
@@ -346,9 +577,30 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
 
     const pickedLines = [];
     for (const item of items) {
-      const already = Math.max(Number(item.picked_qty) || 0, Number(item.picked_from_tx) || 0);
-      const required = Number(item.required_qty) || 0;
-      let remaining = Math.max(0, required - already);
+      const bomCheck = await dbGet(
+        `SELECT COUNT(1) AS c FROM outbound_bom_requirements WHERE outbound_item_id = ?`,
+        [item.id]
+      );
+      const isBomItem = Number(bomCheck?.c) > 0;
+
+      let remaining = 0;
+      if (isBomItem) {
+        const obrList = await dbAll(
+          `SELECT * FROM outbound_bom_requirements WHERE outbound_item_id = ? ORDER BY id`,
+          [item.id]
+        );
+        for (const br of obrList) {
+          const sumChild = await dbGet(
+            `SELECT COALESCE(SUM(picked_qty), 0) AS x FROM picked_transactions WHERE outbound_bom_requirement_id = ?`,
+            [br.id]
+          );
+          remaining += Math.max(0, Number(br.required_child_qty) - (Number(sumChild?.x) || 0));
+        }
+      } else {
+        const already0 = Math.max(Number(item.picked_qty) || 0, Number(item.picked_from_tx) || 0);
+        const required0 = Number(item.required_qty) || 0;
+        remaining = Math.max(0, required0 - already0);
+      }
       if (remaining <= QTY_EPS) continue;
 
       const fifoRows = await dbAll(
@@ -364,11 +616,10 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
         (sum, f) => sum + Math.max(0, (Number(f.suggested_qty) || 0) - (Number(f.fifo_picked_qty) || 0)),
         0
       );
-      if (fifoAvailable + QTY_EPS < remaining) {
-        throw new Error(
-          `Insufficient FIFO suggestion for ${item.material || item.part_number}: need ${remaining}, suggested ${fifoAvailable}`
-        );
-      }
+      /* Allow picking even when FIFO suggestion is absent or insufficient.
+         First exhaust any existing FIFO rows (FIFO order), then fall back to
+         stock_by_rack rows ordered by first_entry_date (same FIFO logic). */
+      const needFallback = fifoAvailable + QTY_EPS < remaining;
 
       let itemPickedNow = 0;
       for (const f of fifoRows) {
@@ -384,24 +635,40 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
           throw new Error(`Insufficient rack qty at ${f.rack_location}: need ${pickQty}, available ${rackAvail}`);
         }
 
+        const obrId = Number(f.outbound_bom_requirement_id) || 0;
+        const obr = obrId ? await dbGet(`SELECT * FROM outbound_bom_requirements WHERE id = ?`, [obrId]) : null;
+        const mat = obr ? obr.child_part_number : item.material || item.part_number;
+        const sap = obr ? obr.child_sap_part_number || '' : item.sap_part_number;
+        const desc = obr ? obr.child_description || '' : item.description;
+        const isBomPick = obr ? 1 : 0;
+        const parentPn = obr ? obr.parent_part_number : null;
+        const childPn = obr ? obr.child_part_number : null;
+        const childPer = obr ? obr.child_qty_per_parent : null;
+
         await dbRun(
           `INSERT INTO picked_transactions (
             outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
             material, sap_part_number, description, rack_location, picked_qty, device_id,
-            picked_method, is_manual_pick, manual_pick_reason, picked_by_role
-          ) VALUES (?, ?, ?, ?, 'Admin Manual', ?, ?, ?, ?, ?, NULL, 'Manual Admin', 1, ?, ?)`,
+            picked_method, is_manual_pick, manual_pick_reason, picked_by_role,
+            outbound_bom_requirement_id, parent_part_number, child_part_number, is_bom_pick, child_qty_per_parent
+          ) VALUES (?, ?, ?, ?, 'Admin Manual', ?, ?, ?, ?, ?, NULL, 'Manual Admin', 1, ?, ?, ?, ?, ?, ?, ?)`,
           [
             orderId,
             item.id,
             f.id,
             req.user.sub,
-            item.material || item.part_number,
-            item.sap_part_number,
-            item.description,
+            mat,
+            sap,
+            desc,
             f.rack_location,
             pickQty,
             override ? reason : null,
             String(req.user.role || 'admin').toLowerCase(),
+            obrId || null,
+            parentPn,
+            childPn,
+            isBomPick,
+            childPer,
           ]
         );
 
@@ -420,9 +687,9 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             today,
-            item.part_number,
-            item.sap_part_number,
-            item.description,
+            rack.part_number,
+            rack.sap_part_number || '',
+            rack.description || '',
             f.rack_location,
             pickQty,
             orderFresh.delivery || orderFresh.outbound_number || String(orderId),
@@ -442,45 +709,143 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
         });
       }
 
-      await dbRun(`UPDATE outbound_items SET picked_qty = ? WHERE id = ?`, [already + itemPickedNow, item.id]);
+      /* Fallback: no FIFO suggestion or suggestion was insufficient — pick from rack directly (FIFO date order). */
+      if (needFallback && remaining > QTY_EPS) {
+        const partKey = item.material || item.part_number || '';
+        const sapKey = item.sap_part_number || '';
+        const keys = [...new Set([partKey, sapKey].filter(Boolean))];
+        const ph = keys.map(() => '?').join(', ');
+        const directRackRows = keys.length ? await dbAll(
+          `SELECT * FROM stock_by_rack
+           WHERE available_qty > 0
+             AND (part_number IN (${ph}) OR COALESCE(sap_part_number,'') IN (${ph}))
+           ORDER BY date(COALESCE(first_entry_date,'1970-01-01')) ASC, id ASC`,
+          [...keys, ...keys]
+        ) : [];
+
+        for (const rack of directRackRows) {
+          if (remaining <= QTY_EPS) break;
+          const rackAvail = Number(rack.available_qty) || 0;
+          if (rackAvail <= QTY_EPS) continue;
+          const pickQty = Math.min(remaining, rackAvail);
+          const mat = partKey || rack.part_number;
+          const today = new Date().toISOString().slice(0, 10);
+
+          await dbRun(
+            `INSERT INTO picked_transactions (
+              outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
+              material, sap_part_number, description, rack_location, picked_qty, device_id,
+              picked_method, is_manual_pick, manual_pick_reason, picked_by_role,
+              outbound_bom_requirement_id, parent_part_number, child_part_number, is_bom_pick, child_qty_per_parent
+            ) VALUES (?, ?, NULL, ?, 'Admin Manual', ?, ?, ?, ?, ?, NULL, 'Manual Admin (no FIFO)', 1, ?, ?, NULL, NULL, NULL, 0, NULL)`,
+            [
+              orderId, item.id, req.user.sub,
+              mat, sapKey, item.description || '',
+              rack.rack_location, pickQty,
+              override ? reason : 'Picked without FIFO suggestion',
+              String(req.user.role || 'admin').toLowerCase(),
+            ]
+          );
+
+          await dbRun(
+            `UPDATE stock_by_rack SET available_qty = ?, total_out_qty = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?`,
+            [rackAvail - pickQty, (Number(rack.total_out_qty) || 0) + pickQty, rack.id]
+          );
+
+          await dbRun(
+            `INSERT INTO stock_out (
+              transaction_date, part_number, sap_part_number, description, rack_location,
+              qty_out, outbound_number, reference_no, remarks
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              today, rack.part_number, rack.sap_part_number || '', rack.description || '',
+              rack.rack_location, pickQty,
+              orderFresh.delivery || orderFresh.outbound_number || String(orderId),
+              `manual_pick_no_fifo_rack_${rack.id}`,
+              override ? `Admin Manual override:${reason}` : `Admin Manual (no FIFO):${adminName}`,
+            ]
+          );
+
+          remaining -= pickQty;
+          itemPickedNow += pickQty;
+          pickedLines.push({
+            outbound_item_id: item.id,
+            fifo_suggestion_id: null,
+            rack_location: rack.rack_location,
+            entry_date: rack.first_entry_date,
+            picked_qty: pickQty,
+          });
+        }
+        /* If still remaining after all rack rows, that is a genuine shortage — we continue (partial pick) rather than blocking. */
+      }
+
+      if (isBomItem) {
+        await syncBomRequirementPickedFromTransactions(dbRun, dbGet, dbAll, item.id);
+        await recomputeParentPickedFromBom(dbGet, dbAll, dbRun, item.id);
+      } else {
+        const already0 = Math.max(Number(item.picked_qty) || 0, Number(item.picked_from_tx) || 0);
+        await dbRun(`UPDATE outbound_items SET picked_qty = ? WHERE id = ?`, [already0 + itemPickedNow, item.id]);
+      }
     }
 
-    const shortfalls = await dbAll(
-      `SELECT i.id, i.part_number, i.required_qty,
-        MAX(COALESCE(i.picked_qty, 0), COALESCE((SELECT SUM(picked_qty) FROM picked_transactions WHERE outbound_item_id = i.id), 0)) AS picked_qty
+    const itemsCheck = await dbAll(
+      `SELECT i.*,
+        (SELECT COALESCE(SUM(picked_qty), 0) FROM picked_transactions WHERE outbound_item_id = i.id) AS picked_from_tx
        FROM outbound_items i
        WHERE i.outbound_id = ?
-         AND COALESCE(i.required_qty, 0) >
-             MAX(COALESCE(i.picked_qty, 0), COALESCE((SELECT SUM(picked_qty) FROM picked_transactions WHERE outbound_item_id = i.id), 0)) + ?`,
-      [orderId, QTY_EPS]
+       ORDER BY i.id`,
+      [orderId]
     );
-
-    if (shortfalls.length) {
-      await dbRun(`UPDATE outbound_orders SET status = 'Picking', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [orderId]);
-    } else {
-      await dbRun(
-        `INSERT OR IGNORE INTO picked_orders (
-          outbound_order_id, delivery, sales_doc, customer_reference, sold_to, name_1,
-          confirmed_by_user_id, confirmed_by_user_name, confirmed_at, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Admin Manual', CURRENT_TIMESTAMP, 'Picked')`,
-        [
-          orderId,
-          orderFresh.delivery || orderFresh.outbound_number,
-          orderFresh.sales_doc || orderFresh.sales_order_number,
-          orderFresh.customer_reference || orderFresh.customer_po_number,
-          orderFresh.sold_to || orderFresh.vendor_name,
-          orderFresh.name_1 || orderFresh.customer_name,
-          req.user.sub,
-        ]
-      );
-      await dbRun(`UPDATE outbound_orders SET status = 'Picked', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [orderId]);
+    const shortfalls = [];
+    for (const it of itemsCheck) {
+      const ok = await outboundItemLineIsFullyPicked(dbGet, dbAll, it);
+      if (!ok) shortfalls.push({ id: it.id });
     }
+    const shortfallLineCount = shortfalls.length;
+
+    if (override && shortfallLineCount) {
+      await forceOutboundLinesFullyPickedForAdminOverride(dbRun, dbGet, dbAll, orderId);
+    }
+
+    /* Admin manual pick always closes as Picked (same as mobile confirm-order). */
+    await upsertPickedOrderRow(dbRun, dbGet, {
+      orderId,
+      order: orderFresh,
+      userId: req.user.sub,
+      confirmedByName: adminName,
+    });
+    await dbRun(`UPDATE outbound_orders SET status = 'Picked', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [orderId]);
 
     await dbRun('COMMIT');
 
     const updated = await outboundOrder.findById(orderId);
     const fifo = await listFifoForOrder(orderId);
-    res.json({ ok: true, status: shortfalls.length ? 'Picking' : 'Picked', picked_lines: pickedLines, order: { ...updated, fifo_suggestions: fifo } });
+    const pickFootprint = await loadOutboundPickFootprint({ dbGet, dbAll, orderId });
+    logAudit({
+      warehouse_id: orderFresh.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'MANUAL_PICK',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: orderFresh.outbound_number || orderFresh.delivery,
+      status_before: order.status,
+      status_after: updated.status,
+      remarks: override ? `override:${reason}` : null,
+      new_value: {
+        picked_lines: pickedLines.length,
+        override: !!override,
+        partial_pick: shortfallLineCount > 0,
+      },
+    });
+    res.json({
+      ok: true,
+      status: 'Picked',
+      partial_pick: shortfallLineCount > 0,
+      shortfall_line_count: shortfallLineCount,
+      picked_lines: pickedLines,
+      order: { ...updated, fifo_suggestions: fifo, ...pickFootprint },
+    });
   } catch (e) {
     await dbRun('ROLLBACK').catch(() => {});
     res.status(400).json({ error: e.message });
@@ -493,6 +858,18 @@ router.post('/:id/mark-delivered', requireAnyPermission(['can_upload_outbound', 
   if (!orderId) return res.status(400).json({ error: 'Invalid id' });
   try {
     const result = await markOutboundDelivered(db, orderId, { requireInvoice: true });
+    const o = await dbGet(`SELECT outbound_number, delivery, warehouse_id, status FROM outbound_orders WHERE id = ?`, [orderId]);
+    logAudit({
+      warehouse_id: o?.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'MARK_DELIVERED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: o?.outbound_number || o?.delivery,
+      status_after: o?.status,
+      new_value: { ok: result?.ok },
+    });
     res.json(result);
   } catch (e) {
     const code = e.statusCode || 500;
@@ -506,6 +883,18 @@ router.post('/:id/reverse-delivery', requirePermission('can_upload_outbound'), a
   if (!orderId) return res.status(400).json({ error: 'Invalid id' });
   try {
     const result = await reverseOutboundDelivered(db, orderId);
+    const o = await dbGet(`SELECT outbound_number, delivery, warehouse_id, status FROM outbound_orders WHERE id = ?`, [orderId]);
+    logAudit({
+      warehouse_id: o?.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'UPDATED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: o?.outbound_number || o?.delivery,
+      remarks: 'reverse-delivery',
+      status_after: o?.status,
+    });
     res.json(result);
   } catch (e) {
     const code = e.statusCode || 500;
@@ -513,13 +902,101 @@ router.post('/:id/reverse-delivery', requirePermission('can_upload_outbound'), a
   }
 });
 
-router.post('/:id/change-pick-location', requireAdmin, async (req, res) => {
+/** Attach a file to an outbound (sales) order; optional upload_stage: order_created | post_delivery | other */
+router.post(
+  '/:id/order-documents',
+  requirePermission('can_upload_outbound'),
+  (req, res, next) => {
+    orderDocumentUpload.single('file')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message || String(err) });
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const orderId = Number(req.params.id);
+      if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+      const order = await dbGet(`SELECT id, warehouse_id, outbound_number, delivery FROM outbound_orders WHERE id = ?`, [orderId]);
+      const gate = await assertOutboundWarehouseReadable(req, order);
+      if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
+      if (!req.file) return res.status(400).json({ error: 'file is required' });
+      const upload_stage = normalizeOutboundDocStage(req.body?.upload_stage);
+      const rel = path.join(UPLOAD_DOC_REL, req.file.filename).replace(/\\/g, '/');
+      const insertId = await new Promise((resolve, reject) => {
+        db.run(
+          `INSERT INTO outbound_order_documents (outbound_order_id, upload_stage, file_name, file_path, file_mime_type, uploaded_at, uploaded_by)
+           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`,
+          [
+            orderId,
+            upload_stage,
+            req.file.originalname || req.file.filename,
+            rel,
+            req.file.mimetype || null,
+            req.user.sub || null,
+          ],
+          function onRun(err) {
+            if (err) reject(err);
+            else resolve(this.lastID);
+          }
+        );
+      });
+      const row = await dbGet(`SELECT * FROM outbound_order_documents WHERE id = ?`, [insertId]);
+      logAudit({
+        warehouse_id: order.warehouse_id,
+        req,
+        module_name: 'OUTBOUND',
+        action_type: 'DOCUMENT_UPLOADED',
+        reference_type: 'outbound_order',
+        reference_id: orderId,
+        reference_number: order.outbound_number || order.delivery,
+        new_value: { document_id: row?.id, upload_stage, file_name: row?.file_name },
+      });
+      res.status(201).json(row);
+    } catch (e) {
+      if (req.file?.path) fs.unlink(req.file.path, () => {});
+      res.status(400).json({ error: e.message });
+    }
+  }
+);
+
+router.delete('/:id/order-documents/:docId', requirePermission('can_upload_outbound'), async (req, res) => {
   try {
     const orderId = Number(req.params.id);
-    const { fifo_suggestion_id, stock_by_rack_id } = req.body || {};
+    const docId = Number(req.params.docId);
+    if (!orderId || !docId) return res.status(400).json({ error: 'Invalid id' });
+    const order = await dbGet(`SELECT id, warehouse_id, outbound_number, delivery FROM outbound_orders WHERE id = ?`, [orderId]);
+    const gate = await assertOutboundWarehouseReadable(req, order);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
+    const doc = await dbGet(`SELECT * FROM outbound_order_documents WHERE id = ? AND outbound_order_id = ?`, [docId, orderId]);
+    if (!doc) return res.status(404).json({ error: 'Document not found' });
+    unlinkOutboundStoredFile(doc.file_path);
+    await dbRun(`DELETE FROM outbound_order_documents WHERE id = ?`, [docId]);
+    logAudit({
+      warehouse_id: order.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'DOCUMENT_DELETED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: order.outbound_number || order.delivery,
+      old_value: { document_id: docId, file_name: doc.file_name },
+    });
+    res.json({ ok: true, deleted: docId });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post(
+  '/:id/change-pick-location',
+  requireAdmin,
+  zodValidate(changePickBodySchema),
+  async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const { fifo_suggestion_id, stock_by_rack_id } = req.validatedBody;
     const sid = Number(fifo_suggestion_id);
     const rid = Number(stock_by_rack_id);
-    if (!sid || !rid) return res.status(400).json({ error: 'fifo_suggestion_id and stock_by_rack_id required' });
 
     const sug = await dbGet(`SELECT * FROM fifo_suggestions WHERE id = ? AND outbound_order_id = ?`, [sid, orderId]);
     if (!sug) return res.status(404).json({ error: 'FIFO suggestion not found' });
@@ -562,11 +1039,24 @@ router.post('/:id/change-pick-location', requireAdmin, async (req, res) => {
     );
 
     const updated = await dbGet(`SELECT * FROM fifo_suggestions WHERE id = ?`, [sid]);
+    const ord = await outboundOrder.findById(orderId);
+    logAudit({
+      warehouse_id: ord?.warehouse_id,
+      req,
+      module_name: 'PICKING',
+      action_type: 'UPDATED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: ord?.outbound_number || ord?.delivery,
+      remarks: 'change-pick-location',
+      new_value: { fifo_suggestion_id: sid, stock_by_rack_id: rid },
+    });
     res.json(updated);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
-});
+  }
+);
 
 // Admin: update FIFO suggested quantity
 router.put('/:id/fifo/:fifoId', requireAdmin, async (req, res) => {
@@ -586,6 +1076,16 @@ router.put('/:id/fifo/:fifoId', requireAdmin, async (req, res) => {
     );
     const order = await outboundOrder.findById(orderId);
     const fifo = await listFifoForOrder(orderId);
+    logAudit({
+      warehouse_id: order.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'ADMIN_OVERRIDE',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: order.outbound_number || order.delivery,
+      new_value: { fifo_id: fifoId, suggested_qty },
+    });
     res.json({ ...order, fifo_suggestions: fifo });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -603,6 +1103,17 @@ router.delete('/:id/fifo/:fifoId', requireAdmin, async (req, res) => {
     await dbRun(`DELETE FROM fifo_suggestions WHERE id = ?`, [fifoId]);
     const order = await outboundOrder.findById(orderId);
     const fifo = await listFifoForOrder(orderId);
+    logAudit({
+      warehouse_id: order.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'ADMIN_OVERRIDE',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: order.outbound_number || order.delivery,
+      remarks: `FIFO line deleted id=${fifoId}`,
+      old_value: { fifo_suggestion_id: fifoId },
+    });
     res.json({ ...order, fifo_suggestions: fifo });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -637,19 +1148,22 @@ router.put('/:id/items/:itemId', requirePermission('can_upload_outbound'), async
 
     await dbRun(`UPDATE outbound_items SET required_qty = ? WHERE id = ?`, [required_qty, itemId]);
 
-    // Recompute shortage + FIFO for order
-    const ms = await mainStock.findByPartOrSap(item.material || item.part_number, item.sap_part_number);
-    const avail = ms ? Number(ms.available_qty) || 0 : 0;
-    const fifo_status = required_qty <= avail ? 'Available' : 'Shortage';
-    const shortage_qty = Math.max(0, required_qty - avail);
-    await dbRun(
-      `UPDATE outbound_items SET available_qty_main_stock = ?, fifo_status = ?, shortage_qty = ? WHERE id = ?`,
-      [avail, fifo_status, shortage_qty, itemId]
-    );
+    await expandOutboundBomForOrder(dbRun, dbAll, dbGet, orderId);
+    await refreshAllOutboundItemsStock(mainStock, dbAll, dbRun, orderId);
 
     await generateFifoForOutboundOrder(orderId);
     const updated = await outboundOrder.findById(orderId);
     const fifo = await listFifoForOrder(orderId);
+    logAudit({
+      warehouse_id: order.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'UPDATED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: order.outbound_number || order.delivery,
+      new_value: { outbound_item_id: itemId, required_qty },
+    });
     return res.json({ ...updated, fifo_suggestions: fifo });
   } catch (e) {
     return res.status(400).json({ error: e.message });
@@ -659,12 +1173,16 @@ router.put('/:id/items/:itemId', requirePermission('can_upload_outbound'), async
 // GET /api/outbound - List orders
 router.get('/', async (req, res) => {
   try {
+    const gate = await assertExplicitWarehouseParamAllowed(req);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
+    const scope = await resolveReadWarehouseScope(req);
     const { search, status, page = 1, limit = 20 } = req.query;
     const orders = await outboundOrder.findAll({
       search: search || '',
       status: status || '',
       page: parseInt(page, 10),
       limit: parseInt(limit, 10),
+      warehouse_id: scope.mode === 'all' ? undefined : scope.warehouseId,
     });
     res.json(orders);
   } catch (error) {
@@ -699,6 +1217,9 @@ router.delete('/:id', requirePermission('can_upload_outbound'), async (req, res)
       return res.status(400).json({ error: `Cannot delete an order with status ${order.status}` });
     }
 
+    const docRows = await dbAll(`SELECT file_path FROM outbound_order_documents WHERE outbound_order_id = ?`, [orderId]);
+    for (const dr of docRows || []) unlinkOutboundStoredFile(dr.file_path);
+
     await dbRun('DELETE FROM fifo_suggestions WHERE outbound_order_id = ?', [orderId]);
     await dbRun('DELETE FROM pick_change_requests WHERE outbound_order_id = ?', [orderId]).catch(() => {});
     await dbRun('DELETE FROM pick_suggestions WHERE outbound_id = ?', [orderId]).catch(() => {});
@@ -709,6 +1230,17 @@ router.delete('/:id', requirePermission('can_upload_outbound'), async (req, res)
     await dbRun('DELETE FROM outbound_orders WHERE id = ?', [orderId]);
 
     await dbRun('COMMIT');
+    logAudit({
+      warehouse_id: order.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'DELETED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: order.outbound_number || order.delivery,
+      status_before: order.status,
+      remarks: 'outbound_cancelled_or_removed',
+    });
     return res.json({ ok: true, deleted: true, id: orderId });
   } catch (e) {
     await dbRun('ROLLBACK').catch(() => {});
@@ -719,14 +1251,26 @@ router.delete('/:id', requirePermission('can_upload_outbound'), async (req, res)
 // POST /api/outbound - Create order (legacy)
 router.post('/', async (req, res) => {
   try {
-    const order = await outboundOrder.create(req.body);
+    const userId = req.user?.sub || null;
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId,
+      role: req.user?.role,
+      explicitWarehouseId: req.body.warehouse_id ?? req.query?.warehouse_id,
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id required' });
+
+    const order = await outboundOrder.create({ ...req.body, warehouse_id: warehouseId });
 
     if (req.body.items && Array.isArray(req.body.items)) {
       const merged = dedupeOutboundItems(req.body.items);
       for (const item of merged) {
-        await outboundItem.create({ ...item, outbound_id: order.id });
+        await outboundItem.create({ ...item, outbound_id: order.id, warehouse_id: warehouseId });
       }
     }
+
+    await expandOutboundBomForOrder(dbRun, dbAll, dbGet, order.id);
+    await refreshAllOutboundItemsStock(mainStock, dbAll, dbRun, order.id);
+    await generateFifoForOutboundOrder(order.id).catch(() => {});
 
     res.status(201).json(order);
   } catch (error) {
@@ -737,10 +1281,20 @@ router.post('/', async (req, res) => {
 // GET /api/outbound/:id - Get order with items + fifo
 router.get('/:id', async (req, res) => {
   try {
+    const gate = await assertExplicitWarehouseParamAllowed(req);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
     const order = await outboundOrder.findById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
+    const role = String(req.user?.role || '').toLowerCase();
+    if (role !== 'admin') {
+      const wid = Number(order.warehouse_id);
+      const ok = await userHasWarehouseAccess(req.user.sub, req.user.role, wid);
+      if (!ok) return res.status(403).json({ error: 'Forbidden for this warehouse' });
+    }
     const fifo = await listFifoForOrder(order.id);
-    res.json({ ...order, fifo_suggestions: fifo });
+    const order_documents = await listOutboundOrderDocuments(order.id);
+    const pickFootprint = await loadOutboundPickFootprint({ dbGet, dbAll, orderId: order.id });
+    res.json({ ...order, fifo_suggestions: fifo, order_documents, ...pickFootprint });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -749,8 +1303,21 @@ router.get('/:id', async (req, res) => {
 // PUT /api/outbound/:id/status - Update status
 router.put('/:id/status', async (req, res) => {
   try {
+    const id = req.params.id;
+    const prev = await dbGet(`SELECT status, outbound_number, delivery, warehouse_id FROM outbound_orders WHERE id = ?`, [id]);
     const { status } = req.body;
-    const result = await outboundOrder.updateStatus(req.params.id, status);
+    const result = await outboundOrder.updateStatus(id, status);
+    logAudit({
+      warehouse_id: prev?.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'UPDATED',
+      reference_type: 'outbound_order',
+      reference_id: Number(id),
+      reference_number: prev?.outbound_number || prev?.delivery,
+      status_before: prev?.status,
+      status_after: status,
+    });
     res.json(result);
   } catch (error) {
     res.status(400).json({ error: error.message });

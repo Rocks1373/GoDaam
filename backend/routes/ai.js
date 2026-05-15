@@ -7,6 +7,7 @@ const { readKnowledgeCached, getKnowledgeStatus } = require('../services/aiKnowl
 const router = express.Router();
 
 const dbAll = promisify(db.all.bind(db));
+const dbGet = promisify(db.get.bind(db));
 const dbRun = promisify(db.run.bind(db));
 
 function isAiAllowedUser(req) {
@@ -115,6 +116,123 @@ async function logAiWidgetUsage(req, { message, response_summary, tools_used }) 
   );
 }
 
+function wantsAny(message, words) {
+  const m = String(message || '').toLowerCase();
+  return words.some((w) => m.includes(w));
+}
+
+function countVal(row) {
+  return Number(row?.count ?? row?.COUNT ?? 0) || 0;
+}
+
+function compactRows(rows, max = 5) {
+  return (rows || []).slice(0, max).map((r) => {
+    const id = r.id ?? r.dn_id ?? '';
+    const outbound = r.outbound_number || r.delivery || '';
+    const customer = r.customer_name || r.name_1 || '';
+    const status = r.status || r.delivery_status || '';
+    const driver = r.driver_name || '';
+    const updated = r.updated_at || r.confirmed_at || '';
+    return [id ? `#${id}` : '', outbound, customer, status, driver, updated]
+      .filter(Boolean)
+      .join(' · ');
+  });
+}
+
+async function localAiFallback(message) {
+  const text = String(message || '').trim();
+  if (!text) return null;
+  const isGreeting = /^(hi|hello|hey|salam|السلام|test)\b/i.test(text);
+  const wantsDelivery = wantsAny(text, ['delivery', 'deliver', 'dn', 'gapp', 'driver', 'notification', 'issue', 'problem']);
+  const wantsOrder = wantsAny(text, ['order', 'outbound', 'pick', 'picking', 'pending']);
+  const wantsStock = wantsAny(text, ['stock', 'rack', 'fifo', 'sap']);
+
+  if (isGreeting && !wantsDelivery && !wantsOrder && !wantsStock) {
+    return {
+      answer:
+        'Hi. GoDam AI is online in fallback mode. I can check delivery, GAPP driver, notification, outbound, stock, and SAP issues from the backend database.',
+      raw: { fallback: true, mode: 'local_greeting' },
+    };
+  }
+
+  if (wantsDelivery) {
+    const [pending, missingDriver, gappIssues, recent] = await Promise.all([
+      dbGet(
+        `SELECT COUNT(*) AS count
+         FROM delivery_notes
+         WHERE lower(COALESCE(status,'draft')) != 'delivered'`
+      ),
+      dbGet(
+        `SELECT COUNT(*) AS count
+         FROM delivery_notes
+         WHERE upper(COALESCE(transportation_type,'')) = 'GAPP'
+           AND (TRIM(COALESCE(driver_mobile,'')) = '' OR (TRIM(COALESCE(driver_name,'')) = '' AND driver_id IS NULL))`
+      ),
+      dbGet(
+        `SELECT COUNT(*) AS count
+         FROM delivery_notes
+         WHERE upper(COALESCE(transportation_type,'')) = 'GAPP'
+           AND (confirmed_at IS NULL OR driver_task_id IS NULL OR COALESCE(is_closed,0) = 0)`
+      ),
+      dbAll(
+        `SELECT id, outbound_number, customer_name, transportation_type, driver_name, driver_mobile, status, delivery_status, confirmed_at, updated_at
+         FROM delivery_notes
+         ORDER BY updated_at DESC NULLS LAST, id DESC
+         LIMIT ?`,
+        [5]
+      ),
+    ]);
+    const lines = [
+      'Delivery diagnostic fallback:',
+      `Pending / not delivered DNs: ${countVal(pending)}`,
+      `GAPP missing driver/mobile: ${countVal(missingDriver)}`,
+      `GAPP confirmation/task/open issues: ${countVal(gappIssues)}`,
+    ];
+    const sample = compactRows(recent);
+    if (sample.length) lines.push('', 'Recent delivery notes:', ...sample.map((s) => `- ${s}`));
+    lines.push('', 'Suggested fix: open Delivery Note / GAPP rows with missing driver, mobile, confirm task, or open status, then re-confirm only after verifying driver and vehicle details.');
+    return {
+      answer: lines.join('\n'),
+      diagnostics: [{ pending, missingDriver, gappIssues, recent }],
+      raw: { fallback: true, mode: 'local_delivery_diagnostic' },
+    };
+  }
+
+  if (wantsOrder) {
+    const [pending, picking, picked, recent] = await Promise.all([
+      dbGet(`SELECT COUNT(*) AS count FROM outbound_orders WHERE lower(COALESCE(status,'')) LIKE '%pending%'`),
+      dbGet(`SELECT COUNT(*) AS count FROM outbound_orders WHERE lower(COALESCE(status,'')) LIKE '%picking%' OR lower(COALESCE(status,'')) LIKE '%sent for pick%'`),
+      dbGet(`SELECT COUNT(*) AS count FROM outbound_orders WHERE lower(COALESCE(status,'')) = 'picked'`),
+      dbAll(
+        `SELECT id, outbound_number, delivery, name_1, status, updated_at
+         FROM outbound_orders
+         ORDER BY updated_at DESC NULLS LAST, id DESC
+         LIMIT ?`,
+        [5]
+      ),
+    ]);
+    const lines = [
+      'Outbound diagnostic fallback:',
+      `Pending orders: ${countVal(pending)}`,
+      `Under picking / sent for pick: ${countVal(picking)}`,
+      `Picked orders: ${countVal(picked)}`,
+    ];
+    const sample = compactRows(recent);
+    if (sample.length) lines.push('', 'Recent outbound rows:', ...sample.map((s) => `- ${s}`));
+    return {
+      answer: lines.join('\n'),
+      diagnostics: [{ pending, picking, picked, recent }],
+      raw: { fallback: true, mode: 'local_outbound_diagnostic' },
+    };
+  }
+
+  return {
+    answer:
+      'GoDam AI fallback is active. Ask me a specific check such as “check delivery issue”, “check GAPP driver issue”, “check outbound pending”, or “check stock issue”.',
+    raw: { fallback: true, mode: 'local_help' },
+  };
+}
+
 // GET /api/ai/health
 router.get('/health', requireAuthOnly, async (_req, res) => {
   try {
@@ -198,16 +316,45 @@ router.post('/chat', requireAuthOnly, async (req, res) => {
       raw: out,
     });
   } catch (e) {
+    try {
+      const fallback = await localAiFallback(message);
+      if (fallback) {
+        await logAiAction(req, {
+          command: message,
+          tool_name: fallback.raw?.mode || 'local_ai_fallback',
+          tool_args: {},
+          result: fallback,
+          status: 'ok',
+        }).catch(() => {});
+        await logAiWidgetUsage(req, {
+          message,
+          response_summary: summarizeText(fallback.answer || ''),
+          tools_used: { fallback: true, reason: e.message },
+        }).catch(() => {});
+        return res.json({
+          answer: fallback.answer,
+          diagnostics: fallback.diagnostics || [],
+          suggestedActions: [],
+          raw: {
+            ...(fallback.raw || {}),
+            plugin_error: e.message,
+          },
+        });
+      }
+    } catch (fallbackError) {
+      // Return the original plugin error below, but keep the fallback failure visible in detail.
+      e.fallbackError = fallbackError.message;
+    }
     await logAiAction(req, {
       command: message,
       tool_name: null,
       tool_args: null,
-      result: { error: e.plugin || e.message },
+      result: { error: e.plugin || e.message, fallbackError: e.fallbackError || null },
       status: 'error',
       error_message: e.message,
     }).catch(() => {});
     const code = e.statusCode || 500;
-    return res.status(code).json({ error: e.message, detail: e.plugin || null });
+    return res.status(code).json({ error: e.message, detail: e.plugin || null, fallbackError: e.fallbackError || null });
   }
 });
 
@@ -308,4 +455,3 @@ router.get('/logs', requireAuthOnly, async (req, res) => {
 });
 
 module.exports = router;
-

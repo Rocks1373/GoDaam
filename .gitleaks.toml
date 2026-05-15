@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Example env and CI fixtures use placeholder strings intentionally."
+paths = [
+  '''.env.example''',
+]

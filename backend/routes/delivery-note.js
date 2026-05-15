@@ -1,12 +1,9 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
-
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
 
 const router = express.Router();
-const db = new sqlite3.Database(DB_PATH);
-const sharedDb = require('../db');
+const db = require('../db');
 const { markOutboundDelivered } = require('../services/markOutboundDelivered');
+const { logAudit } = require('../services/auditLogger');
 
 function asNumber(v) {
   const n = Number(v);
@@ -130,6 +127,17 @@ router.patch('/:outbound_number/invoice', async (req, res) => {
         err ? reject(err) : resolve()
       );
     });
+    logAudit({
+      warehouse_id: order.warehouse_id,
+      req,
+      module_name: 'DELIVERY',
+      action_type: 'UPDATED',
+      reference_type: 'outbound_order',
+      reference_id: order.id,
+      reference_number: outbound_number,
+      remarks: 'invoice_number_updated',
+      new_value: { invoice_number: invoice_number || null },
+    });
     res.json({ ok: true, outbound_number, invoice_number });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -143,7 +151,23 @@ router.post('/:outbound_number/deliver', async (req, res) => {
   try {
     const order = await getOutboundByNumber(outbound_number);
     if (!order) return res.status(404).json({ error: 'Outbound not found' });
-    const result = await markOutboundDelivered(sharedDb, order.id, { requireInvoice: true });
+    const result = await markOutboundDelivered(db, order.id, { requireInvoice: true });
+    const o2 = await new Promise((resolve, reject) => {
+      db.get('SELECT status, warehouse_id FROM outbound_orders WHERE id = ?', [order.id], (err, row) =>
+        err ? reject(err) : resolve(row)
+      );
+    });
+    logAudit({
+      warehouse_id: o2?.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'MARK_DELIVERED',
+      reference_type: 'outbound_order',
+      reference_id: order.id,
+      reference_number: outbound_number,
+      status_after: o2?.status,
+      remarks: 'delivery_note_deliver_endpoint',
+    });
     res.json({ ...result, outbound_number });
   } catch (e) {
     const code = e.statusCode || 500;

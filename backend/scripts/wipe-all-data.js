@@ -1,63 +1,53 @@
 #!/usr/bin/env node
 /**
- * Deletes every row from every application table (schema preserved).
- * Uses a standalone SQLite connection so it does not race db.js seeding.
+ * Deletes every row from every application table in the main warehouse (schema preserved).
+ *
+ * Uses PostgreSQL when DATABASE_URL is set (matches production / backend/db.js).
+ * Otherwise uses the SQLite file at DB_PATH (legacy / migration tooling only).
  *
  * Usage (from backend/):
  *   node scripts/wipe-all-data.js                    # dry run / instructions
  *   node scripts/wipe-all-data.js --yes              # wipe everything (including users)
  *   node scripts/wipe-all-data.js --yes --keep-admin # wipe all data but keep user rows where role is admin
  *
- * Stop the API/dev server first if you see "database is locked".
+ * Stop the API/dev server first if you see locks or connection errors.
+ *
+ * Huawei batch DB (huawei_godam.db): node scripts/wipe-huawei-godam-data.js --yes
+ * One-shot (repo root): bash scripts/fresh-databases.sh
  */
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const { promisify } = require('util');
+const { wipeMainWarehouseDb, createPgWipeHelpers } = require('../services/wipeWarehouseData');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'warehouse.db');
+const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
 
-async function getUserColumnNames(all) {
-  const cols = await all(`PRAGMA table_info(users)`);
-  return cols.sort((a, b) => a.cid - b.cid).map((c) => c.name);
-}
-
-async function restoreAdminUsers(run, all, adminRows) {
-  if (!adminRows.length) return;
-  const colNames = await getUserColumnNames(all);
-  const quoted = colNames.map((n) => `"${String(n).replace(/"/g, '""')}"`).join(', ');
-  const placeholders = colNames.map(() => '?').join(', ');
-  const sql = `INSERT INTO users (${quoted}) VALUES (${placeholders})`;
-  for (const row of adminRows) {
-    const values = colNames.map((name) =>
-      Object.prototype.hasOwnProperty.call(row, name) ? row[name] : null
+async function wipePostgres(keepAdmin) {
+  const pg = createPgWipeHelpers(DATABASE_URL);
+  await pg.connect();
+  try {
+    const tables = await pg.all(
+      `SELECT tablename AS name FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`
     );
-    await run(sql, values);
+    await wipeMainWarehouseDb(pg.run.bind(pg), pg.all.bind(pg), pg.get.bind(pg), {
+      keepAdmin,
+      dialect: 'postgres',
+    });
+    console.log(`Wiped ${tables.length} tables in PostgreSQL (DATABASE_URL).`);
+    if (keepAdmin) {
+      const n = (await pg.all(`SELECT COUNT(1) AS c FROM users`))[0]?.c;
+      console.log(`Users table now has ${n} row(s) (admin preserved).`);
+    } else {
+      console.log('Restart the API: default admin user is re-created if missing (ADMIN_USERNAME / ADMIN_PASSWORD env).');
+    }
+  } finally {
+    await pg.close().catch(() => {});
   }
 }
 
-async function refreshUsersSequence(run, get) {
-  const maxRow = await get(`SELECT MAX(id) AS m FROM users`);
-  const m = maxRow?.m;
-  if (m == null) return;
-  await run(`DELETE FROM sqlite_sequence WHERE name = 'users'`);
-  await run(`INSERT INTO sqlite_sequence (name, seq) VALUES ('users', ?)`, [m]);
-}
-
-async function main() {
-  const yes = process.argv.includes('--yes');
-  const keepAdmin = process.argv.includes('--keep-admin');
-  if (!yes) {
-    console.log(`Database file: ${path.resolve(DB_PATH)}`);
-    console.log('This removes ALL rows from ALL tables (users, stock, orders, carriers, etc.).');
-    console.log('With --yes --keep-admin, only user rows where role is admin are preserved (everything else cleared).');
-    console.log('Schema and migrations stay intact.');
-    console.log('\nRe-run with --yes to wipe everything.');
-    console.log('Re-run with --yes --keep-admin to wipe except admin user rows.');
-    console.log('Tip: stop ./dev.sh or any process using this DB if you get SQLITE_BUSY.');
-    process.exit(0);
-  }
-
+async function wipeSqlite(keepAdmin) {
   const db = new sqlite3.Database(DB_PATH);
   const run = promisify(db.run.bind(db));
   const all = promisify(db.all.bind(db));
@@ -65,49 +55,58 @@ async function main() {
   const close = promisify(db.close.bind(db));
 
   try {
-    let adminBackup = [];
     if (keepAdmin) {
-      adminBackup = await all(
+      const adminBackup = await all(
         `SELECT * FROM users WHERE lower(trim(coalesce(role,''))) = 'admin'`
       );
-      console.log(`--keep-admin: backing up ${adminBackup.length} admin user row(s)`);
+      console.log(`--keep-admin: will preserve ${adminBackup.length} admin user row(s)`);
       if (!adminBackup.length) {
-        console.warn('No admin users found before wipe; users table will be empty. Run: node scripts/ensure-admin.js');
+        console.warn('No admin users found before wipe; users table will be empty after wipe. Run: node scripts/ensure-admin.js');
       }
     }
 
-    await run('PRAGMA foreign_keys = OFF');
     const tables = await all(
       `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
     );
-
-    for (const row of tables) {
-      const name = row.name;
-      const safe = name.replace(/"/g, '""');
-      await run(`DELETE FROM "${safe}"`);
-    }
-
-    const seq = await all(`SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'`);
-    if (seq.length) await run('DELETE FROM sqlite_sequence');
-
-    if (keepAdmin && adminBackup.length) {
-      await restoreAdminUsers(run, all, adminBackup);
-      await refreshUsersSequence(run, get);
-    }
-
-    await run('PRAGMA foreign_keys = ON');
-    await run('VACUUM');
-
+    await wipeMainWarehouseDb(run, all, get, { keepAdmin, dialect: 'sqlite' });
     console.log(`Wiped ${tables.length} tables in ${path.resolve(DB_PATH)}`);
-    if (keepAdmin && adminBackup.length) {
-      console.log(`Restored ${adminBackup.length} admin user(s).`);
-    } else if (!keepAdmin) {
+    if (keepAdmin) {
+      const n = (await all(`SELECT COUNT(1) AS c FROM users`))[0]?.c;
+      console.log(`Users table now has ${n} row(s) (admin preserved).`);
+    } else {
       console.log('Restart the API: default admin user is re-created if missing (ADMIN_USERNAME / ADMIN_PASSWORD env).');
     }
-    console.log('Demo stock/customer/FIFO seed runs only when GODAM_SEED_DEMO_DATA=1 (see db.js).');
   } finally {
     await close().catch(() => {});
   }
+}
+
+async function main() {
+  const yes = process.argv.includes('--yes');
+  const keepAdmin = process.argv.includes('--keep-admin');
+  if (!yes) {
+    if (DATABASE_URL) {
+      console.log('Target: PostgreSQL (DATABASE_URL is set).');
+    } else {
+      console.log(`Target: SQLite file ${path.resolve(DB_PATH)}`);
+    }
+    console.log('This removes ALL rows from ALL tables (users, stock, orders, carriers, etc.).');
+    console.log('With --yes --keep-admin, only user rows where role is admin are preserved (everything else cleared).');
+    console.log('Schema and migrations stay intact.');
+    console.log('\nRe-run with --yes to wipe everything.');
+    console.log('Re-run with --yes --keep-admin to wipe except admin user rows.');
+    if (!DATABASE_URL) {
+      console.log('Tip: stop ./dev.sh or any process using this DB if you get SQLITE_BUSY.');
+    }
+    process.exit(0);
+  }
+
+  if (DATABASE_URL) {
+    await wipePostgres(keepAdmin);
+  } else {
+    await wipeSqlite(keepAdmin);
+  }
+  console.log('Demo stock/customer/FIFO seed runs only when GODAM_SEED_DEMO_DATA=1 (see backend/db.js).');
 }
 
 main().catch((e) => {

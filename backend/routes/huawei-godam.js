@@ -192,7 +192,7 @@ router.post('/batches', (req, res) => {
       await promisify(fs.writeFile)(rulesPath, rulesJsonText, 'utf8');
 
       if (!fs.existsSync(MATCHER_CLI)) {
-        throw new Error(`Matcher CLI missing: ${MATCHER_CLI}. Clone GoDam-1.0 under plugins/GoDam-1.0`);
+        throw new Error(`Matcher CLI missing: ${MATCHER_CLI}. Install GoDam-1.0 under plugins/GoDam-1.0 (canonical)`);
       }
 
       const batchId = await insertBatchRow({

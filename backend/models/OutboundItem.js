@@ -1,23 +1,30 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
+const db = require('../db');
 
 class OutboundItem {
   constructor() {
-    this.db = new sqlite3.Database(DB_PATH);
+    this.db = db;
   }
 
   // Create outbound item
   async create(outboundData) {
     return new Promise((resolve, reject) => {
-      const { outbound_id, part_number, sap_part_number, description, required_qty, uom, serial_no, condition } =
-        outboundData;
+      const {
+        outbound_id,
+        part_number,
+        sap_part_number,
+        description,
+        required_qty,
+        uom,
+        serial_no,
+        condition,
+        warehouse_id,
+      } = outboundData;
 
       this.db.run(
         `INSERT INTO outbound_items 
-         (outbound_id, part_number, sap_part_number, description, required_qty, uom, serial_no, condition)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [outbound_id, part_number, sap_part_number, description, required_qty, uom, serial_no, condition],
+         (outbound_id, part_number, sap_part_number, description, required_qty, uom, serial_no, condition, warehouse_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [outbound_id, part_number, sap_part_number, description, required_qty, uom, serial_no, condition, warehouse_id],
         function(err) {
           if (err) reject(err);
           else resolve({ id: this.lastID, part_number });

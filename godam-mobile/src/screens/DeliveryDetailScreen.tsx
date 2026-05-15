@@ -28,6 +28,58 @@ const DS_OUT = 'Out For Delivery';
 const DS_POD = 'POD Uploaded';
 const DS_CLOSED = 'Closed';
 
+function podFileName(mime: string) {
+  const m = String(mime || '').toLowerCase();
+  if (m.includes('png')) return 'pod.png';
+  return 'pod.jpg';
+}
+
+function isPickerResult(
+  r: ImagePicker.ImagePickerResult | ImagePicker.ImagePickerErrorResult | null | undefined
+): r is ImagePicker.ImagePickerResult {
+  return Boolean(r && typeof r === 'object' && 'canceled' in r);
+}
+
+async function ensureCameraAndLibraryForPod(): Promise<boolean> {
+  const cam = await ImagePicker.requestCameraPermissionsAsync();
+  if (!cam.granted) {
+    if (cam.canAskAgain === false) {
+      Alert.alert(
+        'Camera blocked',
+        'Turn on Camera (and Photos) for GoDaam in system Settings → Apps → GoDaam → Permissions.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Settings', onPress: () => void Linking.openSettings() },
+        ]
+      );
+    } else {
+      Alert.alert('Camera', 'Camera permission is required to take a POD photo.');
+    }
+    return false;
+  }
+  // Saving the captured image to the gallery roll on some Android/iOS builds requires library access.
+  const lib = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (!lib.granted) {
+    if (lib.canAskAgain === false) {
+      Alert.alert(
+        'Photos blocked',
+        'Photo library access is needed after you take a POD picture. Enable it in Settings → Apps → GoDaam.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Settings', onPress: () => void Linking.openSettings() },
+        ]
+      );
+    } else {
+      Alert.alert(
+        'Photos',
+        'Allow photo access so the POD picture can be saved and uploaded (required on many Android devices).'
+      );
+    }
+    return false;
+  }
+  return true;
+}
+
 export default function DeliveryDetailScreen({ route, navigation }: Props) {
   const { taskId } = route.params;
   const [task, setTask] = useState<Record<string, unknown> | null>(null);
@@ -60,6 +112,39 @@ export default function DeliveryDetailScreen({ route, navigation }: Props) {
     navigation.setOptions({ title: t ? `Delivery ${t}` : 'Delivery' });
   }, [navigation, dn, task]);
 
+  /** Android can destroy MainActivity while the camera app is open; result arrives here. */
+  useEffect(() => {
+    if (String(task?.status || '') !== DS_OUT) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await ImagePicker.getPendingResultAsync();
+        const pending = isPickerResult(raw) ? raw : null;
+        if (cancelled || !pending || pending.canceled) return;
+        const uri = pending.assets?.[0]?.uri;
+        if (!uri) return;
+        Alert.alert(
+          'POD photo ready',
+          'Your camera finished while the app was restarting. Upload this photo as POD?',
+          [
+            { text: 'Not now', style: 'cancel' },
+            {
+              text: 'Upload',
+              onPress: () => {
+                void uploadPendingUri(uri, pending.assets?.[0]);
+              },
+            },
+          ]
+        );
+      } catch {
+        // getPendingResultAsync unsupported on some platforms
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [task?.status, taskId]);
+
   const st = String(task?.status || '');
   const gps = String(task?.gps_link || dn?.gps || '').trim();
   const address = String(task?.delivery_address || dn?.delivery_address || '');
@@ -78,6 +163,12 @@ export default function DeliveryDetailScreen({ route, navigation }: Props) {
     }
   };
 
+  const uploadPendingUri = async (uri: string, asset?: ImagePicker.ImagePickerAsset) => {
+    const mime = asset?.mimeType || (uri.toLowerCase().includes('.png') ? 'image/png' : 'image/jpeg');
+    const name = podFileName(mime);
+    await run(async () => uploadPod(taskId, uri, mime, name), 'POD uploaded.');
+  };
+
   const onOpenMaps = () => {
     if (!gps) {
       Alert.alert('No GPS link', 'GPS was not saved on the delivery note.');
@@ -86,16 +177,74 @@ export default function DeliveryDetailScreen({ route, navigation }: Props) {
     void Linking.openURL(gps.startsWith('http') ? gps : `https://maps.google.com/?q=${encodeURIComponent(address || gps)}`);
   };
 
-  const onPickPod = async () => {
-    const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert('Camera', 'Camera permission is required for POD.');
+  const onPickPodCamera = async () => {
+    const ok = await ensureCameraAndLibraryForPod();
+    if (!ok) return;
+    try {
+      const shot = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        quality: 0.75,
+        allowsEditing: false,
+        exif: false,
+      });
+      if (shot.canceled) return;
+      const asset = shot.assets?.[0];
+      const uri = asset?.uri;
+      if (!uri) {
+        const pendingRaw = await ImagePicker.getPendingResultAsync().catch(() => null);
+        const pending = isPickerResult(pendingRaw) ? pendingRaw : null;
+        const pUri = pending && !pending.canceled ? pending.assets?.[0]?.uri : null;
+        if (pUri) {
+          await uploadPendingUri(pUri, pending?.assets?.[0]);
+          return;
+        }
+        Alert.alert(
+          'POD photo',
+          'No image was returned. Try again, or use “Choose POD from gallery” if the camera app closed unexpectedly.'
+        );
+        return;
+      }
+      const mime = asset?.mimeType || 'image/jpeg';
+      await run(async () => uploadPod(taskId, uri, mime, podFileName(mime)), 'POD uploaded.');
+    } catch (e: unknown) {
+      Alert.alert('Camera', (e as Error)?.message || 'Could not open the camera.');
+    }
+  };
+
+  const onPickPodGallery = async () => {
+    const lib = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!lib.granted) {
+      if (lib.canAskAgain === false) {
+        Alert.alert('Photos blocked', 'Enable Photos / Media for GoDaam in system Settings.', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Settings', onPress: () => void Linking.openSettings() },
+        ]);
+      } else {
+        Alert.alert('Photos', 'Photo access is required to attach a POD image from your gallery.');
+      }
       return;
     }
-    const shot = await ImagePicker.launchCameraAsync({ quality: 0.7 });
-    if (shot.canceled || !shot.assets?.[0]?.uri) return;
-    const uri = shot.assets[0].uri;
-    await run(async () => uploadPod(taskId, uri), 'POD uploaded.');
+    try {
+      const shot = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.85,
+        allowsEditing: false,
+      });
+      if (shot.canceled || !shot.assets?.[0]?.uri) return;
+      const asset = shot.assets[0];
+      const mime = asset.mimeType || 'image/jpeg';
+      await run(async () => uploadPod(taskId, asset.uri, mime, podFileName(mime)), 'POD uploaded.');
+    } catch (e: unknown) {
+      Alert.alert('Gallery', (e as Error)?.message || 'Could not open the photo library.');
+    }
+  };
+
+  const onPickPod = () => {
+    Alert.alert('Upload POD', 'Add a proof-of-delivery photo.', [
+      { text: 'Take photo', onPress: () => void onPickPodCamera() },
+      { text: 'Choose from gallery', onPress: () => void onPickPodGallery() },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
 
   if (loading && !task) {
@@ -156,9 +305,15 @@ export default function DeliveryDetailScreen({ route, navigation }: Props) {
       ) : null}
 
       {st === DS_OUT ? (
-        <Pressable style={[styles.btn, busy && styles.disabled]} disabled={busy} onPress={() => void onPickPod()}>
-          <Text style={styles.btnText}>Upload POD (camera)</Text>
-        </Pressable>
+        <>
+          <Pressable style={[styles.btn, busy && styles.disabled]} disabled={busy} onPress={() => void onPickPod()}>
+            <Text style={styles.btnText}>Upload POD (camera or gallery)</Text>
+          </Pressable>
+          <Text style={styles.hint}>
+            Allow Camera and Photos when asked. If the camera does not open, use gallery or enable permissions in
+            Settings.
+          </Text>
+        </>
       ) : null}
 
       {st === DS_POD ? (
@@ -186,6 +341,7 @@ const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
   err: { color: '#b91c1c', textAlign: 'center', marginBottom: 12 },
   warn: { color: '#92400e', marginBottom: 10 },
+  hint: { marginTop: 8, fontSize: 12, color: '#64748b', lineHeight: 18 },
   label: { fontSize: 11, fontWeight: '700', color: '#64748b', marginTop: 12 },
   val: { fontSize: 16, fontWeight: '700', color: '#0f172a' },
   status: { fontSize: 15, fontWeight: '800', color: '#1d4ed8' },

@@ -11,6 +11,9 @@
 #   bash deploy/vps/rsync-to-godaam-vps.sh --venv --deploy      # refresh Huawei GoDam Python venv on VPS
 #   bash deploy/vps/rsync-to-godaam-vps.sh --nginx              # refresh nginx TLS site (includes /huawei-godam-app proxy)
 #
+# Android APK: bash scripts/build-android-apk.sh (writes backend/uploads/mobile/GoDam.apk),
+# then rsync --deploy copies it to the VPS. One-shot: bash scripts/sync-vps-with-apk.sh
+#
 # Override: SSH_HOST=myhost APP=/opt/godaam bash deploy/vps/rsync-to-godaam-vps.sh --deploy
 set -euo pipefail
 
@@ -99,7 +102,7 @@ DO_QUICK="$4"
 cd "$APP_PATH"
 chmod 755 "$APP_PATH" "$APP_PATH/frontend" "$APP_PATH/frontend/dist" 2>/dev/null || true
 
-if [[ "$DO_VENV" == "1" ]] && { [[ -f "$APP_PATH/GoDam/GoDam-1.0/requirements.txt" ]] || [[ -f "$APP_PATH/plugins/GoDam-1.0/requirements.txt" ]]; }; then
+if [[ "$DO_VENV" == "1" ]] && { [[ -f "$APP_PATH/plugins/GoDam-1.0/requirements.txt" ]] || [[ -f "$APP_PATH/GoDam/GoDam-1.0/requirements.txt" ]]; }; then
   npm run setup:huawei-godam
 fi
 

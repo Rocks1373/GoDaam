@@ -1,13 +1,19 @@
 import Constants from 'expo-constants';
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { VPS_BASELINE_ORIGIN } = require('../../baseline-api.js') as { VPS_BASELINE_ORIGIN: string };
+
 /**
- * Optional default from EXPO_PUBLIC_API_URL / app.config extra (dev convenience only).
- * Production flow uses Configuration screen + AsyncStorage — not this helper.
+ * Default API base from EXPO_PUBLIC_API_URL / app.config extra, else production VPS baseline.
+ * Override for local dev: EXPO_PUBLIC_API_URL=http://127.0.0.1:3001
  */
 export function getDefaultApiBaseUrl(): string {
   const fromEnv = process.env.EXPO_PUBLIC_API_URL;
   const extra = Constants.expoConfig?.extra as { apiUrl?: string } | undefined;
-  const raw = (fromEnv && String(fromEnv).trim()) || (extra?.apiUrl && String(extra.apiUrl).trim()) || '';
+  const raw =
+    (fromEnv && String(fromEnv).trim()) ||
+    (extra?.apiUrl && String(extra.apiUrl).trim()) ||
+    VPS_BASELINE_ORIGIN;
   if (!raw || typeof raw !== 'string') return '';
   return normalizeToApiBase(raw);
 }

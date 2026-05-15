@@ -54,7 +54,8 @@ export default function SapStock() {
   }, [filterStorageLocation, filterMaterialGroup, filterMaterial, load]);
 
   const sortValue = useCallback((r, k) => {
-    if (k === 'sap_qty') return Number(r.sap_qty) || 0;
+    if (k === 'quantity') return Number(r.quantity ?? r.unrestricted_qty) || 0;
+    if (k === 'sap_qty' || k === 'unrestricted_qty' || k === 'stock_qty') return Number(r[k]) || 0;
     return r[k];
   }, []);
   const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, sortValue);
@@ -67,9 +68,15 @@ export default function SapStock() {
     setErr('');
     try {
       const summary = await sapStockApi.upload(f);
+      const layout =
+        summary.layout_mode === 'wide' && summary.layout_columns?.unrestricted
+          ? `wide · Unrestricted→column ${summary.layout_columns.unrestricted} · header row ${summary.layout_columns.header_row_1based}`
+          : `${summary.layout_mode || 'legacy'} · ${summary.layout_columns?.mode || 'fixed indices'}`;
       window.alert(
         `Upload complete.\nRows: ${summary.total_rows}\nUnique materials: ${summary.unique_materials}\n` +
-          `Qty 1002 (transit): ${fmtNum(summary.qty_1002)}\nQty 1004: ${fmtNum(summary.qty_1004)}\nQty 1007: ${fmtNum(summary.qty_1007)}`
+          `Parse layout: ${layout}\n` +
+          `Qty SL → 1001: ${fmtNum(summary.qty_1001)} · 1002: ${fmtNum(summary.qty_1002)} · 1003: ${fmtNum(summary.qty_1003)}\n` +
+          `1004: ${fmtNum(summary.qty_1004)} · 1005: ${fmtNum(summary.qty_1005)} · 1007: ${fmtNum(summary.qty_1007)}`
       );
       await load();
     } catch (ex) {
@@ -181,6 +188,10 @@ export default function SapStock() {
 
       <p className="text-[11px] text-gray-600 mb-2">
         Latest processed upload (batch #{batchId ?? '—'}). SAP quantities are for comparison only; main stock available qty is unchanged on upload.
+        <span className="block mt-1 text-gray-500">
+          Supports SAP exports like MB52: <strong>Item (SD)</strong>, <strong>Sales document</strong>, and <strong>Batch</strong> are taken from the sheet headers that match those columns (Excel positions are typically A, I, J);{' '}
+          <strong>Material Group</strong> aligns with main-stock vendor scope; <strong>Quantity</strong> is the upload <strong>Unrestricted</strong> column (or Unrestrict-*). Storage locations 1004+1007 are the default comparison buckets; 1002, 1003, 1005, etc. map by SL code.
+        </span>
       </p>
 
       {err ? <div className="mb-2 text-[11px] font-bold text-red-700">{err}</div> : null}
@@ -220,27 +231,119 @@ export default function SapStock() {
         <table className="min-w-full text-[11px]">
           <thead className="bg-gray-50 border-b border-gray-200">
             <tr>
-              <SortTh label="Vendor #" k="vendor_number" sortKey={sortKey} direction={direction} onSort={requestSort} />
-              <SortTh label="Material / SAP Part" k="material" sortKey={sortKey} direction={direction} onSort={requestSort} />
-              <SortTh label="Description" k="description" sortKey={sortKey} direction={direction} onSort={requestSort} />
-              <SortTh label="SL" k="storage_location" sortKey={sortKey} direction={direction} onSort={requestSort} />
-              <SortTh label="SL Desc" k="storage_location_description" sortKey={sortKey} direction={direction} onSort={requestSort} />
-              <SortTh label="SAP Qty" k="sap_qty" sortKey={sortKey} direction={direction} onSort={requestSort} />
-              <SortTh label="UOM" k="base_uom" sortKey={sortKey} direction={direction} onSort={requestSort} />
-              <SortTh label="Mat. Group" k="material_group" sortKey={sortKey} direction={direction} onSort={requestSort} />
+              <SortTh
+                bare
+                columnKey="material_group"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Mat. group
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="item_sd"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Item (SD)
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="material"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Material
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="description"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Description
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="sales_document"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Sales document
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="batch"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Batch
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="storage_location"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Storage loc.
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="storage_location_description"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                SL description
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="quantity"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-right text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Quantity
+              </SortTh>
+              <SortTh
+                bare
+                columnKey="base_uom"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                UOM
+              </SortTh>
             </tr>
           </thead>
           <tbody>
             {loading && !rows.length ? (
               <tr>
-                <td colSpan={8} className="p-4 text-center text-gray-500">
+                <td colSpan={10} className="p-4 text-center text-gray-500">
                   Loading…
                 </td>
               </tr>
             ) : null}
             {!loading && !displayRows.length ? (
               <tr>
-                <td colSpan={8} className="p-4 text-center text-gray-500">
+                <td colSpan={10} className="p-4 text-center text-gray-500">
                   No SAP upload data yet. Upload an Excel file to begin.
                 </td>
               </tr>
@@ -251,16 +354,28 @@ export default function SapStock() {
                 className="border-b border-gray-100 hover:bg-primary-50/40 cursor-pointer"
                 onClick={() => openDetail(r.material)}
               >
-                <td className="px-2 py-1 whitespace-nowrap">{r.vendor_number ?? '—'}</td>
+                <td className="px-2 py-1 font-mono text-[10px]" title={r.material_group ?? ''}>
+                  {r.material_group ?? '—'}
+                </td>
+                <td className="px-2 py-1 font-mono text-[10px] whitespace-nowrap" title={r.item_sd ?? ''}>
+                  {r.item_sd ?? '—'}
+                </td>
                 <td className="px-2 py-1 font-mono font-bold text-primary-800">{r.material}</td>
                 <td className="px-2 py-1 max-w-[220px] truncate" title={r.description}>
                   {r.description ?? '—'}
                 </td>
+                <td className="px-2 py-1 font-mono text-[10px] max-w-[120px] truncate" title={r.sales_document ?? ''}>
+                  {r.sales_document ?? '—'}
+                </td>
+                <td className="px-2 py-1 font-mono text-[10px] max-w-[140px] truncate" title={r.batch ?? ''}>
+                  {r.batch ?? '—'}
+                </td>
                 <td className="px-2 py-1 whitespace-nowrap">{r.storage_location ?? '—'}</td>
                 <td className="px-2 py-1 max-w-[160px] truncate">{r.storage_location_description ?? '—'}</td>
-                <td className="px-2 py-1 text-right font-mono">{fmtNum(r.sap_qty)}</td>
+                <td className="px-2 py-1 text-right font-mono font-semibold text-primary-900">
+                  {fmtNum(r.quantity ?? r.unrestricted_qty)}
+                </td>
                 <td className="px-2 py-1">{r.base_uom ?? '—'}</td>
-                <td className="px-2 py-1">{r.material_group ?? '—'}</td>
               </tr>
             ))}
           </tbody>
@@ -327,6 +442,12 @@ export default function SapStock() {
                 <div key={line.id} className="border border-gray-200 rounded-md p-2 space-y-1">
                   <div>
                     <span className="text-gray-500">Vendor</span> {line.vendor_number ?? '—'}
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Item (SD)</span> {line.item_sd ?? '—'}
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Sales document</span> {line.sales_document ?? '—'}
                   </div>
                   <div>
                     <span className="text-gray-500">Material</span> {line.material}

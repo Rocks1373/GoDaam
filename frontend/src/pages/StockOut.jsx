@@ -3,6 +3,7 @@ import { Copy, Download, Eye, Pencil, Plus, Trash2, Upload } from 'lucide-react'
 import * as XLSX from 'xlsx';
 import { stockOutApi } from '../services/api';
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
+import { reportUploadError, reportUploadResult } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
@@ -165,11 +166,11 @@ const StockOut = () => {
 
   const onUploadFile = async (file, { updateExisting }) => {
     try {
-      await stockOutApi.upload(file, { update_existing: updateExisting });
+      const summary = await stockOutApi.upload(file, { update_existing: updateExisting });
       fetchRows();
-      alert('Upload import completed.');
+      reportUploadResult(summary, { label: 'Stock Out upload', filenamePrefix: 'stock-out-upload' });
     } catch (e) {
-      alert(e.response?.data?.error || e.message);
+      reportUploadError(e, { label: 'Stock Out upload', filenamePrefix: 'stock-out-upload' });
     } finally {
       if (fileRef.current) fileRef.current.value = '';
     }
@@ -493,4 +494,3 @@ const StockOut = () => {
 };
 
 export default StockOut;
-

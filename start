@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Start full dev stack (same as ./dev.sh). From repo root: ./start  |  ./start web
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+exec "$ROOT/dev.sh" "${1:-start}"

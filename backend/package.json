@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
+    "test": "NODE_ENV=test jest --runInBand",
+    "lint": "eslint mountApiRoutes.js middleware/auth.js middleware/zodValidate.js routes/auth.js routes/pick-change-requests.js routes/outbound.js routes/stock-in.js server.js test utils/readXlsxFirstSheetExceljs.js --max-warnings 0",
     "db": "node db.js",
     "clear-outbound": "node scripts/clear-outbound-data.js",
     "clear-outbound:exec": "node scripts/clear-outbound-data.js --yes",
@@ -14,27 +16,50 @@
     "wipe-db": "node scripts/wipe-all-data.js",
     "wipe-db:yes": "node scripts/wipe-all-data.js --yes",
     "wipe-db:keep-admin": "node scripts/wipe-all-data.js --yes --keep-admin",
+    "wipe-huawei:yes": "node scripts/wipe-huawei-godam-data.js --yes",
+    "fresh-db": "node scripts/wipe-all-data.js --yes --keep-admin && node scripts/wipe-huawei-godam-data.js --yes && node scripts/ensure-admin.js",
+    "fresh-db:full": "node scripts/wipe-all-data.js --yes && node scripts/wipe-huawei-godam-data.js --yes && node scripts/ensure-admin.js",
     "ensure-admin": "node scripts/ensure-admin.js",
-    "generate:customer-address-book": "node scripts/generate-customer-address-book-from-sample-outbounds.js"
+    "generate:customer-address-book": "node scripts/generate-customer-address-book-from-sample-outbounds.js",
+    "backup:sqlite": "node scripts/backup-warehouse-sqlite.js",
+    "migrate:sqlite-to-pg": "node scripts/migrate-sqlite-to-postgres.js",
+    "pg:bootstrap": "node scripts/pg-bootstrap-if-empty.js",
+    "pg:up": "docker compose -f ../docker-compose.godam-postgres.yml up -d"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "bcryptjs": "^2.4.3",
+    "compression": "^1.8.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
     "expo-server-sdk": "^6.1.0",
     "express": "^4.19.2",
+    "express-async-errors": "^3.1.1",
+    "express-rate-limit": "^8.5.2",
+    "googleapis": "^144.0.0",
+    "helmet": "^8.1.0",
+    "hpp": "^0.2.3",
     "http-proxy-middleware": "^3.0.5",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
     "pdf-lib": "^1.17.1",
-    "pdf-parse": "^1.1.1",
+    "pg": "^8.13.1",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
     "sqlite3": "^6.0.1",
-    "tesseract.js": "^5.1.1",
-    "vite": "8.0.10",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4"
+    "@eslint/js": "^9.13.0",
+    "eslint": "^9.13.0",
+    "eslint-plugin-n": "^17.15.0",
+    "eslint-plugin-security": "^3.0.1",
+    "globals": "^15.11.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.4",
+    "supertest": "^7.0.0"
   }
 }

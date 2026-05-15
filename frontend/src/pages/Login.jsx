@@ -235,7 +235,20 @@ export default function Login({ onLoggedIn }) {
         return;
       }
 
-      onLoggedIn?.(res.user);
+      let nextUser = res.user;
+      try {
+        const me = await authApi.me();
+        if (me?.user && Number(me.user.id) > 0) nextUser = me.user;
+      } catch {
+        /* keep login payload */
+      }
+      if (!nextUser || typeof nextUser !== 'object' || !Number(nextUser.id) || Number(nextUser.id) <= 0) {
+        setError('Sign-in succeeded but your profile could not be loaded. Please try again or contact an admin.');
+        authApi.logout();
+        return;
+      }
+
+      onLoggedIn?.(nextUser);
       navigate('/dashboard', { replace: true });
     } catch (err) {
       const msg = err?.response?.data?.error || err.message || 'Login failed';
@@ -258,39 +271,41 @@ export default function Login({ onLoggedIn }) {
       <div className="pointer-events-none absolute inset-0 z-[1]" aria-hidden>
         {techIcons.map(({ Icon, label, className }) => (
           <div key={label} className={`godam-tech-icon absolute ${className}`} title={label}>
-            <Icon className="h-4 w-4" />
+            <Icon className="h-5 w-5" />
           </div>
         ))}
       </div>
 
       <main className="relative z-[2] flex flex-1 flex-col items-center justify-center px-4 py-8 sm:py-10">
-        <section className="godam-antigravity-hero w-full max-w-[820px] text-center">
-          <div className="godam-brand-mark mx-auto mb-5 inline-flex items-center gap-3 rounded-full border border-blue-100 bg-white/85 px-4 py-2 shadow-[0_18px_45px_-32px_rgba(37,99,235,0.8)] backdrop-blur">
-            <span className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-blue-600 to-cyan-400 text-white shadow-[0_12px_28px_-16px_rgba(37,99,235,0.85)]">
-              <Network className="h-4 w-4" aria-hidden />
+        <section className="godam-antigravity-hero w-full max-w-[900px] text-center">
+          <div className="godam-brand-mark mx-auto mb-5 inline-flex items-center gap-3 rounded-full border border-theme-border bg-theme-card/90 px-4 py-2.5 shadow-[var(--shadow-soft)] backdrop-blur">
+            <span className="grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-primary-gradient-end)] text-white shadow-[0_12px_28px_-16px_var(--glow-primary)] sm:h-10 sm:w-10">
+              <Network className="h-4 w-4 sm:h-5 sm:w-5" aria-hidden />
             </span>
-            <span className="text-[12px] font-semibold tracking-[0.18em] text-slate-600">TECHNICAL LOGISTICS PLATFORM</span>
+            <span className="text-[13px] font-semibold tracking-[0.18em] text-theme-fg-secondary sm:text-[14px]">
+              TECHNICAL LOGISTICS PLATFORM
+            </span>
           </div>
 
-          <div className="godam-login-card-shell mx-auto w-full max-w-[460px] rounded-[1.35rem] border border-slate-200/80 bg-white/82 p-7 shadow-[0_30px_100px_-55px_rgba(15,23,42,0.45)] backdrop-blur-xl sm:p-8">
+          <div className="godam-login-card-shell mx-auto w-full max-w-[520px] rounded-[1.35rem] border border-theme-border bg-theme-card/90 p-8 shadow-[var(--shadow-raised)] backdrop-blur-xl sm:p-10">
             <div className="mb-7 text-center">
                 <img
                   src="/LOGO.png"
                   alt="GoDam"
-                  className="mx-auto mb-4 h-[4.25rem] w-auto max-w-[170px] object-contain drop-shadow-[0_18px_40px_rgba(37,99,235,0.14)] sm:h-[4.75rem]"
+                  className="mx-auto mb-4 h-[4.85rem] w-auto max-w-[195px] object-contain drop-shadow-[0_18px_40px_rgba(37,99,235,0.14)] sm:h-[5.5rem] sm:max-w-[220px]"
                 />
-              <h1 className="text-[2rem] font-semibold tracking-tight text-slate-950 sm:text-[2.6rem]">GoDam</h1>
-              <p className="mt-2 text-[14px] font-medium text-slate-600 sm:text-[15px]">
+              <h1 className="text-[2.25rem] font-semibold tracking-tight text-theme-fg sm:text-[2.85rem]">GoDam</h1>
+              <p className="mt-2 text-[15px] font-medium text-theme-fg-secondary sm:text-[16px]">
                 Warehouse Operations System
               </p>
-              <p className="mt-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-blue-600/80">
+              <p className="mt-2 text-[12px] font-semibold uppercase tracking-[0.22em] text-theme-primary sm:text-[13px]">
                 Secure logistics control panel
               </p>
             </div>
 
-              <form className="space-y-4" onSubmit={submit} noValidate>
+              <form className="space-y-[1.15rem]" onSubmit={submit} noValidate>
                 <div>
-                  <label htmlFor="login-user" className="mb-1.5 block text-left text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">
+                  <label htmlFor="login-user" className="mb-1.5 block text-left text-[11px] font-bold uppercase tracking-[0.14em] text-theme-fg-muted sm:text-[12px]">
                     Username
                   </label>
                   <input
@@ -304,7 +319,7 @@ export default function Login({ onLoggedIn }) {
                   />
                 </div>
                 <div>
-                  <label htmlFor="login-pass" className="mb-1.5 block text-left text-[10px] font-bold uppercase tracking-[0.14em] text-slate-500">
+                  <label htmlFor="login-pass" className="mb-1.5 block text-left text-[11px] font-bold uppercase tracking-[0.14em] text-theme-fg-muted sm:text-[12px]">
                     Password
                   </label>
                   <input
@@ -322,7 +337,7 @@ export default function Login({ onLoggedIn }) {
                 {error ? (
                   <div
                     role="alert"
-                    className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-left text-[13px] text-red-700 shadow-[0_18px_36px_-30px_rgba(239,68,68,0.55)]"
+                    className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-left text-[14px] text-red-700 shadow-[0_18px_36px_-30px_rgba(239,68,68,0.55)]"
                   >
                     {error}
                   </div>
@@ -335,7 +350,7 @@ export default function Login({ onLoggedIn }) {
                 >
                   {loading ? (
                     <>
-                      <Loader2 className="h-4 w-4 animate-spin shrink-0" aria-hidden />
+                      <Loader2 className="h-5 w-5 animate-spin shrink-0" aria-hidden />
                       Signing in…
                     </>
                   ) : (
@@ -343,15 +358,25 @@ export default function Login({ onLoggedIn }) {
                   )}
                 </button>
 
-                <p className="text-center text-[10px] leading-relaxed text-slate-500">
+                <p className="text-center text-[11px] leading-relaxed text-theme-fg-muted sm:text-[12px]">
                   Default admin via backend env{' '}
-                  <span className="font-mono text-slate-600">ADMIN_USERNAME</span> /{' '}
-                  <span className="font-mono text-slate-600">ADMIN_PASSWORD</span>
+                  <span className="font-mono text-theme-fg-secondary">ADMIN_USERNAME</span> /{' '}
+                  <span className="font-mono text-theme-fg-secondary">ADMIN_PASSWORD</span>
+                </p>
+
+                <p className="text-center text-[12px] text-theme-fg-secondary pt-1 sm:text-[13px]">
+                  <a
+                    href="/api/mobile-app/apk"
+                    className="font-semibold text-theme-primary hover:opacity-90 underline underline-offset-2"
+                    download="GoDam.apk"
+                  >
+                    Download Android app (APK)
+                  </a>
                 </p>
               </form>
           </div>
 
-          <div className="godam-login-status-row mx-auto mt-6 flex max-w-[620px] flex-wrap items-center justify-center gap-2 text-[11px] font-medium text-slate-500">
+          <div className="godam-login-status-row mx-auto mt-6 flex max-w-[680px] flex-wrap items-center justify-center gap-2 text-[12px] font-medium text-theme-fg-muted sm:text-[13px]">
             <span>Inventory intelligence</span>
             <span aria-hidden>•</span>
             <span>Fleet-ready operations</span>

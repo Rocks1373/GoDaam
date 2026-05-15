@@ -58,8 +58,9 @@ export default function MobileApps() {
         <h1 className="text-xl font-semibold tracking-tight">Mobile Apps</h1>
       </div>
       <p className="text-sm text-theme-fg-muted mb-6">
-        Admin-only download for the Android release. The APK is built with the production API base URL embedded in the
-        bundle (Expo <code className="text-xs">EXPO_PUBLIC_API_URL</code>).
+        Download the Android release for admins (Bearer session). Staff can download the same file without login from{' '}
+        <code className="text-xs">/api/mobile-app/apk</code> (e.g. link on the login page). The APK is built with the
+        production API base URL embedded in the bundle (Expo <code className="text-xs">EXPO_PUBLIC_API_URL</code>).
       </p>
 
       <div className="rounded-lg border border-theme-border bg-theme-card p-4 space-y-4">

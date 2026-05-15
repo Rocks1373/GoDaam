@@ -51,10 +51,18 @@ function streamlitProxyGate(req, res, next) {
 function createHuaweiGodamStreamlitProxy() {
   const base = streamlitBasePath();
   const target = streamlitOrigin();
+  /**
+   * ws: false — do NOT let http-proxy-middleware subscribe to `upgrade` internally.
+   * With ws:true it registers its own handler; middleware.upgrade() then becomes a no-op while
+   * JWT checks live in attachStreamlitUpgrade — ordering bugs → Streamlit stuck on skeleton loaders.
+   * WebSockets are proxied only from attachStreamlitUpgrade → proxy.upgrade() → proxy.ws().
+   */
   const proxy = createProxyMiddleware({
     target,
-    ws: true,
+    ws: false,
     changeOrigin: true,
+    xfwd: true,
+    proxyTimeout: 0,
     // Express strips the mount path before passing to this middleware, so req.url is "/" while
     // Streamlit is configured with --server.baseUrlPath (expects "/base/..."). Forwarding "/" makes
     // Streamlit redirect to site "/", which nginx serves as the SPA → nested app inside the iframe.
@@ -70,6 +78,8 @@ function attachStreamlitUpgrade(server, proxyMiddleware, basePath) {
   server.on('upgrade', (req, socket, head) => {
     const p = (req.url || '').split('?')[0];
     if (!p.startsWith(`/${basePath}`)) return;
+    // Raw Node upgrade requests often omit originalUrl; pathRewrite + HPM need it.
+    if (!req.originalUrl) req.originalUrl = req.url;
     if (!verifyHuaweiStreamlitAccess(req)) {
       try {
         socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');

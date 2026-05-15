@@ -5,6 +5,11 @@ venv/
 .env.*
 !.env.example
 !**/.env.example
+# Google OAuth client secrets (never commit)
+client_secret*.json
+# Google service account keys (never commit; use GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH outside repo in prod)
+godam-*.json
+godaam-*.json
 dist
 build
 .expo

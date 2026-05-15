@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, Download, Plus, Search, Upload, Eye, Trash2 } from 'lucide-react';
+import { Copy, Download, Plus, Search, Upload, Eye, Trash2, Pencil } from 'lucide-react';
 import { vendorsApi } from '../services/api';
+import { reportUploadError, reportUploadResult } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
@@ -12,6 +13,7 @@ export default function VendorMaster() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
+  const [editingId, setEditingId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({
     vendor_number: '',
@@ -81,6 +83,33 @@ export default function VendorMaster() {
     }
   };
 
+  const saveEdit = async () => {
+    if (!editingId) return;
+    try {
+      if (!String(form.vendor_name || '').trim()) return alert('Vendor Name is required');
+      await vendorsApi.update(editingId, form);
+      setEditingId(null);
+      resetForm();
+      fetchRows(search);
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    }
+  };
+
+  const openEdit = (row) => {
+    setShowAdd(false);
+    setEditingId(row.id);
+    setForm({
+      vendor_number: row.vendor_number || '',
+      vendor_name: row.vendor_name || '',
+      contact_person: row.contact_person || '',
+      phone_number: row.phone_number || '',
+      email: row.email || '',
+      remarks: row.remarks || '',
+      is_active: Number(row.is_active) ? 1 : 0,
+    });
+  };
+
   const parseBulk = () => {
     const lines = bulkData.trim().split('\n').filter((l) => l.trim());
     return lines.map((line) => {
@@ -114,10 +143,11 @@ export default function VendorMaster() {
 
   const onUpload = async (file) => {
     try {
-      await vendorsApi.upload(file);
+      const summary = await vendorsApi.upload(file);
       fetchRows(search);
+      reportUploadResult(summary, { label: 'Vendor upload', filenamePrefix: 'vendor-upload' });
     } catch (e) {
-      alert(e?.response?.data?.error || e.message);
+      reportUploadError(e, { label: 'Vendor upload', filenamePrefix: 'vendor-upload' });
     } finally {
       if (fileRef.current) fileRef.current.value = '';
     }
@@ -138,13 +168,14 @@ export default function VendorMaster() {
       <div className="flex flex-col md:flex-row md:items-start justify-between mb-2 gap-2">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-gray-900 leading-tight">Vendor Master</h2>
-          <p className="text-[11px] text-gray-600">Admin only</p>
+          <p className="text-[11px] text-gray-600">Edit vendor number, name, and contacts. Available to all web users.</p>
         </div>
         <div className="flex gap-1.5 flex-wrap justify-end">
           <button
             type="button"
             className="btn-primary flex items-center gap-1"
             onClick={() => {
+              setEditingId(null);
               resetForm();
               setShowAdd(true);
             }}
@@ -223,9 +254,14 @@ export default function VendorMaster() {
                 <td className="tbl-td">{r.remarks || ''}</td>
                 <td className="tbl-td-nowrap">{r.is_active ? 'Yes' : 'No'}</td>
                 <td className="tbl-td-nowrap">
-                  <button type="button" className="text-red-600 hover:text-red-800 p-0.5" onClick={() => deactivate(r.id)} title="Deactivate">
-                    <Trash2 size={14} />
-                  </button>
+                  <div className="flex gap-1">
+                    <button type="button" className="text-primary-700 hover:text-primary-900 p-0.5" onClick={() => openEdit(r)} title="Edit">
+                      <Pencil size={14} />
+                    </button>
+                    <button type="button" className="text-red-600 hover:text-red-800 p-0.5" onClick={() => deactivate(r.id)} title="Deactivate">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -239,6 +275,71 @@ export default function VendorMaster() {
           </tbody>
         </table>
       </div>
+
+      {editingId ? (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <h3 className="text-lg font-bold">Edit Vendor</h3>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setEditingId(null);
+                  resetForm();
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
+              <label className="text-[11px] font-bold">
+                Vendor Number
+                <input className="input-field mt-1" value={form.vendor_number} onChange={(e) => setForm((s) => ({ ...s, vendor_number: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold">
+                Vendor Name
+                <input className="input-field mt-1" value={form.vendor_name} onChange={(e) => setForm((s) => ({ ...s, vendor_name: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold">
+                Contact Person
+                <input className="input-field mt-1" value={form.contact_person} onChange={(e) => setForm((s) => ({ ...s, contact_person: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold">
+                Phone Number
+                <input className="input-field mt-1" value={form.phone_number} onChange={(e) => setForm((s) => ({ ...s, phone_number: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Email
+                <input className="input-field mt-1" value={form.email} onChange={(e) => setForm((s) => ({ ...s, email: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Remarks
+                <textarea className="input-field mt-1 h-16" value={form.remarks} onChange={(e) => setForm((s) => ({ ...s, remarks: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2 flex items-center gap-2">
+                <input type="checkbox" checked={!!Number(form.is_active)} onChange={(e) => setForm((s) => ({ ...s, is_active: e.target.checked ? 1 : 0 }))} />
+                Active
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setEditingId(null);
+                  resetForm();
+                }}
+              >
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={saveEdit}>
+                Save changes
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showAdd ? (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
@@ -328,4 +429,3 @@ export default function VendorMaster() {
     </div>
   );
 }
-

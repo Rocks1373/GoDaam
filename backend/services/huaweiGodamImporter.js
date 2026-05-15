@@ -5,12 +5,16 @@ const cp = require('child_process');
 const { promisify } = require('util');
 
 const hgDb = require('../huaweiGodamDb');
+const { resolveGoDamPluginDir } = require('../godamPluginPaths');
 const dbRun = promisify(hgDb.run.bind(hgDb));
 const dbGet = promisify(hgDb.get.bind(hgDb));
 const dbAll = promisify(hgDb.all.bind(hgDb));
 
 const BACKEND_ROOT = path.join(__dirname, '..');
-const PLUGIN_ROOT = path.join(BACKEND_ROOT, '..', 'plugins', 'GoDam-1.0');
+const REPO_ROOT = path.join(BACKEND_ROOT, '..');
+/** Resolved GoDam-1.0 root (prefers plugins/GoDam-1.0). */
+const PLUGIN_ROOT =
+  resolveGoDamPluginDir(REPO_ROOT) || path.join(REPO_ROOT, 'plugins', 'GoDam-1.0');
 
 /** Prefer plugins/GoDam-1.0/.venv (same as Streamlit script) so matcher CLI matches that env. */
 function resolveHuaweiPython() {

@@ -12,11 +12,13 @@
   "dependencies": {
     "@tanstack/react-table": "^8.20.5",
     "axios": "^1.7.7",
+    "exceljs": "^4.4.0",
     "lucide-react": "^0.441.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-hook-form": "^7.53.0",
     "react-router-dom": "^6.26.1",
+    "sonner": "^2.0.7",
     "xlsx": "^0.18.5",
     "zod": "^3.23.8"
   },
@@ -31,6 +33,7 @@
     "eslint-plugin-react-refresh": "^0.4.12",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
-    "vite": "^5.4.21"
+    "vite": "^6.3.5",
+    "vite-plugin-pwa": "^0.21.2"
   }
 }

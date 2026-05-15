@@ -1,0 +1,28 @@
+# Local PostgreSQL for GoDam main warehouse API (backend/db.js).
+# Start: docker compose -f docker-compose.godam-postgres.yml up -d
+# Connection matches dev.sh / .env.example (override with DATABASE_URL).
+#
+# Host bind 127.0.0.1 only — Postgres is not exposed on LAN interfaces (dev laptops).
+# For LAN access (not recommended with the default dev password), use "0.0.0.0:5432:5432".
+services:
+  godam-postgres:
+    image: postgres:16-alpine
+    container_name: godam-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: godam_db
+      POSTGRES_USER: godam_user
+      POSTGRES_PASSWORD: godam_dev_local
+      TZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - godam_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U godam_user -d godam_db"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  godam_pg_data:

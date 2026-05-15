@@ -1,13 +1,20 @@
-const sqlite3 = require('sqlite3').verbose();
-
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
+const db = require('../db');
 
 class StockByRackSummary {
   constructor() {
-    this.db = new sqlite3.Database(DB_PATH);
+    this.db = db;
   }
 
-  async list({ part_number, sap_part_number, rack_location, search = '', available_only = false, limit = 200, offset = 0 }) {
+  async list({
+    part_number,
+    sap_part_number,
+    rack_location,
+    search = '',
+    available_only = false,
+    limit = 200,
+    offset = 0,
+    warehouse_id,
+  } = {}) {
     return new Promise((resolve, reject) => {
       let query = `
         SELECT *
@@ -16,6 +23,10 @@ class StockByRackSummary {
       `;
       const params = [];
 
+      if (warehouse_id != null && Number(warehouse_id) > 0) {
+        query += ' AND warehouse_id = ?';
+        params.push(Number(warehouse_id));
+      }
       if (part_number) {
         query += ' AND part_number LIKE ?';
         params.push(`%${part_number}%`);

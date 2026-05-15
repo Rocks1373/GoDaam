@@ -1,0 +1,20 @@
+{
+  "name": "godam-scanner-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local scanner bridge for GoDam (listens on localhost; uploads scans to GoDam API)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "form-data": "^4.0.0",
+    "pdf-lib": "^1.17.1"
+  }
+}

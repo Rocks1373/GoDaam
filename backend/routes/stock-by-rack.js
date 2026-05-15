@@ -2,6 +2,7 @@ const express = require('express');
 const StockByRackSummary = require('../models/StockByRackSummary');
 const { requireAdmin } = require('../middleware/auth');
 const { applyRackAdjustment } = require('../services/rackBalanceAdjustment');
+const { assertExplicitWarehouseParamAllowed, resolveReadWarehouseScope } = require('../services/warehouseContext');
 
 const router = express.Router();
 const stockByRackSummary = new StockByRackSummary();
@@ -9,6 +10,9 @@ const stockByRackSummary = new StockByRackSummary();
 // GET /api/stock-by-rack - Summary list with filters
 router.get('/', async (req, res) => {
   try {
+    const gate = await assertExplicitWarehouseParamAllowed(req);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
+    const scope = await resolveReadWarehouseScope(req);
     const {
       part_number,
       sap_part_number,
@@ -27,6 +31,7 @@ router.get('/', async (req, res) => {
       available_only: available_only === 'true',
       limit: Number(limit) || 200,
       offset: Number(offset) || 0,
+      warehouse_id: scope.mode === 'all' ? undefined : scope.warehouseId,
     });
 
     res.json(rows);
@@ -58,6 +63,9 @@ router.post('/adjust', requireAdmin, async (req, res) => {
 // GET /api/stock-by-rack/search - alias endpoint (same as list)
 router.get('/search', async (req, res) => {
   try {
+    const gate = await assertExplicitWarehouseParamAllowed(req);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
+    const scope = await resolveReadWarehouseScope(req);
     const rows = await stockByRackSummary.list({
       part_number: req.query.part_number,
       sap_part_number: req.query.sap_part_number,
@@ -66,6 +74,7 @@ router.get('/search', async (req, res) => {
       available_only: req.query.available_only === 'true',
       limit: Number(req.query.limit) || 200,
       offset: Number(req.query.offset) || 0,
+      warehouse_id: scope.mode === 'all' ? undefined : scope.warehouseId,
     });
     res.json(rows);
   } catch (error) {

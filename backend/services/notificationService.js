@@ -1,29 +1,52 @@
 const { Expo } = require('expo-server-sdk');
 const { promisify } = require('util');
 const db = require('../db');
+const { getDefaultWarehouseId } = require('./warehouseContext');
 
 const expo = new Expo();
 
 async function logNotification(userId, title, body, data) {
   const run = promisify(db.run.bind(db));
+  let wid = data != null && data.warehouse_id != null && data.warehouse_id !== '' ? Number(data.warehouse_id) : null;
+  if (!Number.isFinite(wid) || wid <= 0) {
+    wid = await getDefaultWarehouseId();
+  }
   await run(
-    `INSERT INTO notification_log (user_id, title, body, data_json) VALUES (?, ?, ?, ?)`,
-    [userId || null, title || '', body || '', data ? JSON.stringify(data) : null]
+    `INSERT INTO notification_log (user_id, title, body, data_json, warehouse_id) VALUES (?, ?, ?, ?, ?)`,
+    [userId || null, title || '', body || '', data ? JSON.stringify(data) : null, wid]
   );
 }
 
-/**
- * Expo push tokens for users who have a permission enabled (and active).
- * Always includes admins.
- */
-async function getExpoTokensForPermission(permissionKey) {
+async function getExpoTokensForPermission(permissionKey, warehouseId = null) {
   const all = promisify(db.all.bind(db));
-  const sql = `
+  const wid = warehouseId != null && Number(warehouseId) > 0 ? Number(warehouseId) : null;
+  const sql = wid
+    ? `
     SELECT DISTINCT pd.expo_push_token, pd.user_id
     FROM push_devices pd
     JOIN users u ON u.id = pd.user_id
     WHERE COALESCE(u.is_active, 1) = 1
-      AND ExpoPushToken_is_placeholder(pd.expo_push_token) = 0
+      AND (
+        lower(u.role) = 'admin'
+        OR (
+          EXISTS (
+            SELECT 1 FROM role_permissions rp
+            WHERE lower(rp.role) = lower(u.role)
+              AND rp.permission_key = ?
+              AND rp.is_enabled = 1
+          )
+          AND EXISTS (
+            SELECT 1 FROM user_warehouses uw
+            WHERE uw.user_id = u.id AND uw.warehouse_id = ?
+          )
+        )
+      )
+  `
+    : `
+    SELECT DISTINCT pd.expo_push_token, pd.user_id
+    FROM push_devices pd
+    JOIN users u ON u.id = pd.user_id
+    WHERE COALESCE(u.is_active, 1) = 1
       AND (
         lower(u.role) = 'admin'
         OR EXISTS (
@@ -34,55 +57,66 @@ async function getExpoTokensForPermission(permissionKey) {
         )
       )
   `;
-  // SQLite has no ExpoPushToken_is_placeholder — filter in JS
-  const rows = await all(
-    `
+  const params = wid ? [permissionKey, wid] : [permissionKey];
+  const rows = await all(sql, params);
+  return (rows || []).filter((r) => r.expo_push_token && Expo.isExpoPushToken(r.expo_push_token));
+}
+
+async function getExpoTokensForRoles(roleList, warehouseId = null) {
+  const all = promisify(db.all.bind(db));
+  const placeholders = roleList.map(() => '?').join(',');
+  const wid = warehouseId != null && Number(warehouseId) > 0 ? Number(warehouseId) : null;
+  const sql = wid
+    ? `
     SELECT DISTINCT pd.expo_push_token, pd.user_id
     FROM push_devices pd
     JOIN users u ON u.id = pd.user_id
     WHERE COALESCE(u.is_active, 1) = 1
       AND (
         lower(u.role) = 'admin'
-        OR EXISTS (
-          SELECT 1 FROM role_permissions rp
-          WHERE lower(rp.role) = lower(u.role)
-            AND rp.permission_key = ?
-            AND rp.is_enabled = 1
+        OR (
+          lower(u.role) IN (${placeholders})
+          AND EXISTS (SELECT 1 FROM user_warehouses uw WHERE uw.user_id = u.id AND uw.warehouse_id = ?)
         )
       )
-  `,
-    [permissionKey]
-  );
-
-  return (rows || []).filter((r) => r.expo_push_token && Expo.isExpoPushToken(r.expo_push_token));
-}
-
-async function getExpoTokensForRoles(roleList) {
-  const all = promisify(db.all.bind(db));
-  const placeholders = roleList.map(() => '?').join(',');
-  const rows = await all(
-    `
+  `
+    : `
     SELECT DISTINCT pd.expo_push_token, pd.user_id
     FROM push_devices pd
     JOIN users u ON u.id = pd.user_id
     WHERE COALESCE(u.is_active, 1) = 1
       AND lower(u.role) IN (${placeholders})
-  `,
-    roleList.map((r) => String(r).toLowerCase())
-  );
+  `;
+  const base = roleList.map((r) => String(r).toLowerCase());
+  const params = wid ? [...base, wid] : base;
+  const rows = await all(sql, params);
   return (rows || []).filter((r) => r.expo_push_token && Expo.isExpoPushToken(r.expo_push_token));
 }
 
-/**
- * User IDs who should receive in-app notification rows (web + mobile).
- * Admin always included; others need at least one enabled permission in the list.
- */
-async function getUserIdsWhoHaveAnyPermission(permissionKeys) {
+async function getUserIdsWhoHaveAnyPermission(permissionKeys, warehouseId = null) {
   if (!permissionKeys?.length) return [];
   const all = promisify(db.all.bind(db));
   const placeholders = permissionKeys.map(() => '?').join(',');
-  const rows = await all(
-    `
+  const wid = warehouseId != null && Number(warehouseId) > 0 ? Number(warehouseId) : null;
+  const sql = wid
+    ? `
+    SELECT DISTINCT u.id
+    FROM users u
+    WHERE COALESCE(u.is_active, 1) = 1
+      AND (
+        lower(u.role) = 'admin'
+        OR (
+          EXISTS (
+            SELECT 1 FROM role_permissions rp
+            WHERE lower(rp.role) = lower(u.role)
+              AND rp.permission_key IN (${placeholders})
+              AND rp.is_enabled = 1
+          )
+          AND EXISTS (SELECT 1 FROM user_warehouses uw WHERE uw.user_id = u.id AND uw.warehouse_id = ?)
+        )
+      )
+  `
+    : `
     SELECT DISTINCT u.id
     FROM users u
     WHERE COALESCE(u.is_active, 1) = 1
@@ -95,9 +129,9 @@ async function getUserIdsWhoHaveAnyPermission(permissionKeys) {
             AND rp.is_enabled = 1
         )
       )
-  `,
-    permissionKeys
-  );
+  `;
+  const params = wid ? [...permissionKeys, wid] : permissionKeys;
+  const rows = await all(sql, params);
   return (rows || []).map((r) => r.id).filter((id) => id != null);
 }
 
@@ -108,9 +142,14 @@ async function sendExpoPushToTokens(rows, title, body, data = {}) {
     messages.push({
       to: r.expo_push_token,
       sound: 'default',
+      priority: 'high',
       title,
       body,
       data,
+      android: {
+        sound: 'default',
+        priority: 'high',
+      },
     });
   }
 
@@ -127,73 +166,101 @@ async function sendExpoPushToTokens(rows, title, body, data = {}) {
   return receipts;
 }
 
-/** Notify pickers for new pick orders */
-async function notifyPickOrder(title, body, data) {
-  const rows = await getExpoTokensForPermission('can_pick_orders');
-  await sendExpoPushToTokens(rows, title, body, data);
-  const userIds = await getUserIdsWhoHaveAnyPermission(['can_pick_orders']);
+async function resolveOutboundWarehouseId(data) {
+  const get = promisify(db.get.bind(db));
+  let wid = data?.warehouse_id != null && data.warehouse_id !== '' ? Number(data.warehouse_id) : null;
+  if ((!wid || !Number.isFinite(wid)) && data?.outbound_order_id) {
+    const o = await get(`SELECT warehouse_id FROM outbound_orders WHERE id = ?`, [Number(data.outbound_order_id)]);
+    wid = Number(o?.warehouse_id) || null;
+  }
+  if (!wid || !Number.isFinite(wid)) wid = await getDefaultWarehouseId();
+  return wid;
+}
+
+/** Notify pickers for new pick orders (scoped to outbound warehouse). */
+async function notifyPickOrder(title, body, data = {}) {
+  const wid = await resolveOutboundWarehouseId(data);
+  const payload = { notif_category: 'orders', warehouse_id: wid, ...data };
+  const pickRows = await getExpoTokensForPermission('can_pick_orders', wid);
+  const viewRows = await getExpoTokensForPermission('can_view_orders', wid);
+  const map = new Map();
+  for (const r of [...pickRows, ...viewRows]) {
+    if (r.expo_push_token) map.set(r.expo_push_token, r);
+  }
+  await sendExpoPushToTokens([...map.values()], title, body, payload);
+  const userIds = await getUserIdsWhoHaveAnyPermission(['can_pick_orders', 'can_view_orders'], wid);
   const seen = new Set();
   for (const uid of userIds) {
     if (seen.has(uid)) continue;
     seen.add(uid);
-    await logNotification(uid, title, body, data);
+    await logNotification(uid, title, body, payload);
   }
 }
 
 /** Notify pickers, checkers, admins (mobile-capable) on pick progress */
-async function notifyPickProgress(title, body, data) {
-  const picker = await getExpoTokensForPermission('can_pick_orders');
-  const checker = await getExpoTokensForPermission('can_confirm_picked');
-  const adminRows = await getExpoTokensForRoles(['admin']);
+async function notifyPickProgress(title, body, data = {}) {
+  const wid = await resolveOutboundWarehouseId(data);
+  const payload = { notif_category: 'orders', warehouse_id: wid, ...data };
+  const picker = await getExpoTokensForPermission('can_pick_orders', wid);
+  const checker = await getExpoTokensForPermission('can_confirm_picked', wid);
+  const adminRows = await getExpoTokensForRoles(['admin'], null);
   const map = new Map();
   for (const r of [...picker, ...checker, ...adminRows]) {
-    map.set(r.expo_push_token, r);
+    if (r.expo_push_token) map.set(r.expo_push_token, r);
   }
   const rows = [...map.values()];
-  await sendExpoPushToTokens(rows, title, body, data);
-  const userIds = await getUserIdsWhoHaveAnyPermission(['can_pick_orders', 'can_confirm_picked']);
+  await sendExpoPushToTokens(rows, title, body, payload);
+  const userIds = await getUserIdsWhoHaveAnyPermission(['can_pick_orders', 'can_confirm_picked'], wid);
   const seen = new Set();
   for (const uid of userIds) {
     if (seen.has(uid)) continue;
     seen.add(uid);
-    await logNotification(uid, title, body, data);
+    await logNotification(uid, title, body, payload);
   }
 }
 
-async function notifyAdminChecker(title, body, data) {
-  const adminRows = await getExpoTokensForRoles(['admin']);
-  const checker = await getExpoTokensForPermission('can_confirm_picked');
+async function notifyAdminChecker(title, body, data = {}) {
+  const wid =
+    data?.warehouse_id != null && data.warehouse_id !== ''
+      ? Number(data.warehouse_id)
+      : await resolveOutboundWarehouseId(data);
+  const payload = { notif_category: 'picked', warehouse_id: wid, ...data };
+  const adminRows = await getExpoTokensForRoles(['admin'], null);
+  const checker = await getExpoTokensForPermission('can_confirm_picked', wid);
   const map = new Map();
   for (const r of [...adminRows, ...checker]) {
-    map.set(r.expo_push_token, r);
+    if (r.expo_push_token) map.set(r.expo_push_token, r);
   }
   const rows = [...map.values()];
-  await sendExpoPushToTokens(rows, title, body, data);
-  const userIds = await getUserIdsWhoHaveAnyPermission(['can_confirm_picked']);
+  await sendExpoPushToTokens(rows, title, body, payload);
+  const userIds = await getUserIdsWhoHaveAnyPermission(['can_confirm_picked'], wid);
   const seen = new Set();
   for (const uid of userIds) {
     if (seen.has(uid)) continue;
     seen.add(uid);
-    await logNotification(uid, title, body, data);
+    await logNotification(uid, title, body, payload);
   }
 }
 
 /** Inbound uploaded → putaway in racks: notify receiving staff + pickers (warehouse). */
-async function notifyInboundPutaway(title, body, data) {
-  const receivers = await getExpoTokensForPermission('can_receive_stock');
-  const pickers = await getExpoTokensForPermission('can_pick_orders');
+async function notifyInboundPutaway(title, body, data = {}) {
+  let wid = data?.warehouse_id != null && data.warehouse_id !== '' ? Number(data.warehouse_id) : null;
+  if (!wid || !Number.isFinite(wid)) wid = await getDefaultWarehouseId();
+  const payload = { notif_category: 'inbound', warehouse_id: wid, ...data };
+  const receivers = await getExpoTokensForPermission('can_receive_stock', wid);
+  const pickers = await getExpoTokensForPermission('can_pick_orders', wid);
   const map = new Map();
   for (const r of [...receivers, ...pickers]) {
     if (r.expo_push_token) map.set(r.expo_push_token, r);
   }
   const rows = [...map.values()];
-  await sendExpoPushToTokens(rows, title, body, data);
-  const userIds = await getUserIdsWhoHaveAnyPermission(['can_receive_stock', 'can_pick_orders']);
+  await sendExpoPushToTokens(rows, title, body, payload);
+  const userIds = await getUserIdsWhoHaveAnyPermission(['can_receive_stock', 'can_pick_orders'], wid);
   const seen = new Set();
   for (const uid of userIds) {
     if (seen.has(uid)) continue;
     seen.add(uid);
-    await logNotification(uid, title, body, data);
+    await logNotification(uid, title, body, payload);
   }
 }
 

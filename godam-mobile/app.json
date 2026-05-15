@@ -2,7 +2,7 @@
   "expo": {
     "name": "GoDaam",
     "slug": "godam-mobile",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "extra": {
       "eas": {
         "projectId": "1667da6d-66c4-474e-b7d5-0a7c3c2ccd0f"
@@ -23,7 +23,10 @@
       "infoPlist": {
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
-        }
+        },
+        "NSCameraUsageDescription": "GoDaam uses the camera for proof-of-delivery (POD) photos, barcode scanning, and OCR.",
+        "NSPhotoLibraryUsageDescription": "GoDaam needs access to your photos to attach POD images from the gallery.",
+        "NSPhotoLibraryAddUsageDescription": "GoDaam may save POD or delivery photos when your device requires it."
       }
     },
     "android": {

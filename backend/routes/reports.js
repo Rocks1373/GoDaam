@@ -1,14 +1,36 @@
 const express = require('express');
 const { promisify } = require('util');
+const XLSX = require('xlsx');
 
 const db = require('../db');
 const { getStockComparison } = require('../services/stockComparisonService');
+const { assertExplicitWarehouseParamAllowed, resolveReadWarehouseScope } = require('../services/warehouseContext');
 
 const router = express.Router();
 const dbAll = promisify(db.all.bind(db));
+const dbGet = promisify(db.get.bind(db));
+
+async function readScopeOrError(req, res) {
+  const gate = await assertExplicitWarehouseParamAllowed(req);
+  if (!gate.ok) {
+    res.status(gate.status || 403).json({ error: gate.message || 'Forbidden' });
+    return null;
+  }
+  return resolveReadWarehouseScope(req);
+}
+
+function appendOutboundWarehouse(sql, params, scope) {
+  if (scope.mode === 'all') return { sql, params };
+  return {
+    sql: `${sql} AND o.warehouse_id = ? `,
+    params: [...params, scope.warehouseId],
+  };
+}
 
 async function runOutboundPicks(req, res) {
   try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
     const { from, to, outbound_number, delivery, customer } = req.query;
     const params = [];
     let sql = `
@@ -48,8 +70,9 @@ async function runOutboundPicks(req, res) {
       const q = `%${String(customer).trim()}%`;
       params.push(q, q);
     }
-    sql += ` ORDER BY pt.picked_at DESC LIMIT 5000`;
-    const rows = await dbAll(sql, params);
+    const scoped = appendOutboundWarehouse(sql, params, scope);
+    scoped.sql += ` ORDER BY pt.picked_at DESC LIMIT 5000`;
+    const rows = await dbAll(scoped.sql, scoped.params);
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -59,7 +82,7 @@ async function runOutboundPicks(req, res) {
 router.get('/outbound-picks', runOutboundPicks);
 router.get('/outbound', runOutboundPicks);
 
-function inboundPutawaySql(req) {
+function inboundPutawaySql(req, scope) {
   const { batch, vendor, from, to, status } = req.query;
   const params = [];
   let sql = `
@@ -83,6 +106,10 @@ function inboundPutawaySql(req) {
       JOIN inbound_batches b ON b.id = i.inbound_batch_id
       WHERE 1=1
     `;
+  if (scope.mode === 'one' && scope.warehouseId) {
+    sql += ` AND b.warehouse_id = ?`;
+    params.push(scope.warehouseId);
+  }
   if (batch) {
     sql += ` AND (b.batch_name LIKE ? OR CAST(b.id AS TEXT) = ?)`;
     params.push(`%${String(batch).trim()}%`, String(batch).trim());
@@ -109,7 +136,9 @@ function inboundPutawaySql(req) {
 
 router.get('/inbound', async (req, res) => {
   try {
-    const { sql, params } = inboundPutawaySql(req);
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const { sql, params } = inboundPutawaySql(req, scope);
     const rows = await dbAll(sql, params);
     res.json(rows);
   } catch (e) {
@@ -155,9 +184,17 @@ function deliveryWhereClause(q) {
 
 router.get('/delivery', async (req, res) => {
   try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
     const level = String(req.query.level || 'header').toLowerCase() === 'item' ? 'item' : 'header';
     const { fragments, params } = deliveryWhereClause(req.query);
-    const whereExtra = fragments.length ? ` AND ${fragments.join(' AND ')}` : '';
+    const frags = [...fragments];
+    const pms = [...params];
+    if (scope.mode === 'one' && scope.warehouseId) {
+      frags.push('dn.warehouse_id = ?');
+      pms.push(scope.warehouseId);
+    }
+    const whereExtra = frags.length ? ` AND ${frags.join(' AND ')}` : '';
 
     if (level === 'header') {
       const sql = `
@@ -206,7 +243,7 @@ router.get('/delivery', async (req, res) => {
         ORDER BY dn.id DESC
         LIMIT 5000
       `;
-      const rows = await dbAll(sql, params);
+      const rows = await dbAll(sql, pms);
       return res.json(rows);
     }
 
@@ -250,7 +287,7 @@ router.get('/delivery', async (req, res) => {
       ORDER BY dn.id DESC, i.item_no ASC, i.id ASC
       LIMIT 20000
     `;
-    const rows = await dbAll(sql, params);
+    const rows = await dbAll(sql, pms);
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -259,10 +296,16 @@ router.get('/delivery', async (req, res) => {
 
 router.get('/stock-by-rack', async (req, res) => {
   try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
     const limit = Math.min(10000, Math.max(1, Number(req.query.limit) || 5000));
     const search = req.query.search ? `%${String(req.query.search).trim()}%` : null;
     const params = [];
     let sql = `SELECT * FROM stock_by_rack WHERE 1=1`;
+    if (scope.mode === 'one' && scope.warehouseId) {
+      sql += ` AND warehouse_id = ?`;
+      params.push(scope.warehouseId);
+    }
     if (search) {
       sql += ` AND (part_number LIKE ? OR COALESCE(sap_part_number,'') LIKE ? OR COALESCE(rack_location,'') LIKE ?)`;
       params.push(search, search, search);
@@ -278,10 +321,16 @@ router.get('/stock-by-rack', async (req, res) => {
 
 router.get('/main-stock', async (req, res) => {
   try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
     const limit = Math.min(10000, Math.max(1, Number(req.query.limit) || 5000));
     const search = req.query.search ? `%${String(req.query.search).trim()}%` : null;
     const params = [];
     let sql = `SELECT * FROM main_stock WHERE 1=1`;
+    if (scope.mode === 'one' && scope.warehouseId) {
+      sql += ` AND warehouse_id = ?`;
+      params.push(scope.warehouseId);
+    }
     if (search) {
       sql += ` AND (part_number LIKE ? OR COALESCE(sap_part_number,'') LIKE ? OR COALESCE(description,'') LIKE ?)`;
       params.push(search, search, search);
@@ -297,16 +346,22 @@ router.get('/main-stock', async (req, res) => {
 
 router.get('/sap-stock', async (req, res) => {
   try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
     const limit = Math.min(10000, Math.max(1, Number(req.query.limit) || 5000));
-    const rows = await dbAll(
-      `SELECT part_number, sap_part_number, description, sap_qty, received_qty, sold_out_qty, pending_delivery_qty,
+    const params = [];
+    let sql = `
+      SELECT part_number, sap_part_number, description, sap_qty, received_qty, sold_out_qty, pending_delivery_qty,
               available_qty, remarks, vendor_name, vendor_number
        FROM main_stock
-       WHERE COALESCE(sap_qty,0) != 0 OR (COALESCE(sap_part_number,'') != '' AND TRIM(COALESCE(sap_part_number,'')) != '')
-       ORDER BY part_number
-       LIMIT ?`,
-      [limit]
-    );
+       WHERE (COALESCE(sap_qty,0) != 0 OR (COALESCE(sap_part_number,'') != '' AND TRIM(COALESCE(sap_part_number,'')) != ''))`;
+    if (scope.mode === 'one' && scope.warehouseId) {
+      sql += ` AND warehouse_id = ?`;
+      params.push(scope.warehouseId);
+    }
+    sql += ` ORDER BY part_number LIMIT ?`;
+    params.push(limit);
+    const rows = await dbAll(sql, params);
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -315,7 +370,15 @@ router.get('/sap-stock', async (req, res) => {
 
 router.get('/stock-comparison', async (req, res) => {
   try {
-    const data = await getStockComparison(db, req.query);
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const q = { ...req.query };
+    if (scope.mode === 'one' && scope.warehouseId) {
+      q.warehouse_id = String(scope.warehouseId);
+    } else {
+      delete q.warehouse_id;
+    }
+    const data = await getStockComparison(db, q);
     res.json(data);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -325,9 +388,15 @@ router.get('/stock-comparison', async (req, res) => {
 /** Rack admin ± adjustments with FIFO refresh audit; expanded one row per related open order. */
 router.get('/rack-balance-adjustments', async (req, res) => {
   try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
     const { from, to, part_number, deductions_only } = req.query;
     const params = [];
     let sql = `SELECT * FROM rack_balance_adjustments WHERE 1=1`;
+    if (scope.mode === 'one' && scope.warehouseId) {
+      sql += ` AND warehouse_id = ?`;
+      params.push(scope.warehouseId);
+    }
     if (from) {
       sql += ` AND date(created_at) >= date(?)`;
       params.push(from);
@@ -391,6 +460,218 @@ router.get('/rack-balance-adjustments', async (req, res) => {
       }
     }
     res.json(expanded);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/bom-definitions', async (req, res) => {
+  try {
+    const rows = await dbAll(
+      `SELECT s.parent_part_number, s.parent_description, c.child_part_number, c.child_description, c.child_qty_per_parent, c.is_active, c.uom
+       FROM part_bom_sets s
+       JOIN part_bom_children c ON c.bom_set_id = s.id
+       WHERE COALESCE(s.is_active,1) = 1
+       ORDER BY s.parent_part_number, c.id`
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/bom-outbound-lines', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const params = [];
+    let sql = `
+      SELECT o.outbound_number, obr.parent_part_number, obr.parent_required_qty,
+              obr.child_part_number, obr.required_child_qty, obr.picked_child_qty, obr.status
+       FROM outbound_bom_requirements obr
+       JOIN outbound_orders o ON o.id = obr.outbound_order_id
+       WHERE 1=1`;
+    if (scope.mode === 'one' && scope.warehouseId) {
+      sql += ` AND o.warehouse_id = ?`;
+      params.push(scope.warehouseId);
+    }
+    sql += ` ORDER BY obr.id DESC LIMIT 5000`;
+    const rows = await dbAll(sql, params);
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function auditLogWhereClause(q, scope) {
+  const params = [];
+  const frags = [];
+
+  if (scope.mode === 'one' && scope.warehouseId) {
+    frags.push('al.warehouse_id = ?');
+    params.push(scope.warehouseId);
+  } else if (q.warehouse_id && String(q.warehouse_id).trim() && String(q.warehouse_id).toLowerCase() !== 'all') {
+    const wid = Number(q.warehouse_id);
+    if (Number.isFinite(wid) && wid > 0) {
+      frags.push('al.warehouse_id = ?');
+      params.push(wid);
+    }
+  }
+  if (q.date_from) {
+    frags.push(`date(al.created_at) >= date(?)`);
+    params.push(q.date_from);
+  }
+  if (q.date_to) {
+    frags.push(`date(al.created_at) <= date(?)`);
+    params.push(q.date_to);
+  }
+  if (q.user_id) {
+    frags.push('al.user_id = ?');
+    params.push(Number(q.user_id));
+  }
+  if (q.user_role) {
+    frags.push(`lower(trim(COALESCE(al.user_role, ''))) = lower(trim(?))`);
+    params.push(String(q.user_role).trim());
+  }
+  if (q.module_name) {
+    frags.push('al.module_name = ?');
+    params.push(String(q.module_name).trim());
+  }
+  if (q.action_type) {
+    frags.push('al.action_type = ?');
+    params.push(String(q.action_type).trim());
+  }
+  if (q.reference_type) {
+    frags.push('al.reference_type = ?');
+    params.push(String(q.reference_type).trim());
+  }
+  if (q.reference_number) {
+    frags.push(`COALESCE(al.reference_number, '') LIKE ?`);
+    params.push(`%${String(q.reference_number).trim()}%`);
+  }
+  if (q.status_before) {
+    frags.push(`COALESCE(al.status_before, '') LIKE ?`);
+    params.push(`%${String(q.status_before).trim()}%`);
+  }
+  if (q.status_after) {
+    frags.push(`COALESCE(al.status_after, '') LIKE ?`);
+    params.push(`%${String(q.status_after).trim()}%`);
+  }
+  if (q.has_remarks === '1' || q.has_remarks === 'true') {
+    frags.push(`TRIM(COALESCE(al.remarks, '')) != ''`);
+  }
+  if (q.search) {
+    const s = `%${String(q.search).trim()}%`;
+    frags.push(
+      `(COALESCE(al.reference_number,'') LIKE ? OR COALESCE(al.remarks,'') LIKE ? OR COALESCE(al.user_name,'') LIKE ? OR COALESCE(al.module_name,'') LIKE ? OR COALESCE(al.action_type,'') LIKE ? OR COALESCE(al.old_value_json,'') LIKE ? OR COALESCE(al.new_value_json,'') LIKE ?)`
+    );
+    params.push(s, s, s, s, s, s, s);
+  }
+  return { frags, params };
+}
+
+router.get('/audit-logs', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const q = req.query || {};
+    const { frags, params } = auditLogWhereClause(q, scope);
+    const whereExtra = frags.length ? ` AND ${frags.join(' AND ')}` : '';
+    const limit = Math.min(5000, Math.max(1, Number(q.limit) || 200));
+    const offset = Math.max(0, Number(q.offset) || 0);
+
+    const countSql = `SELECT COUNT(1) AS c FROM audit_logs al WHERE 1=1${whereExtra}`;
+    const countRow = await dbGet(countSql, params);
+    const total = Number(countRow?.c) || 0;
+
+    const sql = `
+      SELECT al.*, w.warehouse_code AS warehouse_code
+      FROM audit_logs al
+      LEFT JOIN warehouses w ON w.id = al.warehouse_id
+      WHERE 1=1
+      ${whereExtra}
+      ORDER BY al.created_at DESC, al.id DESC
+      LIMIT ? OFFSET ?
+    `;
+    const rows = await dbAll(sql, [...params, limit, offset]);
+    res.json({ rows, total, limit, offset });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+async function fetchAuditRowsForExport(req, scope) {
+  const q = req.query || {};
+  const { frags, params } = auditLogWhereClause(q, scope);
+  const whereExtra = frags.length ? ` AND ${frags.join(' AND ')}` : '';
+  const maxRows = Math.min(50000, Math.max(1, Number(q.limit) || 20000));
+  const sql = `
+    SELECT al.created_at, w.warehouse_code, al.user_name, al.user_role, al.module_name, al.action_type,
+           al.reference_type, al.reference_id, al.reference_number, al.status_before, al.status_after,
+           al.remarks, al.ip_address, al.device_info, al.old_value_json, al.new_value_json
+    FROM audit_logs al
+    LEFT JOIN warehouses w ON w.id = al.warehouse_id
+    WHERE 1=1
+    ${whereExtra}
+    ORDER BY al.created_at DESC, al.id DESC
+    LIMIT ?
+  `;
+  return dbAll(sql, [...params, maxRows]);
+}
+
+router.get('/audit-logs/export-csv', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const rows = await fetchAuditRowsForExport(req, scope);
+    const headers = [
+      'created_at',
+      'warehouse_code',
+      'user_name',
+      'user_role',
+      'module_name',
+      'action_type',
+      'reference_type',
+      'reference_id',
+      'reference_number',
+      'status_before',
+      'status_after',
+      'remarks',
+      'ip_address',
+      'device_info',
+      'old_value_json',
+      'new_value_json',
+    ];
+    const esc = (v) => {
+      const s = v == null ? '' : String(v);
+      if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+    const lines = [headers.join(',')];
+    for (const r of rows || []) {
+      lines.push(headers.map((h) => esc(r[h])).join(','));
+    }
+    const body = lines.join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="audit-logs.csv"');
+    res.send('\ufeff' + body);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/audit-logs/export-excel', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const rows = await fetchAuditRowsForExport(req, scope);
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows || []);
+    XLSX.utils.book_append_sheet(wb, ws, 'Audit');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="audit-logs.xlsx"');
+    res.send(buf);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

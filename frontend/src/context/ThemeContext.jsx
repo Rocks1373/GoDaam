@@ -12,7 +12,7 @@ export const THEME_IDS = /** @type {const} */ (['light', 'dark', 'ocean', 'warm'
 /** @typedef {(typeof THEME_IDS)[number]} ThemeId */
 
 const STORAGE_KEY = 'godam_ui_theme';
-const DEFAULT_THEME = /** @type {ThemeId} */ ('light');
+const DEFAULT_THEME = /** @type {ThemeId} */ ('dark');
 
 /** @type {Record<ThemeId, string>} */
 export const THEME_LABELS = {

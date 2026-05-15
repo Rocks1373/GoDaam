@@ -13,7 +13,7 @@ Full-stack warehouse operations: web admin, APIs, and mobile field app.
 
 ## Tech stack
 
-- **Backend:** Node.js + Express + SQLite  
+- **Backend:** Node.js + Express + PostgreSQL (warehouse DB)  
 - **Frontend:** React + Vite + Tailwind  
 - **Mobile:** React Native (Expo)
 
@@ -23,6 +23,8 @@ Full-stack warehouse operations: web admin, APIs, and mobile field app.
 - npm  
 
 Do **not** commit `.env` files or production databases. Copy `.env.example` where provided and set secrets locally.
+
+Security and operations: see [`SECURITY.md`](./SECURITY.md), [`docs/security-checklist.md`](./docs/security-checklist.md), [`docs/architecture.md`](./docs/architecture.md), [`docs/deployment.md`](./docs/deployment.md), and [`docs/runbook.md`](./docs/runbook.md).
 
 ## Run from repo root (backend + web + mobile)
 

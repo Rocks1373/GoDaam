@@ -1,6 +1,4 @@
-const sqlite3 = require('sqlite3').verbose();
-
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
+const db = require('../db');
 
 function cleanStr(v) {
   if (v === undefined || v === null) return null;
@@ -21,7 +19,7 @@ function primaryPhone(payload) {
 
 class Customer {
   constructor() {
-    this.db = new sqlite3.Database(DB_PATH);
+    this.db = db;
   }
 
   async findAll({ search = '', page = 1, limit = 200 }) {

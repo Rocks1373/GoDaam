@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, Download, Plus, Search, Upload, Eye, Trash2 } from 'lucide-react';
+import { Copy, Download, Plus, Search, Upload, Eye, Trash2, Pencil } from 'lucide-react';
 import { vendorItemsApi, vendorsApi } from '../services/api';
+import { reportUploadError, reportUploadResult } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
@@ -14,6 +15,7 @@ export default function VendorItems() {
   const [search, setSearch] = useState('');
   const [vendorId, setVendorId] = useState('');
 
+  const [editingId, setEditingId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({
     vendor_id: '',
@@ -115,6 +117,38 @@ export default function VendorItems() {
     }
   };
 
+  const saveEdit = async () => {
+    if (!editingId) return;
+    try {
+      if (!String(form.description || '').trim()) return alert('Description is required');
+      await vendorItemsApi.update(editingId, {
+        ...form,
+        vendor_id: form.vendor_id ? Number(form.vendor_id) : null,
+      });
+      setEditingId(null);
+      resetForm();
+      fetchRows(search, vendorId);
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    }
+  };
+
+  const openEdit = (row) => {
+    setShowAdd(false);
+    setEditingId(row.id);
+    setForm({
+      vendor_id: row.vendor_id != null ? String(row.vendor_id) : '',
+      vendor_number: row.vendor_number || '',
+      vendor_name: row.vendor_name || '',
+      sap_part_number: row.sap_part_number || '',
+      part_number: row.part_number || '',
+      description: row.description || '',
+      uom: row.uom || '',
+      remarks: row.remarks || '',
+      is_active: Number(row.is_active) ? 1 : 0,
+    });
+  };
+
   const parseBulk = () => {
     const lines = bulkData.trim().split('\n').filter((l) => l.trim());
     return lines.map((line) => {
@@ -149,10 +183,11 @@ export default function VendorItems() {
 
   const onUpload = async (file) => {
     try {
-      await vendorItemsApi.upload(file);
+      const summary = await vendorItemsApi.upload(file);
       fetchRows(search, vendorId);
+      reportUploadResult(summary, { label: 'Vendor item upload', filenamePrefix: 'vendor-items-upload' });
     } catch (e) {
-      alert(e?.response?.data?.error || e.message);
+      reportUploadError(e, { label: 'Vendor item upload', filenamePrefix: 'vendor-items-upload' });
     } finally {
       if (fileRef.current) fileRef.current.value = '';
     }
@@ -173,13 +208,16 @@ export default function VendorItems() {
       <div className="flex flex-col md:flex-row md:items-start justify-between mb-2 gap-2">
         <div className="min-w-0">
           <h2 className="text-base font-bold text-gray-900 leading-tight">Vendor Items</h2>
-          <p className="text-[11px] text-gray-600">Admin only</p>
+          <p className="text-[11px] text-gray-600">
+            Spare part number is fixed after creation. You can change vendor, description, UOM, and SAP part number.
+          </p>
         </div>
         <div className="flex gap-1.5 flex-wrap justify-end">
           <button
             type="button"
             className="btn-primary flex items-center gap-1"
             onClick={() => {
+              setEditingId(null);
               resetForm();
               setShowAdd(true);
             }}
@@ -269,9 +307,14 @@ export default function VendorItems() {
                 <td className="tbl-td">{r.remarks || ''}</td>
                 <td className="tbl-td-nowrap">{r.is_active ? 'Yes' : 'No'}</td>
                 <td className="tbl-td-nowrap">
-                  <button type="button" className="text-red-600 hover:text-red-800 p-0.5" onClick={() => deactivate(r.id)} title="Deactivate">
-                    <Trash2 size={14} />
-                  </button>
+                  <div className="flex gap-1">
+                    <button type="button" className="text-primary-700 hover:text-primary-900 p-0.5" onClick={() => openEdit(r)} title="Edit">
+                      <Pencil size={14} />
+                    </button>
+                    <button type="button" className="text-red-600 hover:text-red-800 p-0.5" onClick={() => deactivate(r.id)} title="Deactivate">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -285,6 +328,97 @@ export default function VendorItems() {
           </tbody>
         </table>
       </div>
+
+      {editingId ? (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[86vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3">
+              <h3 className="text-lg font-bold">Edit Vendor Item</h3>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setEditingId(null);
+                  resetForm();
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-100 rounded-md px-2 py-1.5 mt-2">
+              Part number cannot be changed. Update vendor, description, UOM, SAP part number, or remarks.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Vendor
+                <select className="input-field mt-1" value={form.vendor_id} onChange={(e) => onVendorPick(e.target.value)}>
+                  <option value="">Select vendor…</option>
+                  {vendors.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.vendor_name} {v.vendor_number ? `(${v.vendor_number})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-[11px] font-bold">
+                Vendor Number
+                <input
+                  className="input-field mt-1 bg-gray-50"
+                  value={form.vendor_number}
+                  onChange={(e) => setForm((s) => ({ ...s, vendor_number: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Vendor Name
+                <input
+                  className="input-field mt-1 bg-gray-50"
+                  value={form.vendor_name}
+                  onChange={(e) => setForm((s) => ({ ...s, vendor_name: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                SAP Part Number
+                <input className="input-field mt-1" value={form.sap_part_number} onChange={(e) => setForm((s) => ({ ...s, sap_part_number: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold">
+                Part Number <span className="text-gray-500 font-normal">(fixed)</span>
+                <input className="input-field mt-1 bg-gray-100 text-gray-600" value={form.part_number} readOnly tabIndex={-1} />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Description
+                <input className="input-field mt-1" value={form.description} onChange={(e) => setForm((s) => ({ ...s, description: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold">
+                UOM
+                <input className="input-field mt-1" value={form.uom} onChange={(e) => setForm((s) => ({ ...s, uom: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Remarks
+                <textarea className="input-field mt-1 h-16" value={form.remarks} onChange={(e) => setForm((s) => ({ ...s, remarks: e.target.value }))} />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2 flex items-center gap-2">
+                <input type="checkbox" checked={!!Number(form.is_active)} onChange={(e) => setForm((s) => ({ ...s, is_active: e.target.checked ? 1 : 0 }))} />
+                Active
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setEditingId(null);
+                  resetForm();
+                }}
+              >
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={saveEdit}>
+                Save changes
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showAdd ? (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
@@ -309,11 +443,21 @@ export default function VendorItems() {
               </label>
               <label className="text-[11px] font-bold">
                 Vendor Number
-                <input className="input-field mt-1" value={form.vendor_number} readOnly />
+                <input
+                  className="input-field mt-1"
+                  value={form.vendor_number}
+                  onChange={(e) => setForm((s) => ({ ...s, vendor_number: e.target.value }))}
+                  placeholder="From vendor master or type override"
+                />
               </label>
               <label className="text-[11px] font-bold">
                 Vendor Name
-                <input className="input-field mt-1" value={form.vendor_name} readOnly />
+                <input
+                  className="input-field mt-1"
+                  value={form.vendor_name}
+                  onChange={(e) => setForm((s) => ({ ...s, vendor_name: e.target.value }))}
+                  placeholder="From vendor master or type override"
+                />
               </label>
               <label className="text-[11px] font-bold">
                 SAP Part Number
@@ -389,4 +533,3 @@ export default function VendorItems() {
     </div>
   );
 }
-

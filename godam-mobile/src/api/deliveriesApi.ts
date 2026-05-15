@@ -36,16 +36,15 @@ export async function confirmPickup(taskId: number) {
   return data;
 }
 
-export async function uploadPod(taskId: number, fileUri: string, mimeType = 'image/jpeg') {
+export async function uploadPod(taskId: number, fileUri: string, mimeType = 'image/jpeg', fileName = 'pod.jpg') {
   const form = new FormData();
   form.append('file', {
     uri: fileUri,
-    name: 'pod.jpg',
+    name: fileName,
     type: mimeType,
   } as unknown as Blob);
-  const { data } = await api.post(`/mobile/deliveries/${taskId}/upload-pod`, form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  });
+  // Let axios set multipart boundary; a bare Content-Type breaks Android uploads.
+  const { data } = await api.post(`/mobile/deliveries/${taskId}/upload-pod`, form);
   return data;
 }
 

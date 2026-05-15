@@ -1,10 +1,11 @@
-import axios, { type AxiosError } from 'axios';
+import axios, { isAxiosError, type AxiosError } from 'axios';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 
 import { getDefaultApiBaseUrl, normalizeToApiBase } from '../config/apiConfig';
 import { getSavedBackendApiUrl, saveBackendApiUrl } from '../storage/backendUrlStorage';
+import { getSelectedWarehouseId } from '../storage/warehouseStorage';
 
 function isAndroidEmulatorForLocalhostRewrite(): boolean {
   if (Platform.OS !== 'android') return false;
@@ -84,10 +85,8 @@ export async function initApiClientFromStorage(): Promise<boolean> {
     }
   }
 
-  // Hardcoded fallback for first install / emulator testing.
-  // - iOS simulator: localhost works
-  // - Android emulator: localhost is rewritten to 10.0.2.2 via resolveAndroidLocalhost()
-  const fallback = getDefaultApiBaseUrl() || normalizeToApiBase('http://localhost:3001');
+  // First install: use embedded default (VPS baseline from app.config unless EXPO_PUBLIC_API_URL set at build).
+  const fallback = getDefaultApiBaseUrl();
   if (!fallback) return false;
   await saveBackendApiUrl(fallback);
   configureApiBaseUrl(fallback);
@@ -110,6 +109,32 @@ export function getDisplayApiOrigin(): string {
   return b.replace(/\/api$/i, '') || b;
 }
 
+/** Best-effort message for API failures (JSON `error`, network, HTML 404, etc.). */
+export function formatApiError(err: unknown): string {
+  if (isAxiosError(err)) {
+    const d = err.response?.data;
+    if (d && typeof d === 'object') {
+      const o = d as Record<string, unknown>;
+      if (typeof o.error === 'string' && o.error.trim()) return o.error.trim();
+      if (typeof o.message === 'string' && o.message.trim()) return o.message.trim();
+    }
+    if (typeof d === 'string' && d.trim()) {
+      const t = d.trim();
+      const cannotRoute = t.match(/Cannot\s+(GET|POST|PUT|PATCH|DELETE)\s+(\S+)/i);
+      if (cannotRoute) {
+        const path = cannotRoute[2].replace(/<[^>]*>/g, '');
+        return `This server does not expose ${cannotRoute[1]} ${path} (old API build). Deploy the latest backend from this repo and restart the Node process (e.g. sudo systemctl restart godaam-backend).`;
+      }
+      return t.length > 240 ? `${t.slice(0, 240)}…` : t;
+    }
+    if (err.message?.trim()) return err.message.trim();
+    if (err.response?.status) return `Request failed (HTTP ${err.response.status}). Is the backend updated?`;
+    return 'Request failed.';
+  }
+  if (err instanceof Error && err.message.trim()) return err.message.trim();
+  return String(err ?? 'Unknown error');
+}
+
 function resolveMobileApiKey(): string {
   const fromEnv = process.env.EXPO_PUBLIC_MOBILE_API_KEY;
   if (fromEnv && String(fromEnv).trim()) return String(fromEnv).trim();
@@ -123,6 +148,15 @@ const mobileApiKey = resolveMobileApiKey();
 if (mobileApiKey) {
   api.defaults.headers.common['X-Mobile-Api-Key'] = mobileApiKey;
 }
+
+api.interceptors.request.use(async (config) => {
+  const wid = await getSelectedWarehouseId();
+  if (wid) {
+    config.headers = config.headers || {};
+    (config.headers as Record<string, string>)['X-Warehouse-Id'] = String(wid);
+  }
+  return config;
+});
 
 export function setAuthHeader(token: string | null) {
   if (token) {

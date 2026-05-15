@@ -4,7 +4,6 @@ const XLSX = require('xlsx');
 const { promisify } = require('util');
 
 const db = require('../db');
-const { requireAdmin } = require('../middleware/auth');
 
 const { normalizeExcelRows } = require('../utils/excelDates');
 
@@ -137,7 +136,12 @@ async function upsertItemOnDb(payload) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
     [vid, vnum, vname, p.sap_part_number, p.part_number, p.description, p.uom, p.remarks, p.is_active]
   );
-  return await dbGet(`SELECT * FROM vendor_items WHERE id = last_insert_rowid()`);
+  return await dbGet(
+    `SELECT * FROM vendor_items
+     WHERE COALESCE(vendor_id, -1) = COALESCE(?, -1) AND TRIM(part_number) = TRIM(?)
+     ORDER BY id DESC LIMIT 1`,
+    [vid, p.part_number]
+  );
 }
 
 // GET /api/vendor-items?search=&vendor_id=
@@ -203,8 +207,8 @@ router.get('/template', (_req, res) => {
   res.send(buf);
 });
 
-// POST /api/vendor-items (admin only)
-router.post('/', requireAdmin, async (req, res) => {
+// POST /api/vendor-items
+router.post('/', async (req, res) => {
   try {
     const row = await upsertItemOnDb(req.body || {});
     res.status(201).json(row);
@@ -213,12 +217,15 @@ router.post('/', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/vendor-items/:id (admin only)
-router.put('/:id', requireAdmin, async (req, res) => {
+// PUT /api/vendor-items/:id — part_number cannot be changed (immutable spare part number).
+router.put('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
-    const p = normalizeItem(req.body || {});
+    const existingRow = await dbGet(`SELECT * FROM vendor_items WHERE id = ?`, [id]);
+    if (!existingRow) return res.status(404).json({ error: 'Vendor item not found' });
+    const body = { ...(req.body || {}), part_number: existingRow.part_number };
+    const p = normalizeItem(body);
     const vendor = await resolveVendorForRow(p);
     const vid = vendor?.id ?? p.vendor_id ?? null;
     const vnum = vendor?.vendor_number ?? p.vendor_number ?? null;
@@ -246,8 +253,8 @@ router.put('/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/vendor-items/:id (admin only) — deactivate
-router.delete('/:id', requireAdmin, async (req, res) => {
+// DELETE /api/vendor-items/:id — deactivate
+router.delete('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -258,8 +265,8 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/vendor-items/bulk-paste (admin only)
-router.post('/bulk-paste', requireAdmin, async (req, res) => {
+// POST /api/vendor-items/bulk-paste
+router.post('/bulk-paste', async (req, res) => {
   try {
     const data = req.body?.data;
     if (!Array.isArray(data)) return res.status(400).json({ error: 'data must be an array' });
@@ -278,8 +285,8 @@ router.post('/bulk-paste', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/vendor-items/upload (admin only)
-router.post('/upload', requireAdmin, upload.single('file'), async (req, res) => {
+// POST /api/vendor-items/upload
+router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
     const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
@@ -301,4 +308,3 @@ router.post('/upload', requireAdmin, upload.single('file'), async (req, res) => 
 });
 
 module.exports = router;
-

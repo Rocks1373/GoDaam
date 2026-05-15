@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Download, Edit3, Plus, Search, Trash2, Upload, Eye } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { customersApi } from '../services/api';
+import { reportUploadError, reportUploadResult } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
@@ -132,10 +133,11 @@ export default function Customers() {
 
   const onUploadFile = async (file) => {
     try {
-      await customersApi.upload(file);
+      const summary = await customersApi.upload(file);
       fetchRows(search);
+      reportUploadResult(summary, { label: 'Customer upload', filenamePrefix: 'customer-upload' });
     } catch (e) {
-      alert('Upload failed: ' + (e?.response?.data?.error || e.message));
+      reportUploadError(e, { label: 'Customer upload', filenamePrefix: 'customer-upload' });
     } finally {
       if (fileRef.current) fileRef.current.value = '';
     }
@@ -506,4 +508,3 @@ export default function Customers() {
     </div>
   );
 }
-

@@ -10,6 +10,7 @@ const OUTBOUND_TABLES_ORDER = [
   'picked_orders',
   'pick_suggestions',
   'delivered_outbounds',
+  'outbound_bom_requirements',
   'outbound_items',
   'outbound_orders',
 ];
@@ -18,6 +19,7 @@ const OUTBOUND_TABLES_ORDER = [
 const BROWSE_WHITELIST = new Set([
   'outbound_orders',
   'outbound_items',
+  'outbound_bom_requirements',
   'fifo_suggestions',
   'picked_transactions',
   'picked_orders',

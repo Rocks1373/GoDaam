@@ -84,10 +84,8 @@ export async function initApiClientFromStorage(): Promise<boolean> {
     }
   }
 
-  // Hardcoded fallback for first install / emulator testing.
-  // - iOS simulator: localhost works
-  // - Android emulator: localhost is rewritten to 10.0.2.2 via resolveAndroidLocalhost()
-  const fallback = getDefaultApiBaseUrl() || normalizeToApiBase('http://localhost:3001');
+  // First install: use embedded default (VPS baseline from app.config unless EXPO_PUBLIC_API_URL set at build).
+  const fallback = getDefaultApiBaseUrl();
   if (!fallback) return false;
   await saveBackendApiUrl(fallback);
   configureApiBaseUrl(fallback);

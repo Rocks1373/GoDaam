@@ -1,9 +1,6 @@
 const express = require('express');
 const multer = require('multer');
 const XLSX = require('xlsx');
-const sqlite3 = require('sqlite3').verbose();
-
-const DB_PATH = process.env.DB_PATH || './warehouse.db';
 
 const router = express.Router();
 const upload = multer({ dest: 'uploads/' });
@@ -21,7 +18,8 @@ function pick(row, ...names) {
 }
 
 function openDb() {
-  return new sqlite3.Database(DB_PATH);
+  // Shared warehouse Postgres pool (`backend/db`). Never call `db.close()` per request — it runs `pool.end()` and breaks all later requests (including JWT revocation checks in `requireAuth`).
+  return require('../db');
 }
 
 function toNumber(v) {
@@ -232,8 +230,6 @@ router.get('/', async (req, res) => {
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -253,8 +249,6 @@ router.post('/', async (req, res) => {
       // ignore
     }
     res.status(400).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -339,8 +333,6 @@ router.put('/:id', async (req, res) => {
       // ignore
     }
     res.status(400).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -377,8 +369,6 @@ router.delete('/:id', async (req, res) => {
       // ignore
     }
     res.status(400).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -416,8 +406,6 @@ router.post('/bulk-paste', async (req, res) => {
       // ignore
     }
     res.status(500).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 
@@ -458,8 +446,6 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       // ignore
     }
     res.status(500).json({ error: e.message });
-  } finally {
-    db.close();
   }
 });
 

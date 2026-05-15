@@ -5,6 +5,8 @@ const { promisify } = require('util');
 
 const db = require('../db');
 const { incrementReceivedOnDb } = require('../services/mainStockSharedSql');
+const { resolveWarehouseIdForRequest } = require('../services/warehouseContext');
+const { logAudit } = require('../services/auditLogger');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -81,21 +83,25 @@ function splitBatchVendor(batchVendorRaw) {
   return { batchKey: s, batch_name: s, vendor_name: '' };
 }
 
-async function insertInboundBatchRow({ batch_name, vendor_name, upload_date, created_by }) {
-  await dbRun(
-    `INSERT INTO inbound_batches (batch_name, vendor_name, upload_date, status, created_by, created_at)
-     VALUES (?, ?, ?, 'Pending', ?, CURRENT_TIMESTAMP)`,
-    [batch_name, vendor_name || null, upload_date, created_by || null]
-  );
-  const row = await dbGet('SELECT last_insert_rowid() AS id');
-  return row?.id;
+async function insertInboundBatchRow({ batch_name, vendor_name, upload_date, created_by, warehouse_id }) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO inbound_batches (batch_name, vendor_name, upload_date, status, created_by, warehouse_id, created_at)
+       VALUES (?, ?, ?, 'Pending', ?, ?, CURRENT_TIMESTAMP)`,
+      [batch_name, vendor_name || null, upload_date, created_by || null, warehouse_id || null],
+      function onInsert(err) {
+        if (err) reject(err);
+        else resolve(this.lastID);
+      }
+    );
+  });
 }
 
 /**
  * Group rows by Batch/Vendor Name, unique part numbers with summed qty per group.
  * Creates inbound_batches + inbound_items; audit rows in inbound_receiving; updates main_stock once per part qty.
  */
-async function processInboundRows(rows, uploadedBy) {
+async function processInboundRows(rows, uploadedBy, warehouseId, req = null) {
   const results = [];
   const normalized = [];
   for (const raw of normalizeExcelRows(rows || [])) {
@@ -171,6 +177,7 @@ async function processInboundRows(rows, uploadedBy) {
         vendor_name,
         upload_date,
         created_by: uploadedBy,
+        warehouse_id: warehouseId,
       });
       if (!batchId) throw new Error('Failed to create inbound batch');
 
@@ -181,16 +188,16 @@ async function processInboundRows(rows, uploadedBy) {
 
         await dbRun(
           `INSERT INTO inbound_items
-            (inbound_batch_id, part_number, sap_part_number, description, total_qty, putaway_qty, remaining_qty, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 0, ?, 'Pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          [batchId, agg.part_number, sap || null, desc || null, totalQty, totalQty]
+            (inbound_batch_id, part_number, sap_part_number, description, total_qty, putaway_qty, remaining_qty, status, created_at, updated_at, warehouse_id)
+           VALUES (?, ?, ?, ?, ?, 0, ?, 'Pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)`,
+          [batchId, agg.part_number, sap || null, desc || null, totalQty, totalQty, warehouseId]
         );
 
         await dbRun(
           `INSERT INTO inbound_receiving
             (batch_vendor_name, invoice_no, po_number, part_number, sap_part_number, description,
-             inbound_qty, received_date, remarks, uploaded_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             inbound_qty, received_date, remarks, uploaded_by, warehouse_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             batchKey,
             agg.invoice_no || null,
@@ -202,6 +209,7 @@ async function processInboundRows(rows, uploadedBy) {
             agg.received_date || null,
             agg.remarks || null,
             uploadedBy || null,
+            warehouseId,
           ]
         );
 
@@ -210,6 +218,7 @@ async function processInboundRows(rows, uploadedBy) {
           sap_part_number: sap,
           description: desc,
           remarks: agg.remarks || null,
+          warehouse_id: warehouseId,
         });
 
         results.push({
@@ -227,12 +236,25 @@ async function processInboundRows(rows, uploadedBy) {
       const partCount = partMap.size;
       const label = [batch_name, vendor_name].filter(Boolean).join(' | ') || batchKey;
       const body = `${label} — ${partCount} part line(s) ready for rack putaway.`;
+      logAudit({
+        warehouse_id: warehouseId,
+        user: req?.user || (uploadedBy ? { sub: uploadedBy } : null),
+        req,
+        module_name: 'INBOUND',
+        action_type: 'INBOUND_UPLOADED',
+        reference_type: 'inbound_batch',
+        reference_id: batchId,
+        reference_number: label,
+        status_after: 'Pending',
+        new_value: { parts: partCount, batch_name, vendor_name: vendor_name || null },
+      });
       try {
         await notifyInboundPutaway('New inbound — putaway', body, {
           type: 'inbound_putaway',
           inbound_batch_id: batchId,
           batch_name,
           vendor_name: vendor_name || '',
+          warehouse_id: warehouseId,
         });
       } catch (notifyErr) {
         console.error('Inbound putaway notification:', notifyErr?.message || notifyErr);
@@ -251,12 +273,18 @@ async function processInboundRows(rows, uploadedBy) {
 router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
+    const userId = req.user?.sub ?? null;
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId,
+      role: req.user?.role,
+      explicitWarehouseId: req.body?.warehouse_id ?? req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id could not be resolved' });
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
     if (!rows.length) return res.status(400).json({ error: 'Empty sheet' });
-    const userId = req.user?.sub ?? null;
-    const results = await processInboundRows(rows, userId);
+    const results = await processInboundRows(rows, userId, warehouseId, req);
     const ok = results.filter((r) => r.ok).length;
     res.json({ success: ok, total: results.length, results });
   } catch (e) {
@@ -269,7 +297,13 @@ router.post('/bulk-paste', async (req, res) => {
     const { data } = req.body;
     if (!Array.isArray(data)) return res.status(400).json({ error: 'data must be an array of rows' });
     const userId = req.user?.sub ?? null;
-    const results = await processInboundRows(data, userId);
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId,
+      role: req.user?.role,
+      explicitWarehouseId: req.body?.warehouse_id ?? req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id could not be resolved' });
+    const results = await processInboundRows(data, userId, warehouseId, req);
     const ok = results.filter((r) => r.ok).length;
     res.json({ success: ok, total: results.length, results });
   } catch (e) {
@@ -365,6 +399,23 @@ router.post('/apply-putaway-to-rack', async (req, res) => {
       }
     }
     await dbRun('COMMIT');
+    let whPut = null;
+    const firstId = ids.map(Number).find((n) => n > 0);
+    if (firstId) {
+      const it0 = await dbGet(`SELECT ib.warehouse_id FROM inbound_items ii JOIN inbound_batches ib ON ib.id = ii.inbound_batch_id WHERE ii.id = ?`, [firstId]);
+      whPut = it0?.warehouse_id ?? null;
+    }
+    logAudit({
+      warehouse_id: whPut,
+      req,
+      module_name: 'PUTAWAY',
+      action_type: 'PUTAWAY_COMPLETED',
+      reference_type: 'inbound_batch',
+      reference_id: null,
+      reference_number: `lines:${applied}`,
+      remarks: `apply_putaway_to_rack items=${ids.length}`,
+      new_value: { inbound_item_ids: ids.slice(0, 50), lines_applied: applied },
+    });
     res.json({ ok: true, lines_applied: applied });
   } catch (e) {
     await dbRun('ROLLBACK').catch(() => {});

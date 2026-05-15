@@ -3,6 +3,7 @@ import { View, Text, TextInput, Pressable, StyleSheet, Alert, Image } from 'reac
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { login } from '../api/authApi';
 import { saveAuth } from '../storage/tokenStorage';
+import { setSelectedWarehouseId } from '../storage/warehouseStorage';
 import { getDisplayApiOrigin, setAuthHeader } from '../api/client';
 import { useTheme } from '../theme/ThemeContext';
 import type { ThemeDefinition } from '../theme/palettes';
@@ -19,7 +20,7 @@ export type RootStackParamList = {
   StockPeek: { orderId: number; outboundItemId: number };
   ScanRack: undefined;
   Receiving: undefined;
-  Upcoming: undefined;
+  Settings: undefined;
   MainStockCheck: undefined;
   StockByRackCheck: undefined;
   Profile: undefined;
@@ -74,6 +75,14 @@ export default function LoginScreen({ navigation }: Props) {
       const res = await login(username.trim(), password);
       await saveAuth(res.token, res.expires_at || null);
       setAuthHeader(res.token);
+      const u = res.user;
+      const wid =
+        u.default_warehouse_id != null && Number(u.default_warehouse_id) > 0
+          ? Number(u.default_warehouse_id)
+          : u.warehouses && u.warehouses.length === 1
+            ? Number(u.warehouses[0].id)
+            : null;
+      await setSelectedWarehouseId(wid);
       navigation.reset({ index: 0, routes: [{ name: 'Home' }] });
     } catch (e: unknown) {
       const err = e as { response?: { data?: { error?: string } }; message?: string };

@@ -4,7 +4,6 @@ const XLSX = require('xlsx');
 const { promisify } = require('util');
 
 const db = require('../db');
-const { requireAdmin } = require('../middleware/auth');
 
 const { normalizeExcelRows } = require('../utils/excelDates');
 
@@ -148,11 +147,16 @@ async function upsertVendorOnDb(payload) {
      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
     [p.vendor_number, p.vendor_name, p.contact_person, p.phone_number, p.email, p.remarks, p.is_active]
   );
-  return await dbGet(`SELECT * FROM vendors WHERE id = last_insert_rowid()`);
+  if (p.vendor_number) {
+    return await dbGet(`SELECT * FROM vendors WHERE TRIM(vendor_number) = ? ORDER BY id DESC LIMIT 1`, [p.vendor_number]);
+  }
+  return await dbGet(`SELECT * FROM vendors WHERE vendor_number IS NULL AND vendor_name = ? ORDER BY id DESC LIMIT 1`, [
+    p.vendor_name,
+  ]);
 }
 
-// POST /api/vendors  (admin only)
-router.post('/', requireAdmin, async (req, res) => {
+// POST /api/vendors
+router.post('/', async (req, res) => {
   try {
     const row = await upsertVendorOnDb(req.body || {});
     res.status(201).json(row);
@@ -164,8 +168,8 @@ router.post('/', requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/vendors/:id  (admin only)
-router.put('/:id', requireAdmin, async (req, res) => {
+// PUT /api/vendors/:id
+router.put('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -193,8 +197,8 @@ router.put('/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/vendors/:id  (admin only) — deactivate
-router.delete('/:id', requireAdmin, async (req, res) => {
+// DELETE /api/vendors/:id — deactivate
+router.delete('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -205,8 +209,8 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/vendors/bulk-paste (admin only)
-router.post('/bulk-paste', requireAdmin, async (req, res) => {
+// POST /api/vendors/bulk-paste
+router.post('/bulk-paste', async (req, res) => {
   try {
     const data = req.body?.data;
     if (!Array.isArray(data)) return res.status(400).json({ error: 'data must be an array' });
@@ -225,8 +229,8 @@ router.post('/bulk-paste', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/vendors/upload (admin only)
-router.post('/upload', requireAdmin, upload.single('file'), async (req, res) => {
+// POST /api/vendors/upload
+router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
     const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
@@ -248,4 +252,3 @@ router.post('/upload', requireAdmin, upload.single('file'), async (req, res) => 
 });
 
 module.exports = router;
-

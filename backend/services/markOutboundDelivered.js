@@ -15,22 +15,7 @@ function asNumber(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Aggregate outbound_items by part_number for delivery / main-stock deduction */
-function aggregateItemsByPartNumber(rows) {
-  const map = new Map();
-  for (const it of rows || []) {
-    const pn = String(it.part_number ?? it.material ?? '').trim();
-    if (!pn) continue;
-    const qty = asNumber(it.required_qty);
-    if (!map.has(pn)) {
-      map.set(pn, { part_number: pn, description: it.description || '', required_qty: qty });
-    } else {
-      const ex = map.get(pn);
-      ex.required_qty += qty;
-    }
-  }
-  return [...map.values()];
-}
+const { buildDeliveredDeductionLines } = require('./bomOutboundService');
 
 /**
  * Mark outbound delivered: guard double delivery, check shortage, bump main_stock.sold_out_qty, insert sold_out + delivered_outbounds.
@@ -47,9 +32,13 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
     err.statusCode = 404;
     throw err;
   }
+  let whId = Number(order.warehouse_id) || null;
+  if (!whId) {
+    const d = await dbGet(`SELECT id FROM warehouses ORDER BY id LIMIT 1`);
+    whId = Number(d?.id) || null;
+  }
 
-  const rawItems = await dbAll('SELECT * FROM outbound_items WHERE outbound_id = ? ORDER BY id ASC', [orderId]);
-  const items = aggregateItemsByPartNumber(rawItems);
+  const items = await buildDeliveredDeductionLines(dbAll, dbGet, orderId);
   if (!items.length) {
     const err = new Error('Outbound has no items');
     err.statusCode = 400;
@@ -71,11 +60,11 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
 
   const shortages = [];
   for (const it of items) {
-    const qty = asNumber(it.required_qty);
+    const qty = asNumber(it.qty);
     const row = await dbGet(
       `SELECT part_number, received_qty, COALESCE(sold_out_qty, issued_qty, 0) AS sold_out,
-              pending_delivery_qty, available_qty FROM main_stock WHERE part_number = ?`,
-      [it.part_number]
+              pending_delivery_qty, available_qty FROM main_stock WHERE part_number = ? AND warehouse_id = ?`,
+      [it.part_number, whId]
     );
     const avail = row ? asNumber(row.available_qty) : 0;
     if (avail < qty) {
@@ -99,7 +88,7 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
     const dnDate = order.dn_date || new Date().toISOString().slice(0, 10);
 
     for (const it2 of items) {
-      const qty2 = asNumber(it2.required_qty);
+      const qty2 = asNumber(it2.qty);
       const dedupeKey = `outbound-deliver:${orderId}:${it2.part_number}:${qty2}`;
       const sql = `UPDATE main_stock SET
            sold_out_qty = COALESCE(sold_out_qty, 0) + ?,
@@ -107,8 +96,8 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
            available_qty = received_qty - (COALESCE(sold_out_qty, 0) + ?) - COALESCE(pending_delivery_qty, 0),
            last_updated = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
-         WHERE part_number = ?`;
-      const changes = await runUpdateReturningChanges(db, sql, [qty2, qty2, qty2, it2.part_number]);
+         WHERE part_number = ? AND warehouse_id = ?`;
+      const changes = await runUpdateReturningChanges(db, sql, [qty2, qty2, qty2, it2.part_number, whId]);
       if (!changes) {
         const err = new Error(
           `Main stock has no row for part "${it2.part_number}". Stock was not deducted — add or align this part in Main Stock first.`
@@ -122,8 +111,8 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
       await dbRun(
         `INSERT INTO sold_out
           (date, po, gapp_po, customer_po, invoice_number, invoice, customer_name, delivery_address, gps,
-           part_number, sap_part_number, description, sold_qty, outbound_qty, delivery, sales_doc, status, source_dn_id, dedupe_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           part_number, sap_part_number, description, sold_qty, outbound_qty, delivery, sales_doc, status, source_dn_id, dedupe_key, warehouse_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           dnDate,
           order.gapp_po || order.sales_doc || order.sales_order_number || '',
@@ -144,6 +133,7 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
           'Delivered',
           orderId,
           dedupeKey,
+          whId,
         ]
       );
     }
@@ -157,6 +147,13 @@ async function markOutboundDelivered(db, orderId, { requireInvoice = true } = {}
   } catch (e) {
     await dbRun('ROLLBACK').catch(() => {});
     throw e;
+  }
+
+  try {
+    const { onOutboundMarkedDelivered } = require('./salesOrderDocumentsService');
+    await onOutboundMarkedDelivered(db, orderId, order);
+  } catch (e) {
+    console.warn('[salesOrderDocuments] after delivered:', e.message);
   }
 
   return { ok: true, order_id: orderId, status: 'delivered' };
@@ -178,6 +175,11 @@ async function reverseOutboundDelivered(db, orderId) {
     err.statusCode = 404;
     throw err;
   }
+  let whId = Number(order.warehouse_id) || null;
+  if (!whId) {
+    const d = await dbGet(`SELECT id FROM warehouses ORDER BY id LIMIT 1`);
+    whId = Number(d?.id) || null;
+  }
 
   const deliveredGuard = await dbGet('SELECT id FROM delivered_outbounds WHERE outbound_id = ?', [orderId]);
   if (!deliveredGuard?.id) {
@@ -186,8 +188,7 @@ async function reverseOutboundDelivered(db, orderId) {
     throw err;
   }
 
-  const rawItems = await dbAll('SELECT * FROM outbound_items WHERE outbound_id = ? ORDER BY id ASC', [orderId]);
-  const items = aggregateItemsByPartNumber(rawItems);
+  const items = await buildDeliveredDeductionLines(dbAll, dbGet, orderId);
   if (!items.length) {
     const err = new Error('Outbound has no items');
     err.statusCode = 400;
@@ -195,7 +196,7 @@ async function reverseOutboundDelivered(db, orderId) {
   }
 
   for (const it of items) {
-    const qty = asNumber(it.required_qty);
+    const qty = asNumber(it.qty);
     const dedupeKey = `outbound-deliver:${orderId}:${it.part_number}:${qty}`;
     const logRow = await dbGet('SELECT id FROM sold_out WHERE dedupe_key = ?', [dedupeKey]);
     if (!logRow?.id) {
@@ -206,8 +207,8 @@ async function reverseOutboundDelivered(db, orderId) {
       throw err;
     }
     const ms = await dbGet(
-      `SELECT COALESCE(sold_out_qty, issued_qty, 0) AS sold FROM main_stock WHERE part_number = ?`,
-      [it.part_number]
+      `SELECT COALESCE(sold_out_qty, issued_qty, 0) AS sold FROM main_stock WHERE part_number = ? AND warehouse_id = ?`,
+      [it.part_number, whId]
     );
     const sold = asNumber(ms?.sold);
     if (sold < qty) {
@@ -222,7 +223,7 @@ async function reverseOutboundDelivered(db, orderId) {
   await dbRun('BEGIN IMMEDIATE');
   try {
     for (const it2 of items) {
-      const qty2 = asNumber(it2.required_qty);
+      const qty2 = asNumber(it2.qty);
       const dedupeKey = `outbound-deliver:${orderId}:${it2.part_number}:${qty2}`;
 
       await dbRun('DELETE FROM sold_out WHERE dedupe_key = ?', [dedupeKey]);
@@ -234,8 +235,8 @@ async function reverseOutboundDelivered(db, orderId) {
            available_qty = received_qty - (COALESCE(sold_out_qty, 0) - ?) - COALESCE(pending_delivery_qty, 0),
            last_updated = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
-         WHERE part_number = ?`,
-        [qty2, qty2, qty2, it2.part_number]
+         WHERE part_number = ? AND warehouse_id = ?`,
+        [qty2, qty2, qty2, it2.part_number, whId]
       );
     }
 
@@ -260,4 +261,4 @@ async function reverseOutboundDelivered(db, orderId) {
   };
 }
 
-module.exports = { markOutboundDelivered, reverseOutboundDelivered, aggregateItemsByPartNumber };
+module.exports = { markOutboundDelivered, reverseOutboundDelivered };

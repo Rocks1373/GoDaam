@@ -14,7 +14,7 @@ async function getUserRow(userId) {
   const get = promisify(db.get.bind(db));
   return get(
     `SELECT id, username, role, full_name, mobile_number, email, is_active,
-            token_expiry_days, can_access_web, can_access_mobile
+            token_expiry_days, can_access_web, can_access_mobile, default_warehouse_id
      FROM users WHERE id = ?`,
     [userId]
   );

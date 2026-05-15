@@ -4,9 +4,34 @@
  */
 const { promisify } = require('util');
 
+function isPostgresDb(db) {
+  return db && db.dialect === 'postgres';
+}
+
+function pgColumnTypeFromSqliteDdl(ddl) {
+  return String(ddl)
+    .replace(/\bDATETIME\b/gi, 'TIMESTAMP')
+    .replace(/\bDATE\b/gi, 'DATE')
+    .replace(/\bREAL\b/gi, 'DOUBLE PRECISION')
+    .replace(/\bINTEGER\b/gi, 'INTEGER')
+    .replace(/\bTEXT\b/gi, 'TEXT');
+}
+
 async function ensureColumn(db, table, column, ddl) {
-  const all = promisify(db.all.bind(db));
   const run = promisify(db.run.bind(db));
+  if (isPostgresDb(db)) {
+    const get = promisify(db.get.bind(db));
+    const row = await get(
+      `SELECT 1 AS ok FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = ? AND column_name = ?`,
+      [String(table).toLowerCase(), String(column).toLowerCase()]
+    );
+    if (row) return;
+    const pgType = pgColumnTypeFromSqliteDdl(ddl);
+    await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${pgType}`);
+    return;
+  }
+  const all = promisify(db.all.bind(db));
   const cols = await all(`PRAGMA table_info(${table})`);
   if ((cols || []).some((c) => c.name === column)) return;
   await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
@@ -34,6 +59,66 @@ const PERMISSION_DEFS = [
 
 const ROLES_SEED = ['admin', 'picker', 'checker', 'viewer', 'driver'];
 
+/**
+ * PostgreSQL databases created by older migrate-sqlite-to-postgres.js used
+ * `BIGINT PRIMARY KEY` without IDENTITY/SERIAL, so INSERTs that omit `id` fail with
+ * "null value in column id violates not-null constraint". Attach a per-table sequence + DEFAULT.
+ */
+async function repairPostgresMissingIdDefaults(db) {
+  if (!isPostgresDb(db)) return;
+  const get = promisify(db.get.bind(db));
+  const all = promisify(db.all.bind(db));
+  const run = promisify(db.run.bind(db));
+
+  let rows;
+  try {
+    rows = await all(`
+      SELECT c.relname AS table_name
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'id' AND a.attnum > 0 AND NOT a.attisdropped
+      LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
+      WHERE c.relkind = 'r'
+        AND ad.adbin IS NULL
+        AND COALESCE(a.attidentity, '') = ''
+        AND a.atttypid IN ('int8'::regtype, 'int4'::regtype)
+      ORDER BY c.relname
+    `);
+  } catch (e) {
+    console.warn('[repairPostgresMissingIdDefaults] scan:', e.message);
+    return;
+  }
+
+  for (const row of rows || []) {
+    const t = String(row.table_name || '');
+    if (!/^[a-z][a-z0-9_]*$/i.test(t)) continue;
+    const seq = `${t}_id_seq`;
+    try {
+      await run(`CREATE SEQUENCE IF NOT EXISTS ${seq} AS bigint`);
+    } catch (e) {
+      console.warn(`[repairPostgresMissingIdDefaults] CREATE SEQUENCE ${seq}:`, e.message);
+      continue;
+    }
+    try {
+      const mx = await get(`SELECT COALESCE(MAX(id), 0)::bigint AS m FROM ${t}`);
+      const next = Math.max(1, Number(mx?.m || 0) + 1);
+      await run(`SELECT setval('${seq}', ?, false)`, [next]);
+    } catch (e) {
+      console.warn(`[repairPostgresMissingIdDefaults] setval ${t}:`, e.message);
+    }
+    try {
+      await run(`ALTER TABLE ${t} ALTER COLUMN id SET DEFAULT nextval('${seq}'::regclass)`);
+    } catch (e) {
+      console.warn(`[repairPostgresMissingIdDefaults] SET DEFAULT ${t}:`, e.message);
+    }
+    try {
+      await run(`ALTER SEQUENCE ${seq} OWNED BY ${t}.id`);
+    } catch (_) {
+      /* optional */
+    }
+  }
+}
+
 async function seedDefaultRolePermissions(db) {
   const get = promisify(db.get.bind(db));
   const run = promisify(db.run.bind(db));
@@ -54,8 +139,213 @@ async function seedDefaultRolePermissions(db) {
   }
 }
 
-async function migrateGodamSchema(db) {
+async function migrateWarehouseLayer(db) {
   const run = promisify(db.run.bind(db));
+  const get = promisify(db.get.bind(db));
+  const all = promisify(db.all.bind(db));
+  const pg = isPostgresDb(db);
+
+  if (pg) {
+    await run(`
+      CREATE TABLE IF NOT EXISTS warehouses (
+        id SERIAL PRIMARY KEY,
+        warehouse_code TEXT NOT NULL,
+        warehouse_name TEXT NOT NULL,
+        location TEXT,
+        manager_name TEXT,
+        remarks TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (warehouse_code)
+      )
+    `);
+    await run(`
+      CREATE TABLE IF NOT EXISTS user_warehouses (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+        role_in_warehouse TEXT,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (user_id, warehouse_id)
+      )
+    `);
+    await run(`CREATE INDEX IF NOT EXISTS idx_user_warehouses_wh ON user_warehouses(warehouse_id)`);
+  } else {
+    await run(`
+      CREATE TABLE IF NOT EXISTS warehouses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        warehouse_code TEXT NOT NULL UNIQUE,
+        warehouse_name TEXT NOT NULL,
+        location TEXT,
+        manager_name TEXT,
+        remarks TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await run(`
+      CREATE TABLE IF NOT EXISTS user_warehouses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        warehouse_id INTEGER NOT NULL,
+        role_in_warehouse TEXT,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE,
+        UNIQUE (user_id, warehouse_id)
+      )
+    `);
+    await run(`CREATE INDEX IF NOT EXISTS idx_user_warehouses_wh ON user_warehouses(warehouse_id)`);
+  }
+
+  const whCount = await get(`SELECT COUNT(1) AS c FROM warehouses`);
+  if (!(Number(whCount?.c) > 0)) {
+    await run(
+      `INSERT INTO warehouses (warehouse_code, warehouse_name, location, manager_name, remarks, is_active)
+       VALUES ('WH1', 'Main Warehouse', NULL, NULL, 'Default warehouse for legacy data', 1)`
+    );
+  }
+
+  const defaultWh = await get(`SELECT id FROM warehouses WHERE lower(warehouse_code) = 'wh1' ORDER BY id LIMIT 1`);
+  const defaultWhId = Number(defaultWh?.id) || 1;
+
+  await ensureColumn(db, 'users', 'default_warehouse_id', `INTEGER REFERENCES warehouses(id)`);
+  /** Official / registration number — returned only to admins (see listWarehousesForUser, GET /warehouses). */
+  await ensureColumn(db, 'warehouses', 'warehouse_number', 'TEXT');
+
+  const opTables = [
+    'main_stock',
+    'stock_by_rack',
+    'stock_by_rack_legacy',
+    'stock_in',
+    'stock_out',
+    'inbound_receiving',
+    'inbound_batches',
+    'inbound_items',
+    'outbound_orders',
+    'outbound_items',
+    'fifo_suggestions',
+    'picked_transactions',
+    'picked_orders',
+    'delivery_notes',
+    'delivery_note_items',
+    'delivered',
+    'sold_out',
+    'driver_delivery_tasks',
+    'notification_log',
+    'rack_balance_adjustments',
+    'inbound_putaway_lines',
+  ];
+
+  for (const t of opTables) {
+    try {
+      if (pg) {
+        const exists = await get(
+          `SELECT 1 AS ok FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?`,
+          [String(t).toLowerCase()]
+        );
+        if (!exists) continue;
+      } else {
+        const exists = await get(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, [t]);
+        if (!exists) continue;
+      }
+      await ensureColumn(db, t, 'warehouse_id', `INTEGER NOT NULL DEFAULT ${defaultWhId}`);
+    } catch (e) {
+      console.warn(`[migrateWarehouseLayer] skip ${t}:`, e.message);
+    }
+  }
+
+  await ensureColumn(db, 'sap_stock', 'warehouse_id', `INTEGER REFERENCES warehouses(id)`);
+
+  if (!pg) {
+    for (let n = 1; n <= 5; n += 1) {
+      try {
+        await run(`DROP INDEX IF EXISTS sqlite_autoindex_main_stock_${n}`);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  if (!pg) {
+    try {
+      await run(`DROP INDEX IF EXISTS idx_main_stock_wh_part`);
+      await run(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_main_stock_wh_part ON main_stock(warehouse_id, part_number)`
+      );
+    } catch (e) {
+      console.warn('[migrateWarehouseLayer] main_stock unique:', e.message);
+    }
+    try {
+      await run(`DROP INDEX IF EXISTS idx_stock_by_rack_summary_unique`);
+      await run(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_by_rack_summary_unique ON stock_by_rack(warehouse_id, part_number, rack_location)`
+      );
+    } catch (e) {
+      console.warn('[migrateWarehouseLayer] stock_by_rack unique:', e.message);
+    }
+    try {
+      await run(`DROP INDEX IF EXISTS idx_stock_by_rack_legacy_unique`);
+      await run(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_by_rack_legacy_unique ON stock_by_rack_legacy(warehouse_id, part_number, rack_location, entry_date)`
+      );
+    } catch (e) {
+      console.warn('[migrateWarehouseLayer] legacy rack unique:', e.message);
+    }
+  } else {
+    try {
+      await run(`DROP INDEX IF EXISTS idx_main_stock_wh_part`);
+      await run(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_main_stock_wh_part ON main_stock(warehouse_id, part_number)`
+      );
+    } catch (e) {
+      console.warn('[migrateWarehouseLayer] pg main_stock unique:', e.message);
+    }
+    try {
+      await run(`DROP INDEX IF EXISTS idx_stock_by_rack_summary_unique`);
+      await run(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_by_rack_summary_unique ON stock_by_rack(warehouse_id, part_number, rack_location)`
+      );
+    } catch (e) {
+      console.warn('[migrateWarehouseLayer] pg stock_by_rack unique:', e.message);
+    }
+  }
+
+  const usersNeeding = await all(
+    `SELECT u.id FROM users u
+     WHERE NOT EXISTS (SELECT 1 FROM user_warehouses uw WHERE uw.user_id = u.id)`
+  );
+  for (const u of usersNeeding || []) {
+    const uid = Number(u.id);
+    if (!uid) continue;
+    const roleRow = await get(`SELECT role FROM users WHERE id = ?`, [uid]);
+    const role = String(roleRow?.role || '').toLowerCase();
+    const rw = role === 'admin' ? 'admin' : String(roleRow?.role || 'member');
+    await run(
+      `INSERT OR IGNORE INTO user_warehouses (user_id, warehouse_id, role_in_warehouse, is_default)
+       VALUES (?, ?, ?, 1)`,
+      [uid, defaultWhId, rw]
+    );
+  }
+
+  await run(`UPDATE users SET default_warehouse_id = ? WHERE default_warehouse_id IS NULL`, [defaultWhId]);
+}
+
+async function migrateGodamSchema(db) {
+  const rawRun = promisify(db.run.bind(db));
+  const run = async (sql, params) => {
+    if (isPostgresDb(db) && /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS/i.test(String(sql))) {
+      return undefined;
+    }
+    if (params !== undefined && params !== null) return rawRun(sql, params);
+    return rawRun(sql);
+  };
+
+  await repairPostgresMissingIdDefaults(db);
 
   await ensureColumn(db, 'users', 'full_name', 'TEXT');
   await ensureColumn(db, 'users', 'mobile_number', 'TEXT');
@@ -749,6 +1039,8 @@ async function migrateGodamSchema(db) {
       stock_qty REAL,
       storage_document TEXT,
       batch TEXT,
+      item_sd TEXT,
+      sales_document TEXT,
       unrestricted_qty REAL,
       base_uom TEXT,
       value_amount REAL,
@@ -762,6 +1054,8 @@ async function migrateGodamSchema(db) {
   await run(`CREATE INDEX IF NOT EXISTS idx_sap_stock_batch ON sap_stock(upload_batch_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_sap_stock_material ON sap_stock(material)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_sap_stock_sl ON sap_stock(storage_location)`);
+  await ensureColumn(db, 'sap_stock', 'item_sd', 'TEXT');
+  await ensureColumn(db, 'sap_stock', 'sales_document', 'TEXT');
 
   await run(`
     CREATE TABLE IF NOT EXISTS rack_balance_adjustments (
@@ -785,6 +1079,77 @@ async function migrateGodamSchema(db) {
   `);
   await run(`CREATE INDEX IF NOT EXISTS idx_rack_adj_created ON rack_balance_adjustments(created_at DESC)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_rack_adj_part ON rack_balance_adjustments(part_number)`);
+
+  // --- Parent / child BOM (optional picking expansion) ---
+  await run(`
+    CREATE TABLE IF NOT EXISTS part_bom_sets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      parent_part_number TEXT NOT NULL COLLATE NOCASE,
+      parent_sap_part_number TEXT,
+      parent_description TEXT,
+      parent_is_physical INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      created_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(parent_part_number),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    )
+  `);
+  await run(`
+    CREATE TABLE IF NOT EXISTS part_bom_children (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      bom_set_id INTEGER NOT NULL,
+      parent_part_number TEXT NOT NULL COLLATE NOCASE,
+      child_part_number TEXT NOT NULL COLLATE NOCASE,
+      child_sap_part_number TEXT,
+      child_description TEXT,
+      child_qty_per_parent REAL NOT NULL,
+      uom TEXT,
+      is_active INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (bom_set_id) REFERENCES part_bom_sets(id) ON DELETE CASCADE,
+      UNIQUE(bom_set_id, child_part_number)
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_part_bom_children_child ON part_bom_children(child_part_number)`);
+  await run(`
+    CREATE TABLE IF NOT EXISTS outbound_bom_requirements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      outbound_order_id INTEGER NOT NULL,
+      outbound_item_id INTEGER NOT NULL,
+      parent_part_number TEXT,
+      parent_sap_part_number TEXT,
+      parent_description TEXT,
+      parent_required_qty REAL NOT NULL DEFAULT 0,
+      child_part_number TEXT NOT NULL,
+      child_sap_part_number TEXT,
+      child_description TEXT,
+      child_qty_per_parent REAL NOT NULL,
+      required_child_qty REAL NOT NULL,
+      picked_child_qty REAL DEFAULT 0,
+      status TEXT DEFAULT 'Pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (outbound_order_id) REFERENCES outbound_orders(id) ON DELETE CASCADE,
+      FOREIGN KEY (outbound_item_id) REFERENCES outbound_items(id) ON DELETE CASCADE
+    )
+  `);
+  await run(`CREATE INDEX IF NOT EXISTS idx_obr_order ON outbound_bom_requirements(outbound_order_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_obr_item ON outbound_bom_requirements(outbound_item_id)`);
+
+  await ensureColumn(db, 'fifo_suggestions', 'outbound_bom_requirement_id', 'INTEGER');
+  await ensureColumn(db, 'fifo_suggestions', 'parent_part_number', 'TEXT');
+  await ensureColumn(db, 'fifo_suggestions', 'is_bom_expansion', 'INTEGER DEFAULT 0');
+
+  await ensureColumn(db, 'picked_transactions', 'outbound_bom_requirement_id', 'INTEGER');
+  await ensureColumn(db, 'picked_transactions', 'parent_part_number', 'TEXT');
+  await ensureColumn(db, 'picked_transactions', 'child_part_number', 'TEXT');
+  await ensureColumn(db, 'picked_transactions', 'is_bom_pick', 'INTEGER DEFAULT 0');
+  await ensureColumn(db, 'picked_transactions', 'child_qty_per_parent', 'REAL');
+
+  await ensureColumn(db, 'delivery_notes', 'show_bom_child_lines', 'INTEGER DEFAULT 0');
 
   if ((nNew?.c || 0) === 0 && (nOld?.c || 0) > 0) {
     await run(`
@@ -819,6 +1184,317 @@ async function migrateGodamSchema(db) {
 
   await seedDefaultRolePermissions(db);
   await ensureTransportationPermissionRows(db);
+  await migrateWarehouseLayer(db);
+  await migrateAuditLogs(db);
+  await migrateOutboundOrderDocuments(db);
+  await migrateSalesOrderCloudStorage(db);
+  await migrateAuthSecurity(db);
+}
+
+/** Google Drive (and future OneDrive) metadata for sales order document trees. */
+async function migrateSalesOrderCloudStorage(db) {
+  const run = promisify(db.run.bind(db));
+  const pg = isPostgresDb(db);
+
+  await ensureColumn(db, 'warehouses', 'google_drive_folder_id', 'TEXT');
+
+  if (pg) {
+    await run(`
+      CREATE TABLE IF NOT EXISTS sales_order_folders (
+        id BIGSERIAL PRIMARY KEY,
+        warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+        warehouse_code TEXT NOT NULL,
+        sales_order_number TEXT NOT NULL,
+        gapp_po TEXT,
+        customer_po_number TEXT,
+        customer_name TEXT,
+        storage_provider TEXT NOT NULL DEFAULT 'GOOGLE_DRIVE',
+        root_folder_id TEXT,
+        sales_order_folder_id TEXT NOT NULL,
+        sales_order_folder_name TEXT,
+        sales_order_folder_path TEXT,
+        customer_po_folder_id TEXT,
+        invoices_folder_id TEXT,
+        delivery_notes_folder_id TEXT,
+        pod_folder_id TEXT,
+        accounting_documents_folder_id TEXT,
+        other_folder_id TEXT,
+        folder_status TEXT NOT NULL DEFAULT 'Active',
+        created_by INTEGER REFERENCES users(id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (warehouse_id, sales_order_number)
+      )
+    `);
+    await run(`
+      CREATE TABLE IF NOT EXISTS sales_order_documents (
+        id BIGSERIAL PRIMARY KEY,
+        warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+        sales_order_folder_id BIGINT NOT NULL REFERENCES sales_order_folders(id) ON DELETE CASCADE,
+        sales_order_number TEXT NOT NULL,
+        outbound_number TEXT,
+        dn_number TEXT,
+        invoice_number TEXT,
+        customer_po_number TEXT,
+        accounting_document_number TEXT,
+        document_type TEXT NOT NULL,
+        document_title TEXT,
+        original_file_name TEXT,
+        stored_file_name TEXT NOT NULL,
+        mime_type TEXT,
+        file_size BIGINT,
+        storage_provider TEXT NOT NULL DEFAULT 'GOOGLE_DRIVE',
+        cloud_file_id TEXT NOT NULL,
+        cloud_folder_id TEXT,
+        cloud_web_url TEXT,
+        cloud_download_url TEXT,
+        folder_relative_path TEXT,
+        temp_vps_path TEXT,
+        upload_status TEXT NOT NULL DEFAULT 'UPLOADED',
+        sync_status TEXT DEFAULT 'SYNCED',
+        verification_status TEXT NOT NULL DEFAULT 'PENDING',
+        uploaded_by INTEGER REFERENCES users(id),
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        verified_by INTEGER REFERENCES users(id),
+        verified_at TIMESTAMP,
+        replaced_document_id BIGINT REFERENCES sales_order_documents(id),
+        version_no INTEGER NOT NULL DEFAULT 1,
+        remarks TEXT,
+        pod_type TEXT
+      )
+    `);
+    await run(`
+      CREATE TABLE IF NOT EXISTS sales_order_checklist (
+        id BIGSERIAL PRIMARY KEY,
+        warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+        checklist_key TEXT NOT NULL,
+        sales_order_number TEXT NOT NULL,
+        outbound_number TEXT,
+        document_id BIGINT REFERENCES sales_order_documents(id) ON DELETE SET NULL,
+        completed_by INTEGER REFERENCES users(id),
+        completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        remarks TEXT
+      )
+    `);
+  } else {
+    await run(`
+      CREATE TABLE IF NOT EXISTS sales_order_folders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        warehouse_id INTEGER NOT NULL,
+        warehouse_code TEXT NOT NULL,
+        sales_order_number TEXT NOT NULL,
+        gapp_po TEXT,
+        customer_po_number TEXT,
+        customer_name TEXT,
+        storage_provider TEXT NOT NULL DEFAULT 'GOOGLE_DRIVE',
+        root_folder_id TEXT,
+        sales_order_folder_id TEXT NOT NULL,
+        sales_order_folder_name TEXT,
+        sales_order_folder_path TEXT,
+        customer_po_folder_id TEXT,
+        invoices_folder_id TEXT,
+        delivery_notes_folder_id TEXT,
+        pod_folder_id TEXT,
+        accounting_documents_folder_id TEXT,
+        other_folder_id TEXT,
+        folder_status TEXT NOT NULL DEFAULT 'Active',
+        created_by INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE,
+        FOREIGN KEY (created_by) REFERENCES users(id),
+        UNIQUE (warehouse_id, sales_order_number)
+      )
+    `);
+    await run(`
+      CREATE TABLE IF NOT EXISTS sales_order_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        warehouse_id INTEGER NOT NULL,
+        sales_order_folder_id INTEGER NOT NULL,
+        sales_order_number TEXT NOT NULL,
+        outbound_number TEXT,
+        dn_number TEXT,
+        invoice_number TEXT,
+        customer_po_number TEXT,
+        accounting_document_number TEXT,
+        document_type TEXT NOT NULL,
+        document_title TEXT,
+        original_file_name TEXT,
+        stored_file_name TEXT NOT NULL,
+        mime_type TEXT,
+        file_size INTEGER,
+        storage_provider TEXT NOT NULL DEFAULT 'GOOGLE_DRIVE',
+        cloud_file_id TEXT NOT NULL,
+        cloud_folder_id TEXT,
+        cloud_web_url TEXT,
+        cloud_download_url TEXT,
+        folder_relative_path TEXT,
+        temp_vps_path TEXT,
+        upload_status TEXT NOT NULL DEFAULT 'UPLOADED',
+        sync_status TEXT DEFAULT 'SYNCED',
+        verification_status TEXT NOT NULL DEFAULT 'PENDING',
+        uploaded_by INTEGER,
+        uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        verified_by INTEGER,
+        verified_at DATETIME,
+        replaced_document_id INTEGER,
+        version_no INTEGER NOT NULL DEFAULT 1,
+        remarks TEXT,
+        pod_type TEXT,
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE,
+        FOREIGN KEY (sales_order_folder_id) REFERENCES sales_order_folders(id) ON DELETE CASCADE,
+        FOREIGN KEY (uploaded_by) REFERENCES users(id),
+        FOREIGN KEY (verified_by) REFERENCES users(id),
+        FOREIGN KEY (replaced_document_id) REFERENCES sales_order_documents(id)
+      )
+    `);
+    await run(`
+      CREATE TABLE IF NOT EXISTS sales_order_checklist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        warehouse_id INTEGER NOT NULL,
+        checklist_key TEXT NOT NULL,
+        sales_order_number TEXT NOT NULL,
+        outbound_number TEXT,
+        document_id INTEGER,
+        completed_by INTEGER,
+        completed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        remarks TEXT,
+        FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE,
+        FOREIGN KEY (document_id) REFERENCES sales_order_documents(id) ON DELETE SET NULL,
+        FOREIGN KEY (completed_by) REFERENCES users(id)
+      )
+    `);
+  }
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_so_folders_wh_so ON sales_order_folders(warehouse_id, sales_order_number)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_so_docs_folder ON sales_order_documents(sales_order_folder_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_so_docs_wh_so ON sales_order_documents(warehouse_id, sales_order_number)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_so_docs_type ON sales_order_documents(document_type, upload_status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_so_checklist_wh_so ON sales_order_checklist(warehouse_id, sales_order_number)`);
+}
+
+/** Multiple files per outbound (sales) order, tagged by lifecycle stage. */
+async function migrateOutboundOrderDocuments(db) {
+  const run = promisify(db.run.bind(db));
+  const pg = isPostgresDb(db);
+  if (pg) {
+    await run(`
+      CREATE TABLE IF NOT EXISTS outbound_order_documents (
+        id BIGSERIAL PRIMARY KEY,
+        outbound_order_id INTEGER NOT NULL REFERENCES outbound_orders(id) ON DELETE CASCADE,
+        upload_stage TEXT NOT NULL DEFAULT 'order_created',
+        file_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_mime_type TEXT,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        uploaded_by INTEGER REFERENCES users(id)
+      )
+    `);
+  } else {
+    await run(`
+      CREATE TABLE IF NOT EXISTS outbound_order_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        outbound_order_id INTEGER NOT NULL,
+        upload_stage TEXT NOT NULL DEFAULT 'order_created',
+        file_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_mime_type TEXT,
+        uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        uploaded_by INTEGER,
+        FOREIGN KEY (outbound_order_id) REFERENCES outbound_orders(id) ON DELETE CASCADE,
+        FOREIGN KEY (uploaded_by) REFERENCES users(id)
+      )
+    `);
+  }
+  await run(`CREATE INDEX IF NOT EXISTS idx_outbound_docs_order ON outbound_order_documents(outbound_order_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_outbound_docs_stage ON outbound_order_documents(outbound_order_id, upload_stage)`);
+}
+
+/** Login lockout + JWT revocation (logout invalidates jti server-side). */
+async function migrateAuthSecurity(db) {
+  const run = promisify(db.run.bind(db));
+  const pg = isPostgresDb(db);
+  await ensureColumn(db, 'users', 'failed_login_attempts', 'INTEGER DEFAULT 0');
+  await ensureColumn(db, 'users', 'locked_until', 'DATETIME');
+  if (pg) {
+    await run(`
+      CREATE TABLE IF NOT EXISTS revoked_tokens (
+        jti TEXT PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        expires_at TIMESTAMP NOT NULL
+      )
+    `);
+    await run(`CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at)`);
+  } else {
+    await run(`
+      CREATE TABLE IF NOT EXISTS revoked_tokens (
+        jti TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        expires_at DATETIME NOT NULL
+      )
+    `);
+    await run(`CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at)`);
+  }
+}
+
+async function migrateAuditLogs(db) {
+  const run = promisify(db.run.bind(db));
+  const pg = isPostgresDb(db);
+  if (pg) {
+    await run(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id BIGSERIAL PRIMARY KEY,
+        warehouse_id INTEGER,
+        user_id INTEGER,
+        user_name TEXT,
+        user_role TEXT,
+        module_name TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        reference_type TEXT,
+        reference_id BIGINT,
+        reference_number TEXT,
+        status_before TEXT,
+        status_after TEXT,
+        old_value_json TEXT,
+        new_value_json TEXT,
+        remarks TEXT,
+        ip_address TEXT,
+        device_info TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  } else {
+    await run(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        warehouse_id INTEGER,
+        user_id INTEGER,
+        user_name TEXT,
+        user_role TEXT,
+        module_name TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        reference_type TEXT,
+        reference_id INTEGER,
+        reference_number TEXT,
+        status_before TEXT,
+        status_after TEXT,
+        old_value_json TEXT,
+        new_value_json TEXT,
+        remarks TEXT,
+        ip_address TEXT,
+        device_info TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  }
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_warehouse ON audit_logs(warehouse_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_module ON audit_logs(module_name)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action_type)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_reference ON audit_logs(reference_type, reference_number)`);
+
+  await repairPostgresMissingIdDefaults(db);
 }
 
 /** Additive permissions for existing DBs (seedDefaultRolePermissions only runs on empty table). */

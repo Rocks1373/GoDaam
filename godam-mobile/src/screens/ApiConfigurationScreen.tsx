@@ -81,7 +81,7 @@ export default function ApiConfigurationScreen({ navigation }: Props) {
     (async () => {
       const saved = await getSavedBackendApiUrl();
       const normalizedSaved = saved ? normalizeToApiBase(saved) : '';
-      setUrl(normalizedSaved || getDefaultApiBaseUrl() || 'http://localhost:3001/api');
+      setUrl(normalizedSaved || getDefaultApiBaseUrl() || '');
     })();
   }, []);
 

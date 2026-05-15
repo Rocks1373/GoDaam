@@ -1,0 +1,36 @@
+GoDam — Google Drive setup verification checklist
+==================================================
+
+Your root folder ID (for GOOGLE_DRIVE_ROOT_FOLDER_ID):
+  1K2ykXwSUV9-f89su2kFHDZ6D16Za3J0S
+
+Check each item. If any fails, Drive uploads / folder ensure will error or do nothing.
+
+[ ] 1. Google Cloud project (same project as the service account)
+      APIs & Services → Library → "Google Drive API" → ENABLED
+
+[ ] 2. Service account JSON file exists on the machine that runs the backend
+      File must contain: "type": "service_account", "client_email", "private_key"
+      Path must match GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH (use absolute path)
+
+[ ] 3. backend/.env (or systemd env) has BOTH:
+      GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH=...
+      GOOGLE_DRIVE_ROOT_FOLDER_ID=1K2ykXwSUV9-f89su2kFHDZ6D16Za3J0S
+
+[ ] 4. Optional: STORAGE_PROVIDER=GOOGLE_DRIVE  (omit = default is GOOGLE_DRIVE)
+
+[ ] 5. Google Drive folder is shared with the service account email
+      Open folder → Share → add the exact client_email from the JSON
+      Role: Editor (or Content manager on a Shared drive)
+
+[ ] 6. Backend process can read the JSON file (permissions, path, no typos)
+
+[ ] 7. Backend restarted after changing .env
+
+[ ] 8. Web app: warehouse selector is one concrete warehouse (not "all") when testing uploads
+
+[ ] 9. Quick test: Sales Order Documents page → enter a sales order → Load
+      Or upload an outbound with Sales Doc. set — folder should appear under WHx/SO_… in Drive
+
+Do NOT use for Drive API:
+  client_secret_*.json (OAuth web client) — wrong credential type for this backend.

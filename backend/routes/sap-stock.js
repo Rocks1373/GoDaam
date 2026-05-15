@@ -4,6 +4,7 @@ const XLSX = require('xlsx');
 const { promisify } = require('util');
 const db = require('../db');
 const { excelDateToJSDate, formatYYYYMMDD } = require('../utils/excelDates');
+const { normalizeSapStorageLoc } = require('../utils/sapStorageLoc');
 const { refreshMainStockSapQtyFromBatch } = require('../services/stockComparisonService');
 
 const router = express.Router();
@@ -13,7 +14,8 @@ const dbGet = promisify(db.get.bind(db));
 const dbAll = promisify(db.all.bind(db));
 const dbRun = promisify(db.run.bind(db));
 
-const COL = {
+/** Legacy narrow template (Vendor Number, Material, …) — column indices */
+const LEGACY_COL = {
   vendor: 0,
   material: 1,
   description: 2,
@@ -61,22 +63,230 @@ async function getLatestProcessedBatchId() {
 
 /** Effective SAP qty for a row (unrestricted preferred) */
 function effectiveQty(unrestricted, stock) {
-  if (unrestricted !== null && unrestricted !== undefined && String(unrestricted).trim() !== '') {
-    const n = Number(unrestricted);
-    if (Number.isFinite(n)) return n;
-  }
-  const s = Number(stock);
+  const parse = (v) => {
+    if (v === null || v === undefined || String(v).trim() === '') return NaN;
+    return Number(String(v).replace(/,/g, '').trim());
+  };
+  const u = parse(unrestricted);
+  if (Number.isFinite(u)) return u;
+  const s = parse(stock);
   return Number.isFinite(s) ? s : 0;
 }
 
 function normStorageLoc(raw) {
-  let s = String(raw ?? '')
+  return normalizeSapStorageLoc(raw);
+}
+
+/** Quantity cells often contain commas / formatting */
+function parseQtyCell(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'boolean') return null;
+  if (v && typeof v === 'object' && typeof v.v === 'number' && Number.isFinite(v.v)) return v.v;
+  const s = String(v)
+    .replace(/,/g, '')
+    .replace(/\u00a0/g, '')
+    .trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeHeaderKey(v) {
+  return String(v ?? '')
     .trim()
-    .replace(/\s+/g, '');
-  if (!s) return '';
-  const stripped = s.replace(/^0+/, '') || s;
-  if (['1002', '1004', '1007'].includes(stripped)) return stripped;
-  return stripped;
+    .toLowerCase()
+    .replace(/\./g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\u00a0/g, ' ');
+}
+
+function headerNormRow(headerRow) {
+  return (headerRow || []).map(normalizeHeaderKey);
+}
+
+/** Left-to-right: exact "unrestricted", then fuzzy (never "Value unrestricted"). */
+function pickUnrestrictedColumnIndex(headerRow) {
+  const norm = headerNormRow(headerRow);
+  const exact = norm.indexOf('unrestricted');
+  if (exact >= 0) return exact;
+  for (let i = 0; i < norm.length; i += 1) {
+    const h = norm[i];
+    if (!h) continue;
+    if (h === 'value unrestricted') continue;
+    if (h.includes('value') && h.includes('unrestricted')) continue;
+    if (h === 'unrestricted use stock') continue;
+    if (/^unrestrict/.test(h)) return i;
+  }
+  return -1;
+}
+
+function pickMaterialGroupColumnIndex(headerRow) {
+  const norm = headerNormRow(headerRow);
+  const candidates = ['material group', 'matl group', 'material grp', 'materialgrp'];
+  for (const c of candidates) {
+    const i = norm.indexOf(c);
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
+function pickUomColumnIndex(headerRow) {
+  const norm = headerNormRow(headerRow);
+  const candidates = ['base unit of measure', 'unit of measure', 'base unit', 'uom', 'bun'];
+  for (const c of candidates) {
+    const i = norm.indexOf(c);
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
+/** Column A in MB52-style exports: Item (SD). */
+function pickItemSdColumnIndex(headerRow) {
+  const norm = headerNormRow(headerRow);
+  const aliases = ['item (sd)', 'item sd', 'sd item'];
+  for (const a of aliases) {
+    const i = norm.indexOf(a);
+    if (i >= 0) return i;
+  }
+  for (let i = 0; i < Math.min(norm.length, 4); i += 1) {
+    if (norm[i] === 'item') return i;
+  }
+  return -1;
+}
+
+/** Narrow vendor template (fixed columns): column A vendor-ish, column B material. */
+function looksLikeLegacyNarrowHeader(row) {
+  if (!Array.isArray(row) || row.length < 2) return false;
+  const a = normalizeHeaderKey(row[0]);
+  const b = normalizeHeaderKey(row[1]);
+  return a.includes('vendor') && (b === 'material' || b.includes('material'));
+}
+
+/** Find header row when SAP adds title rows above column labels. */
+function findSapHeaderRowIndex(rows, maxScan = 30) {
+  for (let i = 0; i < Math.min(maxScan, rows.length); i += 1) {
+    const row = rows[i];
+    if (!Array.isArray(row) || row.length < 5) continue;
+    const norm = headerNormRow(row);
+    if (norm.indexOf('material') < 0) continue;
+    if (norm.indexOf('storage location') < 0) continue;
+    if (pickUnrestrictedColumnIndex(row) < 0 && norm.indexOf('stock') < 0) continue;
+    return i;
+  }
+  return 0;
+}
+
+/**
+ * Wide SAP export (e.g. MB52-style): resolve columns by header names (K/L/R), not fixed indices.
+ * Material group is optional — requiring it forced legacy mode on valid exports with alternate MG labels.
+ */
+function buildLayoutFromSapExportHeaders(headerRow) {
+  const norm = headerNormRow(headerRow);
+  const col = (label) => norm.indexOf(label);
+
+  const material = col('material');
+  const storageLocation = col('storage location');
+  let unrestricted = pickUnrestrictedColumnIndex(headerRow);
+  if (unrestricted < 0) {
+    const stockIdx = col('stock');
+    if (stockIdx >= 0) unrestricted = stockIdx;
+  }
+
+  if (material < 0 || storageLocation < 0 || unrestricted < 0) return null;
+
+  let storageLocDesc = col('descr of storage loc');
+  if (storageLocDesc < 0) storageLocDesc = col('storage location description');
+
+  const mg = pickMaterialGroupColumnIndex(headerRow);
+  const uom = pickUomColumnIndex(headerRow);
+  const itemSd = pickItemSdColumnIndex(headerRow);
+  const salesDocument = col('sales document');
+
+  return {
+    itemSd: itemSd >= 0 ? itemSd : -1,
+    material,
+    description: col('material description'),
+    plant: col('plant'),
+    storageLocation,
+    storageLocDesc: storageLocDesc >= 0 ? storageLocDesc : -1,
+    batch: col('batch'),
+    salesDocument: salesDocument >= 0 ? salesDocument : -1,
+    unrestricted,
+    stock: col('stock'),
+    uom: uom >= 0 ? uom : -1,
+    materialGroup: mg >= 0 ? mg : -1,
+    materialDocument: col('material document'),
+    valueAmount: col('value unrestricted'),
+    vendorNumber: col('vendor number'),
+  };
+}
+
+function legacySapLayout() {
+  return {
+    dataStart: 0,
+    layoutMode: 'legacy',
+    headerRowIndex: 0,
+    itemSd: -1,
+    salesDocument: -1,
+    material: LEGACY_COL.material,
+    description: LEGACY_COL.description,
+    storageLocation: LEGACY_COL.storageLoc,
+    storageLocDesc: LEGACY_COL.storageLocDesc,
+    batch: LEGACY_COL.batch,
+    unrestricted: LEGACY_COL.unrestricted,
+    stock: LEGACY_COL.stock,
+    uom: LEGACY_COL.uom,
+    materialGroup: LEGACY_COL.materialGroup,
+    materialDocument: LEGACY_COL.storageDoc,
+    valueAmount: LEGACY_COL.value,
+    vendorNumber: LEGACY_COL.vendor,
+    plant: -1,
+  };
+}
+
+function resolveSapUploadLayout(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return legacySapLayout();
+
+  const hi = findSapHeaderRowIndex(rows);
+  const headerRow = rows[hi] || [];
+  const wide = buildLayoutFromSapExportHeaders(headerRow);
+  if (wide) {
+    return {
+      ...wide,
+      dataStart: hi + 1,
+      layoutMode: 'wide',
+      headerRowIndex: hi,
+    };
+  }
+
+  const first = rows[0];
+  if (looksLikeLegacyNarrowHeader(first)) return legacySapLayout();
+
+  return legacySapLayout();
+}
+
+/** Column letters for upload diagnostics (0 → A). */
+function columnLetter(idx) {
+  if (idx == null || idx < 0) return null;
+  let n = idx + 1;
+  let s = '';
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function lineText(line, idx, opts = {}) {
+  if (idx == null || idx < 0 || !Array.isArray(line)) return '';
+  return cellText(line[idx], opts);
+}
+
+function lineQty(line, idx) {
+  if (idx == null || idx < 0 || !Array.isArray(line)) return null;
+  return parseQtyCell(line[idx]);
 }
 
 router.get('/upload-history', async (req, res) => {
@@ -106,8 +316,11 @@ router.get('/summary', async (req, res) => {
         MAX(description) AS description,
         MAX(base_uom) AS base_uom,
         MAX(material_group) AS material_group,
+        SUM(CASE WHEN TRIM(COALESCE(storage_location,'')) = '1001' THEN COALESCE(unrestricted_qty, stock_qty) ELSE 0 END) AS qty_1001,
         SUM(CASE WHEN TRIM(COALESCE(storage_location,'')) = '1002' THEN COALESCE(unrestricted_qty, stock_qty) ELSE 0 END) AS qty_1002,
+        SUM(CASE WHEN TRIM(COALESCE(storage_location,'')) = '1003' THEN COALESCE(unrestricted_qty, stock_qty) ELSE 0 END) AS qty_1003,
         SUM(CASE WHEN TRIM(COALESCE(storage_location,'')) = '1004' THEN COALESCE(unrestricted_qty, stock_qty) ELSE 0 END) AS qty_1004,
+        SUM(CASE WHEN TRIM(COALESCE(storage_location,'')) = '1005' THEN COALESCE(unrestricted_qty, stock_qty) ELSE 0 END) AS qty_1005,
         SUM(CASE WHEN TRIM(COALESCE(storage_location,'')) = '1007' THEN COALESCE(unrestricted_qty, stock_qty) ELSE 0 END) AS qty_1007
       FROM sap_stock
       WHERE upload_batch_id = ?
@@ -117,16 +330,22 @@ router.get('/summary', async (req, res) => {
       [batchId]
     );
     const out = (rows || []).map((r) => {
+      const q1 = Number(r.qty_1001) || 0;
       const q2 = Number(r.qty_1002) || 0;
+      const q3 = Number(r.qty_1003) || 0;
       const q4 = Number(r.qty_1004) || 0;
+      const q5 = Number(r.qty_1005) || 0;
       const q7 = Number(r.qty_1007) || 0;
       return {
         ...r,
+        qty_1001: q1,
         qty_1002: q2,
+        qty_1003: q3,
         qty_1004: q4,
+        qty_1005: q5,
         qty_1007: q7,
         sap_physical_qty: q4 + q7,
-        sap_total_qty: q2 + q4 + q7,
+        sap_total_qty: q1 + q2 + q3 + q4 + q5 + q7,
       };
     });
     res.json({ rows: out, batch_id: batchId });
@@ -137,25 +356,28 @@ router.get('/summary', async (req, res) => {
 
 router.get('/template', async (_req, res) => {
   try {
+    /* Matches SAP MB52-style export; legacy narrow template still parses if row 1 column A contains "Vendor". */
     const headers = [
-      'Vendor Number',
+      'Item (SD)',
       'Material',
-      'Description',
-      '(D)',
-      'Storage Location',
-      'Storage Location Description',
-      'Stock',
-      '(H)',
-      'Storage Document',
+      'Material description',
+      'Plant',
+      'Storage location',
+      'Descr. of Storage Loc.',
+      'Special Stock',
+      'Spec. stk valuation',
+      'Sales document',
       'Batch',
-      'Unrestricted Qty',
-      'Base Unit of Measurement',
-      'Value',
-      '(N)',
-      '(O)',
-      '(P)',
-      '(Q)',
+      'Unrestricted',
+      'Base Unit of Measure',
+      'Value Unrestricted',
+      'Currency',
+      'Movement Type',
+      'Posting Date',
+      'Material Document',
       'Material Group',
+      'Material type',
+      'Quantities Allocated',
     ];
     const ws = XLSX.utils.aoa_to_sheet([headers]);
     const wb = XLSX.utils.book_new();
@@ -209,9 +431,12 @@ router.get('/', async (req, res) => {
       where += ` AND (
         TRIM(s.material) LIKE ? OR TRIM(s.description) LIKE ? OR TRIM(s.vendor_number) LIKE ?
         OR TRIM(s.material_group) LIKE ? OR TRIM(s.storage_location) LIKE ?
+        OR TRIM(COALESCE(s.batch,'')) LIKE ?
+        OR TRIM(COALESCE(s.sales_document,'')) LIKE ?
+        OR TRIM(COALESCE(s.item_sd,'')) LIKE ?
       )`;
       const p = `%${search}%`;
-      params.push(p, p, p, p, p);
+      params.push(p, p, p, p, p, p, p, p);
     }
 
     const totalRow = await dbGet(`SELECT COUNT(1) AS c FROM sap_stock s ${where}`, params);
@@ -223,8 +448,14 @@ router.get('/', async (req, res) => {
         s.material,
         s.sap_part_number,
         s.description,
+        s.item_sd,
+        s.sales_document,
         s.storage_location,
         s.storage_location_description,
+        s.batch,
+        s.unrestricted_qty,
+        s.unrestricted_qty AS quantity,
+        s.stock_qty,
         COALESCE(s.unrestricted_qty, s.stock_qty) AS sap_qty,
         s.base_uom,
         s.material_group,
@@ -247,7 +478,7 @@ router.get('/export', async (req, res) => {
     if (!batchId) return res.status(404).json({ error: 'No SAP upload data' });
 
     const rows = await dbAll(
-      `SELECT vendor_number, material, description, storage_location, storage_location_description,
+      `SELECT vendor_number, material, description, item_sd, sales_document, storage_location, storage_location_description,
               stock_qty, storage_document, batch, unrestricted_qty, base_uom, value_amount, material_group
        FROM sap_stock WHERE upload_batch_id = ? ORDER BY material, storage_location`,
       [batchId]
@@ -268,7 +499,8 @@ router.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
     const userId = req.user?.sub ?? null;
-    const wb = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true });
+    /* cellDates:false keeps numeric qty columns as numbers (cellDates can mis-classify in rare sheets). */
+    const wb = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: false });
     const sheetName = wb.SheetNames[0];
     const sheet = wb.Sheets[sheetName];
     if (!sheet) return res.status(400).json({ error: 'Empty workbook' });
@@ -285,48 +517,82 @@ router.post('/upload', upload.single('file'), async (req, res) => {
          VALUES (?, ?, ?, 0, 'Uploaded', NULL)`,
         [fileName, uploadDate, userId]
       );
-      batchId = (await dbGet('SELECT last_insert_rowid() AS id'))?.id;
+      batchId = (
+        await dbGet(
+          `SELECT id FROM sap_stock_upload_batches
+           WHERE file_name = ? AND upload_date = ? AND COALESCE(uploaded_by, -1) = COALESCE(?, -1)
+           ORDER BY id DESC LIMIT 1`,
+          [fileName, uploadDate, userId]
+        )
+      )?.id;
       if (!batchId) throw new Error('Failed to create batch');
+
+      const L = resolveSapUploadLayout(rows);
+
+      const layout_columns =
+        L.layoutMode === 'wide'
+          ? {
+              item_sd: columnLetter(L.itemSd),
+              sales_document: columnLetter(L.salesDocument),
+              batch: columnLetter(L.batch),
+              unrestricted: columnLetter(L.unrestricted),
+              material: columnLetter(L.material),
+              storage_location: columnLetter(L.storageLocation),
+              material_group: columnLetter(L.materialGroup),
+              base_uom: columnLetter(L.uom),
+              header_row_1based: (L.headerRowIndex ?? 0) + 1,
+            }
+          : { mode: 'legacy_fixed_indices' };
 
       let inserted = 0;
       const uniqMat = new Set();
+      let sum1001 = 0;
       let sum1002 = 0;
+      let sum1003 = 0;
       let sum1004 = 0;
+      let sum1005 = 0;
       let sum1007 = 0;
 
-      for (let i = 0; i < rows.length; i += 1) {
+      for (let i = L.dataStart; i < rows.length; i += 1) {
         const line = rows[i];
         if (!Array.isArray(line)) continue;
-        const material = cellText(line[COL.material], { allowDate: false });
+        const material = lineText(line, L.material, { allowDate: false });
         if (!material) continue;
-        if (i === 0 && /material/i.test(material)) continue;
+        if (L.dataStart === 0 && i === 0 && /material/i.test(material)) continue;
 
-        const vendor_number = cellText(line[COL.vendor], { allowDate: true });
-        const description = cellText(line[COL.description], { allowDate: true });
-        const storage_location = normStorageLoc(cellText(line[COL.storageLoc], { allowDate: false }));
-        const storage_location_description = cellText(line[COL.storageLocDesc], { allowDate: true });
-        const stock_qty = cellNum(line[COL.stock]);
-        const storage_document = cellText(line[COL.storageDoc], { allowDate: true });
-        const batchNo = cellText(line[COL.batch], { allowDate: true });
-        const unrestricted_raw = cellNum(line[COL.unrestricted]);
-        const base_uom = cellText(line[COL.uom], { allowDate: false });
-        const value_amount = cellNum(line[COL.value]);
-        const material_group = cellText(line[COL.materialGroup], { allowDate: true });
+        const material_group = lineText(line, L.materialGroup, { allowDate: true });
+        const vendor_from_col = lineText(line, L.vendorNumber, { allowDate: true });
+        const vendor_number = vendor_from_col || material_group || null;
+        const description = lineText(line, L.description, { allowDate: true });
+        const storage_location = normStorageLoc(lineText(line, L.storageLocation, { allowDate: false }));
+        const storage_location_description = lineText(line, L.storageLocDesc, { allowDate: true });
+        const stock_qty = L.stock >= 0 ? lineQty(line, L.stock) : null;
+        const storage_document = lineText(line, L.materialDocument, { allowDate: true });
+        const item_sd = lineText(line, L.itemSd, { allowDate: false });
+        const sales_document = lineText(line, L.salesDocument, { allowDate: true });
+        const batchNo = lineText(line, L.batch, { allowDate: true });
+        const unrestricted_raw = lineQty(line, L.unrestricted);
+        const base_uom = lineText(line, L.uom, { allowDate: false });
+        const value_amount = L.valueAmount >= 0 ? lineQty(line, L.valueAmount) : null;
 
         const unrestricted_qty = unrestricted_raw;
         const eff = effectiveQty(unrestricted_qty, stock_qty ?? 0);
 
         uniqMat.add(material.trim().toLowerCase());
+        if (storage_location === '1001') sum1001 += eff;
         if (storage_location === '1002') sum1002 += eff;
+        if (storage_location === '1003') sum1003 += eff;
         if (storage_location === '1004') sum1004 += eff;
+        if (storage_location === '1005') sum1005 += eff;
         if (storage_location === '1007') sum1007 += eff;
 
         await dbRun(
           `INSERT INTO sap_stock (
             upload_batch_id, vendor_number, material, sap_part_number, description,
             storage_location, storage_location_description, stock_qty, storage_document, "batch",
+            item_sd, sales_document,
             unrestricted_qty, base_uom, value_amount, material_group, uploaded_by
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             batchId,
             vendor_number || null,
@@ -338,6 +604,8 @@ router.post('/upload', upload.single('file'), async (req, res) => {
             stock_qty,
             storage_document || null,
             batchNo || null,
+            item_sd || null,
+            sales_document || null,
             unrestricted_qty,
             base_uom || null,
             value_amount,
@@ -361,9 +629,14 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         batch_id: batchId,
         total_rows: inserted,
         unique_materials: uniqMat.size,
+        qty_1001: sum1001,
         qty_1002: sum1002,
+        qty_1003: sum1003,
         qty_1004: sum1004,
+        qty_1005: sum1005,
         qty_1007: sum1007,
+        layout_mode: L.layoutMode ?? 'legacy',
+        layout_columns,
       });
     } catch (e) {
       await dbRun('ROLLBACK').catch(() => {});
