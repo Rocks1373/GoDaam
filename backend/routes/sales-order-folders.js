@@ -8,6 +8,7 @@ const {
   getOrEnsureSalesOrderFolder,
   exportManifest,
 } = require('../services/salesOrderDocumentsService');
+const { getGoogleDriveSetupStatus } = require('../services/googleDriveSetupStatus');
 
 const router = express.Router();
 const dbAll = promisify(db.all.bind(db));
@@ -47,6 +48,25 @@ router.get('/', async (req, res) => {
       params
     );
     res.json({ folders: rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/drive-setup', async (req, res) => {
+  try {
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId: req.user.sub,
+      role: req.user.role,
+      explicitWarehouseId: req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id required' });
+    const ok = await userHasWarehouseAccess(Number(req.user.sub), req.user.role, warehouseId);
+    if (String(req.user.role || '').toLowerCase() !== 'admin' && !ok) {
+      return res.status(403).json({ error: 'Forbidden for this warehouse' });
+    }
+    const status = await getGoogleDriveSetupStatus(warehouseId);
+    res.json(status);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

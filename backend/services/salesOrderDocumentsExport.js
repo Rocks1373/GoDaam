@@ -7,13 +7,14 @@ const { downloadDocument } = require('./cloudStorage/cloudStorageProvider');
 
 const dbAll = promisify(db.all.bind(db));
 
+/** Merge order: accounting → invoice → delivery note → customer PO → POD (parallel business trio first). */
 const DOCUMENT_TYPE_RANK = [
-  'CUSTOMER_PO',
+  'ACCOUNTING_DOCUMENT',
   'INVOICE',
   'DELIVERY_NOTE',
+  'CUSTOMER_PO',
   'POD',
   'SIGNED_POD',
-  'ACCOUNTING_DOCUMENT',
   'OTHER',
 ];
 
@@ -141,9 +142,13 @@ async function streamIndividualZipForSalesOrder(warehouseId, salesOrderNumber, r
   const base =
     String(filenameBase || 'SO')
       .replace(/[^a-zA-Z0-9._-]+/g, '_')
-      .slice(0, 80) || 'SO';
+      .slice(0, 140) || 'SO';
+  const zipName = `${base}_documents.zip`;
   res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="${base}_documents.zip"`);
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${zipName}"; filename*=UTF-8''${encodeURIComponent(zipName)}`
+  );
 
   const archive = archiver('zip', { zlib: { level: 6 } });
   archive.on('error', () => {

@@ -40,6 +40,22 @@ export function WarehouseProvider({ children, user }) {
     }
   }, []);
 
+  const roleLower = user && typeof user === 'object' ? String(user.role || '').toLowerCase() : '';
+  const isManager = roleLower === 'manager';
+
+  useEffect(() => {
+    if (!user || !isManager) return;
+    const list = Array.isArray(warehouses) ? warehouses : [];
+    if (list.length === 1) {
+      setSelected(list[0].id);
+      return;
+    }
+    const def = Number(user.default_warehouse_id);
+    if (def && list.some((w) => Number(w.id) === def)) {
+      setSelected(def);
+    }
+  }, [user, warehouses, isManager, setSelected]);
+
   const value = useMemo(
     () => ({
       warehouses,
@@ -47,9 +63,10 @@ export function WarehouseProvider({ children, user }) {
       selectedMode: selected === ALL ? 'all' : 'one',
       setSelectedWarehouse: setSelected,
       isAllWarehouses: selected === ALL,
-      isAdmin: user && typeof user === 'object' && String(user.role || '').toLowerCase() === 'admin',
+      isAdmin: roleLower === 'admin',
+      isManager,
     }),
-    [warehouses, selected, setSelected, user]
+    [warehouses, selected, setSelected, roleLower, isManager]
   );
 
   return <WarehouseContext.Provider value={value}>{children}</WarehouseContext.Provider>;

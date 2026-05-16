@@ -209,6 +209,15 @@ async function migrateWarehouseLayer(db) {
        VALUES ('WH1', 'Main Warehouse', NULL, NULL, 'Default warehouse for legacy data', 1)`
     );
   }
+  const wh2 = await get(`SELECT id FROM warehouses WHERE lower(warehouse_code) = 'wh2' LIMIT 1`);
+  if (!wh2) {
+    await run(
+      `INSERT INTO warehouses (warehouse_code, warehouse_name, location, manager_name, remarks, is_active)
+       VALUES ('WH2', 'Warehouse 2', NULL, NULL, 'Second warehouse site', 1)`
+    );
+  }
+
+  await ensureColumn(db, 'warehouses', 'manager_user_id', pg ? 'INTEGER REFERENCES users(id)' : 'INTEGER');
 
   const defaultWh = await get(`SELECT id FROM warehouses WHERE lower(warehouse_code) = 'wh1' ORDER BY id LIMIT 1`);
   const defaultWhId = Number(defaultWh?.id) || 1;
@@ -1184,6 +1193,7 @@ async function migrateGodamSchema(db) {
 
   await seedDefaultRolePermissions(db);
   await ensureTransportationPermissionRows(db);
+  await ensureManagerRolePermissions(db);
   await migrateWarehouseLayer(db);
   await migrateAuditLogs(db);
   await migrateOutboundOrderDocuments(db);
@@ -1495,6 +1505,31 @@ async function migrateAuditLogs(db) {
   await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_reference ON audit_logs(reference_type, reference_number)`);
 
   await repairPostgresMissingIdDefaults(db);
+}
+
+/** Warehouse manager role (operates one or more sites; assign via Warehouses admin). */
+async function ensureManagerRolePermissions(db) {
+  const get = promisify(db.get.bind(db));
+  const run = promisify(db.run.bind(db));
+  const role = 'manager';
+  for (const [permission_key, permission_label] of PERMISSION_DEFS) {
+    const row = await get(`SELECT id FROM role_permissions WHERE role = ? AND permission_key = ?`, [
+      role,
+      permission_key,
+    ]);
+    if (row) continue;
+    const isEnabled =
+      permission_key === 'can_manage_users'
+        ? 0
+        : permission_key === 'can_use_ai'
+          ? 0
+          : 1;
+    await run(
+      `INSERT INTO role_permissions (role, permission_key, permission_label, is_enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [role, permission_key, permission_label, isEnabled]
+    );
+  }
 }
 
 /** Additive permissions for existing DBs (seedDefaultRolePermissions only runs on empty table). */

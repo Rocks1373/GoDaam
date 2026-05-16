@@ -13,6 +13,7 @@ const {
   deleteTempFile,
 } = require('./cloudStorage/cloudStorageProvider');
 const { ensurePdfUploadPath } = require('./salesOrderDocumentPdf');
+const { isGoogleDriveFolderAccessible } = require('./googleDriveSetupStatus');
 
 const dbRun = promisify(db.run.bind(db));
 const dbGet = promisify(db.get.bind(db));
@@ -48,6 +49,57 @@ function todayYmd() {
   return new Date().toISOString().slice(0, 10);
 }
 
+/**
+ * Trio rule: uploaded INVOICE, DELIVERY_NOTE, and ACCOUNTING_DOCUMENT counts must match (1:1:1, 2:2:2, …).
+ * CUSTOMER_PO is separate; when any trio file exists but no PO, a soft reminder is included.
+ */
+function computeParallelBundleStatus(documents) {
+  const uploaded = (documents || []).filter(
+    (d) => String(d.upload_status || '').toUpperCase() === 'UPLOADED'
+  );
+  const countType = (t) =>
+    uploaded.filter((d) => String(d.document_type || '').toUpperCase() === t).length;
+  const nInv = countType(DOC_TYPES.INVOICE);
+  const nDn = countType(DOC_TYPES.DELIVERY_NOTE);
+  const nAcc = countType(DOC_TYPES.ACCOUNTING_DOCUMENT);
+  const nPo = countType(DOC_TYPES.CUSTOMER_PO);
+  const m = Math.max(nInv, nDn, nAcc);
+  const balanced = m === 0 || (nInv === m && nDn === m && nAcc === m);
+  const reminders = [];
+  if (m > 0 && !balanced) {
+    reminders.push(
+      `Parallel set incomplete: ${nInv} invoice file(s), ${nDn} delivery note file(s), ${nAcc} accounting file(s). All three counts must be equal (e.g. two invoices ⇒ two delivery notes and two accounting documents).`
+    );
+    if (nInv < m) reminders.push(`Add ${m - nInv} more invoice file(s).`);
+    if (nDn < m) reminders.push(`Add ${m - nDn} more delivery note file(s).`);
+    if (nAcc < m) reminders.push(`Add ${m - nAcc} more accounting file(s).`);
+  }
+  let customer_po_reminder = null;
+  if (m > 0 && nPo === 0) {
+    customer_po_reminder =
+      'No customer PO uploaded yet — usually one customer PO PDF is kept with the sales order for customer view.';
+  }
+  const summary =
+    m === 0
+      ? 'No uploaded invoice / delivery note / accounting trio yet.'
+      : balanced
+        ? `Document trio complete (${m} parallel set(s)): ${nInv} invoice(s), ${nDn} delivery note(s), ${nAcc} accounting file(s).`
+        : `Incomplete trio: ${nInv} invoice(s), ${nDn} delivery note(s), ${nAcc} accounting file(s).`;
+  return {
+    counts: {
+      invoice: nInv,
+      delivery_note: nDn,
+      accounting_document: nAcc,
+      customer_po: nPo,
+    },
+    parallel_complete: balanced,
+    parallel_balanced: balanced,
+    reminders,
+    customer_po_reminder,
+    summary,
+  };
+}
+
 function isPg() {
   return db && db.dialect === 'postgres';
 }
@@ -71,7 +123,9 @@ async function ensureWarehouseDriveFolderId(warehouseRow) {
     throw new Error('GOOGLE_DRIVE_ROOT_FOLDER_ID is not configured');
   }
   const existing = String(warehouseRow.google_drive_folder_id || '').trim();
-  if (existing) return existing;
+  if (existing && (await isGoogleDriveFolderAccessible(existing))) {
+    return existing;
+  }
   const created = await ensureWarehouseFolder({ warehouse_code: warehouseRow.warehouse_code });
   await dbRun(`UPDATE warehouses SET google_drive_folder_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
     created.id,
@@ -103,8 +157,12 @@ async function getOrEnsureSalesOrderFolder({
       [wid, so]
     );
     if (row && row.sales_order_folder_id) {
-      await dbRun('COMMIT');
-      return row;
+      const soFolderOk = await isGoogleDriveFolderAccessible(row.sales_order_folder_id);
+      if (soFolderOk) {
+        await dbRun('COMMIT');
+        return row;
+      }
+      /* Stale Drive ids (e.g. after rotating service account) — rebuild tree below. */
     }
 
     const wh = await loadWarehouse(wid);
@@ -782,11 +840,13 @@ async function getStatusPayload(warehouseId, salesOrderNumber) {
     [Number(warehouseId), normSo(salesOrderNumber)]
   );
   const upload_context = await resolveUploadContextFromWarehouse(warehouseId, salesOrderNumber);
+  const parallel_bundle = computeParallelBundleStatus(docs || []);
   return {
     folder: folder2 || folder,
     documents: docs || [],
     checklist: checklist || [],
     upload_context,
+    parallel_bundle,
   };
 }
 
@@ -901,4 +961,5 @@ module.exports = {
   recomputeSalesOrderFolderStatus,
   syncDriverPodFileToDrive,
   recordScannerPipelineChecklists,
+  computeParallelBundleStatus,
 };

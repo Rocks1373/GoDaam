@@ -40,7 +40,7 @@ describe('salesOrderDocumentsExport', () => {
           id: 1,
           cloud_file_id: 'file-a',
           mime_type: 'application/pdf',
-          document_type: 'INVOICE',
+          document_type: 'ACCOUNTING_DOCUMENT',
           uploaded_at: '2024-01-01T00:00:00Z',
         },
       ])

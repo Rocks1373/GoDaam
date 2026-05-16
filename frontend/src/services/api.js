@@ -470,6 +470,9 @@ export const warehousesApi = {
   list: async () => (await api.get('/warehouses')).data,
   create: async (payload) => (await api.post('/warehouses', payload)).data,
   update: async (id, payload) => (await api.patch(`/warehouses/${id}`, payload)).data,
+  getStaff: async (id) => (await api.get(`/warehouses/${id}/staff`)).data,
+  assignManager: async (id, user_id) => (await api.post(`/warehouses/${id}/manager`, { user_id })).data,
+  assignUser: async (id, body) => (await api.post(`/warehouses/${id}/users`, body)).data,
 };
 
 export const rolesApi = {
@@ -625,6 +628,43 @@ export const bomApi = {
 };
 
 /** Sales order Google Drive document tree + uploads */
+function filenameFromContentDisposition(header) {
+  if (!header || typeof header !== 'string') return null;
+  const star = /filename\*\s*=\s*UTF-8''([^;\n]+)/i.exec(header);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1].trim());
+    } catch {
+      return star[1].trim();
+    }
+  }
+  const quoted = /filename\s*=\s*"([^"]*)"/i.exec(header);
+  if (quoted) return quoted[1];
+  const plain = /filename\s*=\s*([^;\n]+)/i.exec(header);
+  if (plain) return plain[1].trim().replace(/^["']|["']$/g, '');
+  return null;
+}
+
+function fallbackCombinedPdfName(salesOrderNumber, customerPoNumber) {
+  const so = String(salesOrderNumber).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'SO';
+  const po = String(customerPoNumber || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .slice(0, 60);
+  const base = po ? `${so}_PO_${po}` : so;
+  return `${base}_combined.pdf`;
+}
+
+function fallbackDocumentsZipName(salesOrderNumber, customerPoNumber) {
+  const so = String(salesOrderNumber).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'SO';
+  const po = String(customerPoNumber || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .slice(0, 60);
+  const base = po ? `${so}_PO_${po}` : so;
+  return `${base}_documents.zip`;
+}
+
 async function salesOrderExportBlobErrorMessage(err) {
   const data = err?.response?.data;
   if (data instanceof Blob) {
@@ -644,6 +684,7 @@ export const salesOrderDocumentsApi = {
   getFolder: async (salesOrderNumber, params) =>
     (await api.get(`/sales-order-folders/${encodeURIComponent(salesOrderNumber)}`, { params })).data,
   ensureFolder: async (body) => (await api.post('/sales-order-folders/ensure', body)).data,
+  driveSetup: async (params) => (await api.get('/sales-order-folders/drive-setup', { params })).data,
   exportManifest: async (salesOrderNumber, body = {}) =>
     (await api.post(`/sales-order-folders/${encodeURIComponent(salesOrderNumber)}/export-manifest`, body)).data,
   listDocuments: async (salesOrderNumber) => (await api.get(`/sales-order-documents/${encodeURIComponent(salesOrderNumber)}`)).data,
@@ -654,7 +695,7 @@ export const salesOrderDocumentsApi = {
   verify: async (id, payload) => (await api.post(`/sales-order-documents/by-id/${id}/verify`, payload)).data,
   openLink: async (id) => (await api.get(`/sales-order-documents/by-id/${id}/open-link`)).data,
   replace: async (id, formData) => (await api.post(`/sales-order-documents/by-id/${id}/replace`, formData)).data,
-  downloadCombinedPdf: async (salesOrderNumber, warehouseId) => {
+  downloadCombinedPdf: async (salesOrderNumber, warehouseId, opts = {}) => {
     const params = {};
     if (warehouseId != null && warehouseId !== '') params.warehouse_id = warehouseId;
     try {
@@ -662,18 +703,20 @@ export const salesOrderDocumentsApi = {
         `/sales-order-documents/${encodeURIComponent(salesOrderNumber)}/export-combined.pdf`,
         { params, responseType: 'blob' }
       );
-      const base = String(salesOrderNumber).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'SO';
+      const fname =
+        filenameFromContentDisposition(res.headers['content-disposition']) ||
+        fallbackCombinedPdfName(salesOrderNumber, opts.customerPoNumber);
       const url = URL.createObjectURL(res.data);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${base}_combined.pdf`;
+      a.download = fname;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
       throw new Error(await salesOrderExportBlobErrorMessage(e));
     }
   },
-  downloadIndividualZip: async (salesOrderNumber, warehouseId) => {
+  downloadIndividualZip: async (salesOrderNumber, warehouseId, opts = {}) => {
     const params = {};
     if (warehouseId != null && warehouseId !== '') params.warehouse_id = warehouseId;
     try {
@@ -681,11 +724,13 @@ export const salesOrderDocumentsApi = {
         `/sales-order-documents/${encodeURIComponent(salesOrderNumber)}/export-individual.zip`,
         { params, responseType: 'blob' }
       );
-      const base = String(salesOrderNumber).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'SO';
+      const fname =
+        filenameFromContentDisposition(res.headers['content-disposition']) ||
+        fallbackDocumentsZipName(salesOrderNumber, opts.customerPoNumber);
       const url = URL.createObjectURL(res.data);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${base}_documents.zip`;
+      a.download = fname;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {

@@ -45,6 +45,16 @@ function exportAttachmentBaseName(salesOrderNumber) {
   );
 }
 
+function combinedExportBaseName(salesOrderNumber, customerPoNumber) {
+  const so = exportAttachmentBaseName(salesOrderNumber);
+  const po = String(customerPoNumber || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .slice(0, 60);
+  if (po) return `${so}_PO_${po}`;
+  return so;
+}
+
 function canVerifyDocuments(req) {
   const role = String(req.user?.role || '').toLowerCase();
   if (role === 'admin' || role === 'checker') return true;
@@ -157,9 +167,14 @@ router.get('/:salesOrderNumber/export-combined.pdf', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden for this warehouse' });
     }
     const { buffer, skippedNonPdf, mergedCount, totalListed } = await buildCombinedPdfForSalesOrder(warehouseId, so);
-    const base = exportAttachmentBaseName(so);
+    const folderRow = await dbGet(
+      `SELECT customer_po_number FROM sales_order_folders WHERE warehouse_id = ? AND TRIM(sales_order_number) = TRIM(?) LIMIT 1`,
+      [Number(warehouseId), so]
+    );
+    const base = combinedExportBaseName(so, folderRow?.customer_po_number);
+    const filename = `${base}_combined.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${base}_combined.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
     if (skippedNonPdf > 0) res.setHeader('X-Export-Skipped-NonPdf', String(skippedNonPdf));
     res.setHeader('X-Export-Merged-Pdf-Count', String(mergedCount));
     res.setHeader('X-Export-Total-Documents', String(totalListed));
@@ -184,7 +199,11 @@ router.get('/:salesOrderNumber/export-individual.zip', async (req, res) => {
     if (String(req.user.role || '').toLowerCase() !== 'admin' && !ok) {
       return res.status(403).json({ error: 'Forbidden for this warehouse' });
     }
-    const base = exportAttachmentBaseName(so);
+    const folderRow = await dbGet(
+      `SELECT customer_po_number FROM sales_order_folders WHERE warehouse_id = ? AND TRIM(sales_order_number) = TRIM(?) LIMIT 1`,
+      [Number(warehouseId), so]
+    );
+    const base = combinedExportBaseName(so, folderRow?.customer_po_number);
     await streamIndividualZipForSalesOrder(warehouseId, so, res, base);
   } catch (e) {
     if (e.code === 'EXPORT_NOT_IMPLEMENTED') return res.status(501).json({ error: e.message });

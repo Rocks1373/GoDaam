@@ -4,7 +4,7 @@ import { usersApi, warehousesApi } from '../services/api';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
-const ROLES = ['admin', 'picker', 'checker', 'viewer', 'driver'];
+const ROLES = ['admin', 'manager', 'picker', 'checker', 'viewer', 'driver'];
 
 function warehouseLabel(list, id) {
   if (id == null || id === '') return '—';

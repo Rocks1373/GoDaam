@@ -13,14 +13,26 @@ class GoogleDriveStorage {
     this._jsonPath = String(process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH || '').trim();
   }
 
-  _auth() {
-    if (!this._jsonPath) {
+  _resolveJsonPath() {
+    const raw = this._jsonPath.replace(/^["']|["']$/g, '');
+    if (!raw) {
       throw new Error('GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH is not set');
     }
-    const abs = path.isAbsolute(this._jsonPath) ? this._jsonPath : path.join(process.cwd(), this._jsonPath);
-    if (!fs.existsSync(abs)) {
-      throw new Error(`Google service account JSON not found at ${abs}`);
+    if (path.isAbsolute(raw) && fs.existsSync(raw)) return raw;
+    const candidates = [
+      path.join(process.cwd(), raw),
+      path.join(__dirname, '..', '..', raw),
+      path.join(__dirname, '..', '..', '..', raw),
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p;
     }
+    const tried = path.isAbsolute(raw) ? raw : candidates[0];
+    throw new Error(`Google service account JSON not found at ${tried}`);
+  }
+
+  _auth() {
+    const abs = this._resolveJsonPath();
     const raw = fs.readFileSync(abs, 'utf8');
     const creds = JSON.parse(raw);
     const auth = new google.auth.JWT({
@@ -37,6 +49,36 @@ class GoogleDriveStorage {
       this._drive = google.drive({ version: 'v3', auth });
     }
     return this._drive;
+  }
+
+  /** @returns {string} service account client_email from JSON */
+  getServiceAccountEmail() {
+    const abs = this._resolveJsonPath();
+    const creds = JSON.parse(fs.readFileSync(abs, 'utf8'));
+    return String(creds.client_email || '').trim();
+  }
+
+  /** Throws a clear error if the service account cannot access this folder (share / wrong id). */
+  async assertFolderAccessible(folderId, label = 'folder') {
+    const drive = this.getDrive();
+    const id = String(folderId || '').trim();
+    if (!id) throw new Error(`Google Drive ${label} id is empty`);
+    try {
+      await drive.files.get({
+        fileId: id,
+        fields: 'id, name',
+        supportsAllDrives: true,
+      });
+    } catch (e) {
+      const status = e?.code || e?.response?.status;
+      if (status === 404 || status === 403) {
+        const email = this.getServiceAccountEmail();
+        throw new Error(
+          `Google Drive ${label} not accessible (id ${id}). Share that folder in Drive with the service account as Editor: ${email || '(see JSON client_email)'}`
+        );
+      }
+      throw e;
+    }
   }
 
   async createFolderIfNotExists(parentFolderId, folderName) {

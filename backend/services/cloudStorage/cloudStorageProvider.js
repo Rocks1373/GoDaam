@@ -44,6 +44,9 @@ async function ensureWarehouseFolder(ctx) {
   if (!rootId) {
     throw new Error('GOOGLE_DRIVE_ROOT_FOLDER_ID is not configured');
   }
+  if (typeof driver.assertFolderAccessible === 'function') {
+    await driver.assertFolderAccessible(rootId, 'root folder (GOOGLE_DRIVE_ROOT_FOLDER_ID)');
+  }
   const whCode = String(ctx.warehouse_code || '').trim() || 'WH';
   return driver.createFolderIfNotExists(rootId, whCode);
 }

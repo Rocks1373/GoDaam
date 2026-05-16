@@ -1,7 +1,13 @@
 const fs = require('fs');
 const { resolveWarehouseIdForRequest, userHasWarehouseAccess } = require('../services/warehouseContext');
 const salesOrderDocumentsService = require('../services/salesOrderDocumentsService');
-const { uploadDocumentFlow, DOC_TYPES, recordScannerPipelineChecklists } = salesOrderDocumentsService;
+const {
+  uploadDocumentFlow,
+  DOC_TYPES,
+  recordScannerPipelineChecklists,
+  listDocumentsForSalesOrder,
+  computeParallelBundleStatus,
+} = salesOrderDocumentsService;
 
 function isScannerUpload(req) {
   const h = String(req.get('X-Upload-Source') || '').toLowerCase();
@@ -139,7 +145,15 @@ async function handleSalesOrderDocumentUpload(req, res, opts = {}) {
       }
     }
 
-    return res.status(201).json({ ok: true, document: doc });
+    let parallel_bundle = null;
+    try {
+      const docs = await listDocumentsForSalesOrder(warehouseId, sales_order_number);
+      parallel_bundle = computeParallelBundleStatus(docs);
+    } catch (_) {
+      /* non-fatal */
+    }
+
+    return res.status(201).json({ ok: true, document: doc, parallel_bundle });
   } catch (e) {
     if (req.file?.path) fs.unlink(req.file.path, () => {});
     const code = /not configured|GOOGLE_DRIVE|credentials/i.test(String(e.message)) ? 503 : 400;

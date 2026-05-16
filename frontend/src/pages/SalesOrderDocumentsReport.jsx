@@ -3,6 +3,49 @@ import { Link } from 'react-router-dom';
 import { salesOrderDocumentsApi } from '../services/api';
 import { useWarehouse } from '../context/WarehouseContext';
 
+function aggregateParallelBundleBySo(rows) {
+  const bySo = new Map();
+  for (const r of rows || []) {
+    const so = String(r.sales_order_number || '').trim();
+    if (!so) continue;
+    if (!bySo.has(so)) {
+      bySo.set(so, {
+        sales_order_number: so,
+        customer_po_number: null,
+        invoice: 0,
+        delivery_note: 0,
+        accounting_document: 0,
+        customer_po: 0,
+        pod: 0,
+      });
+    }
+    const o = bySo.get(so);
+    const cpo = r.customer_po_number;
+    if (cpo && !o.customer_po_number) o.customer_po_number = String(cpo).trim();
+    if (String(r.upload_status || '').toUpperCase() !== 'UPLOADED') continue;
+    const t = String(r.document_type || '').toUpperCase();
+    if (t === 'INVOICE') o.invoice += 1;
+    else if (t === 'DELIVERY_NOTE') o.delivery_note += 1;
+    else if (t === 'ACCOUNTING_DOCUMENT') o.accounting_document += 1;
+    else if (t === 'CUSTOMER_PO') o.customer_po += 1;
+    else if (t === 'POD' || t === 'SIGNED_POD') o.pod += 1;
+  }
+  const out = [];
+  for (const o of bySo.values()) {
+    const m = Math.max(o.invoice, o.delivery_note, o.accounting_document);
+    const balanced = m === 0 || (o.invoice === m && o.delivery_note === m && o.accounting_document === m);
+    const missingPo = m > 0 && o.customer_po === 0;
+    out.push({
+      ...o,
+      trio_max: m,
+      parallel_complete: balanced,
+      missing_customer_po: missingPo,
+    });
+  }
+  out.sort((a, b) => a.sales_order_number.localeCompare(b.sales_order_number));
+  return out;
+}
+
 export default function SalesOrderDocumentsReport() {
   const { selectedWarehouseId, isAllWarehouses, isAdmin } = useWarehouse();
   const [filters, setFilters] = useState({
@@ -35,6 +78,8 @@ export default function SalesOrderDocumentsReport() {
     });
     return p;
   }, [filters]);
+
+  const soSummary = useMemo(() => aggregateParallelBundleBySo(rows), [rows]);
 
   const podRows = useMemo(
     () =>
@@ -123,6 +168,54 @@ export default function SalesOrderDocumentsReport() {
           Open Sales Order Documents
         </Link>
       </div>
+      {soSummary.length > 0 ? (
+        <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50/80 p-3 text-[11px] text-gray-800">
+          <div className="font-bold text-gray-900 mb-2">
+            By sales order — uploaded file counts (invoice / delivery note / accounting must match)
+          </div>
+          <div className="overflow-x-auto max-h-48 overflow-y-auto">
+            <table className="min-w-full">
+              <thead className="text-gray-600 border-b border-gray-200">
+                <tr>
+                  <th className="text-left py-1 pr-2">SO</th>
+                  <th className="text-left py-1 pr-2">Cust PO #</th>
+                  <th className="text-right py-1 pr-2">Inv</th>
+                  <th className="text-right py-1 pr-2">DN</th>
+                  <th className="text-right py-1 pr-2">Acct</th>
+                  <th className="text-right py-1 pr-2">PO files</th>
+                  <th className="text-right py-1 pr-2">POD</th>
+                  <th className="text-left py-1">Trio</th>
+                </tr>
+              </thead>
+              <tbody>
+                {soSummary.map((s) => (
+                  <tr key={s.sales_order_number} className="border-t border-gray-100">
+                    <td className="py-1 pr-2 font-medium">{s.sales_order_number}</td>
+                    <td className="py-1 pr-2">{s.customer_po_number || '—'}</td>
+                    <td className="py-1 pr-2 text-right">{s.invoice}</td>
+                    <td className="py-1 pr-2 text-right">{s.delivery_note}</td>
+                    <td className="py-1 pr-2 text-right">{s.accounting_document}</td>
+                    <td className="py-1 pr-2 text-right">{s.customer_po}</td>
+                    <td className="py-1 pr-2 text-right">{s.pod}</td>
+                    <td className="py-1">
+                      {s.trio_max === 0 ? (
+                        <span className="text-gray-500">—</span>
+                      ) : s.parallel_complete ? (
+                        <span className="text-emerald-800">Balanced</span>
+                      ) : (
+                        <span className="text-amber-800">Incomplete</span>
+                      )}
+                      {s.missing_customer_po ? (
+                        <span className="text-blue-800"> · no cust PO file</span>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
       {podRows.length > 0 ? (
         <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50/80 p-3 text-[11px] text-gray-800">
           <div className="font-bold text-emerald-900 mb-2">POD in this result ({podRows.length})</div>

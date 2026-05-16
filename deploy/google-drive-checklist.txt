@@ -2,7 +2,7 @@ GoDam — Google Drive setup verification checklist
 ==================================================
 
 Your root folder ID (for GOOGLE_DRIVE_ROOT_FOLDER_ID):
-  1K2ykXwSUV9-f89su2kFHDZ6D16Za3J0S
+  1ImIpPYnwCXmOaMATwLiAng0-TS_18LsW
 
 Check each item. If any fails, Drive uploads / folder ensure will error or do nothing.
 
@@ -15,7 +15,7 @@ Check each item. If any fails, Drive uploads / folder ensure will error or do no
 
 [ ] 3. backend/.env (or systemd env) has BOTH:
       GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH=...
-      GOOGLE_DRIVE_ROOT_FOLDER_ID=1K2ykXwSUV9-f89su2kFHDZ6D16Za3J0S
+      GOOGLE_DRIVE_ROOT_FOLDER_ID=1ImIpPYnwCXmOaMATwLiAng0-TS_18LsW
 
 [ ] 4. Optional: STORAGE_PROVIDER=GOOGLE_DRIVE  (omit = default is GOOGLE_DRIVE)
 

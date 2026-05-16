@@ -53,6 +53,15 @@ async function canMutateTask(req, task, dn) {
   return Boolean(phoneNorm && taskPhone && phoneNorm === taskPhone);
 }
 
+function pickupForbiddenMessage(req, task, dn) {
+  const assignedId = Number(task.driver_user_id) || null;
+  const assignedName = trimStr(task.driver_name || dn?.driver_name) || 'assigned driver';
+  if (assignedId) {
+    return `Only the assigned GAPP driver (${assignedName}) may confirm pickup. Ask your warehouse manager to change the driver on the delivery note if needed.`;
+  }
+  return 'Only the driver assigned on this GAPP delivery note may confirm pickup.';
+}
+
 // GET /api/mobile/deliveries
 router.get('/', async (req, res) => {
   try {
@@ -122,7 +131,9 @@ router.post('/:id/open', async (req, res) => {
     if (!task) return res.status(404).json({ error: 'Task not found' });
     const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [task.dn_id]);
     if (!dn || dnIsLocked(dn)) return res.status(400).json({ error: 'DN locked or missing' });
-    if (!(await canMutateTask(req, task, dn))) return res.status(403).json({ error: 'Forbidden' });
+    if (!(await canMutateTask(req, task, dn))) {
+      return res.status(403).json({ error: pickupForbiddenMessage(req, task, dn), code: 'DRIVER_NOT_ASSIGNED' });
+    }
 
     const st = trimStr(task.status);
     if (st !== DS.CONFIRMED && st !== DS.DRIVER_ASSIGNED) {
@@ -186,7 +197,9 @@ router.post('/:id/confirm-pickup', async (req, res) => {
     if (!task) return res.status(404).json({ error: 'Task not found' });
     const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [task.dn_id]);
     if (!dn || dnIsLocked(dn)) return res.status(400).json({ error: 'DN locked or missing' });
-    if (!(await canMutateTask(req, task, dn))) return res.status(403).json({ error: 'Forbidden' });
+    if (!(await canMutateTask(req, task, dn))) {
+      return res.status(403).json({ error: pickupForbiddenMessage(req, task, dn), code: 'DRIVER_NOT_ASSIGNED' });
+    }
 
     const st = trimStr(task.status);
     if (st !== DS.OPENED) {
@@ -261,7 +274,9 @@ router.post('/:id/upload-pod', upload.single('file'), async (req, res) => {
     if (!task) return res.status(404).json({ error: 'Task not found' });
     const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [task.dn_id]);
     if (!dn || dnIsLocked(dn)) return res.status(400).json({ error: 'DN locked or missing' });
-    if (!(await canMutateTask(req, task, dn))) return res.status(403).json({ error: 'Forbidden' });
+    if (!(await canMutateTask(req, task, dn))) {
+      return res.status(403).json({ error: pickupForbiddenMessage(req, task, dn), code: 'DRIVER_NOT_ASSIGNED' });
+    }
 
     const st = trimStr(task.status);
     if (st !== DS.OUT) {
@@ -369,7 +384,9 @@ router.post('/:id/close', async (req, res) => {
     if (!task) return res.status(404).json({ error: 'Task not found' });
     const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [task.dn_id]);
     if (!dn || dnIsLocked(dn)) return res.status(400).json({ error: 'DN locked or missing' });
-    if (!(await canMutateTask(req, task, dn))) return res.status(403).json({ error: 'Forbidden' });
+    if (!(await canMutateTask(req, task, dn))) {
+      return res.status(403).json({ error: pickupForbiddenMessage(req, task, dn), code: 'DRIVER_NOT_ASSIGNED' });
+    }
 
     const st = trimStr(task.status);
     if (st !== DS.POD) {

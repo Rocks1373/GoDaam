@@ -56,6 +56,8 @@ export default function SalesOrderDocuments() {
   const [uploadRefs, setUploadRefs] = useState(() => refsFromUploadContext(null));
 
   const [exportBusy, setExportBusy] = useState(null);
+  const [parallelBundle, setParallelBundle] = useState(null);
+  const [driveSetup, setDriveSetup] = useState(null);
 
   const whOk = isAdmin || (!isAllWarehouses && selectedWarehouseId);
 
@@ -82,8 +84,18 @@ export default function SalesOrderDocuments() {
       setChecklist(st.checklist || []);
       setFolder(st.folder || data.folder || null);
       setUploadRefs(refsFromUploadContext(st.upload_context));
+      setParallelBundle(st.parallel_bundle || null);
+      try {
+        const ds = await salesOrderDocumentsApi.driveSetup({
+          warehouse_id: selectedWarehouseId || undefined,
+        });
+        setDriveSetup(ds);
+      } catch {
+        setDriveSetup(null);
+      }
     } catch (e) {
       toast.error(e.response?.data?.error || e.message || 'Load failed');
+      setDriveSetup(null);
     } finally {
       setLoading(false);
     }
@@ -139,6 +151,12 @@ export default function SalesOrderDocuments() {
       toast.success('Uploaded');
       setDup(null);
       setPendingForm(null);
+      if (res.parallel_bundle && !res.parallel_bundle.parallel_complete) {
+        const msg = res.parallel_bundle.reminders?.[0] || res.parallel_bundle.summary;
+        if (msg) toast.warning(msg);
+      } else if (res.parallel_bundle?.customer_po_reminder) {
+        toast.message(res.parallel_bundle.customer_po_reminder);
+      }
       await load();
     } catch (e) {
       if (e.response?.status === 409 && e.response?.data?.conflict) {
@@ -195,7 +213,9 @@ export default function SalesOrderDocuments() {
     if (!so || !whOk) return;
     setExportBusy('pdf');
     try {
-      await salesOrderDocumentsApi.downloadCombinedPdf(so, selectedWarehouseId);
+      await salesOrderDocumentsApi.downloadCombinedPdf(so, selectedWarehouseId, {
+        customerPoNumber: folder?.customer_po_number,
+      });
       toast.success('Combined PDF downloaded');
     } catch (e) {
       toast.error(e.message || 'Download failed');
@@ -209,7 +229,9 @@ export default function SalesOrderDocuments() {
     if (!so || !whOk) return;
     setExportBusy('zip');
     try {
-      await salesOrderDocumentsApi.downloadIndividualZip(so, selectedWarehouseId);
+      await salesOrderDocumentsApi.downloadIndividualZip(so, selectedWarehouseId, {
+        customerPoNumber: folder?.customer_po_number,
+      });
       toast.success('ZIP downloaded');
     } catch (e) {
       toast.error(e.message || 'Download failed');
@@ -233,6 +255,79 @@ export default function SalesOrderDocuments() {
       {!whOk ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-xs p-3">
           Select a single warehouse in the toolbar (admins: avoid “All warehouses”) to load and upload documents.
+        </div>
+      ) : null}
+
+      {whOk && isAdmin && isAllWarehouses ? (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-900 text-[11px] p-3 mb-3">
+          Admin: toolbar is on <strong>All warehouses</strong> — Drive uploads use default warehouse <strong>WH1</strong>.
+          Select <strong>WH1</strong> in the toolbar so folder links match what you upload.
+        </div>
+      ) : null}
+
+      {whOk && driveSetup && !driveSetup.root_accessible ? (
+        <div className="rounded-lg border border-red-300 bg-red-50 text-red-950 text-[11px] p-3 mb-3 space-y-2">
+          <div className="font-bold">Google Drive root not reachable by the app</div>
+          <p>{driveSetup.root_error || 'Share the root folder with the service account.'}</p>
+          {driveSetup.service_account_email ? (
+            <p>
+              Share folder <code className="text-[10px]">{driveSetup.root_folder_id}</code> with:{' '}
+              <strong>{driveSetup.service_account_email}</strong> (Editor), then restart <code className="text-[10px]">./dev.sh</code>.
+            </p>
+          ) : null}
+          {driveSetup.warehouse_drive_url ? (
+            <p className="text-gray-800">
+              Existing SO folders may already be here (old setup):{' '}
+              <a className="underline font-semibold" href={driveSetup.warehouse_drive_url} target="_blank" rel="noreferrer">
+                Open {driveSetup.warehouse_code || 'warehouse'} folder in Drive
+              </a>
+            </p>
+          ) : null}
+          {driveSetup.where_folders_go ? <p className="text-gray-800">{driveSetup.where_folders_go}</p> : null}
+        </div>
+      ) : null}
+
+      {whOk && driveSetup?.root_accessible && driveSetup.where_folders_go ? (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50/90 text-emerald-950 text-[11px] p-3 mb-3">
+          {driveSetup.where_folders_go}
+          {driveSetup.warehouse_drive_url ? (
+            <>
+              {' '}
+              <a className="underline font-semibold" href={driveSetup.warehouse_drive_url} target="_blank" rel="noreferrer">
+                Open {driveSetup.warehouse_code} in Drive
+              </a>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+
+      {whOk && activeSo && parallelBundle && !parallelBundle.parallel_complete ? (
+        <div className="rounded-lg border border-amber-300 bg-amber-50/95 text-amber-950 text-[11px] p-3 mb-3 space-y-1.5">
+          <div className="font-bold">Parallel documents incomplete (invoice · delivery note · accounting)</div>
+          <p className="text-gray-800">{parallelBundle.summary}</p>
+          <ul className="list-disc pl-4 space-y-0.5 text-gray-800">
+            {(parallelBundle.reminders || []).map((r, i) => (
+              <li key={i}>{r}</li>
+            ))}
+          </ul>
+          <p className="text-[10px] text-gray-600">
+            Uploaded counts — invoices:{' '}
+            <strong>{parallelBundle.counts?.invoice ?? 0}</strong>, delivery notes:{' '}
+            <strong>{parallelBundle.counts?.delivery_note ?? 0}</strong>, accounting:{' '}
+            <strong>{parallelBundle.counts?.accounting_document ?? 0}</strong>
+            {parallelBundle.counts?.customer_po != null ? (
+              <>
+                , customer PO files: <strong>{parallelBundle.counts.customer_po}</strong>
+              </>
+            ) : null}
+            . Combined PDF order: accounting → invoice → delivery note → customer PO → POD (non-PDF pages are skipped).
+          </p>
+        </div>
+      ) : null}
+
+      {whOk && activeSo && parallelBundle?.parallel_complete && parallelBundle?.customer_po_reminder ? (
+        <div className="rounded-lg border border-blue-200 bg-blue-50/90 text-blue-950 text-[11px] p-3 mb-3">
+          {parallelBundle.customer_po_reminder}
         </div>
       ) : null}
 

@@ -3,11 +3,18 @@ const { promisify } = require('util');
 const db = require('../db');
 const { requireAdmin, requireAuth } = require('../middleware/auth');
 const { listWarehousesForUser, userHasWarehouseAccess } = require('../services/warehouseContext');
+const { assignWarehouseManager, listWarehouseStaff } = require('../services/warehouseManager');
 
 const router = express.Router();
 const dbRun = promisify(db.run.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const dbAll = promisify(db.all.bind(db));
+
+const WAREHOUSE_SELECT = `SELECT w.id, w.warehouse_code, w.warehouse_name, w.warehouse_number, w.location,
+       w.manager_name, w.manager_user_id, w.remarks, w.is_active, w.created_at, w.updated_at,
+       u.username AS manager_username, u.full_name AS manager_full_name, u.email AS manager_email
+       FROM warehouses w
+       LEFT JOIN users u ON u.id = w.manager_user_id`;
 
 /** Current user: warehouses they may operate in (for web/mobile selector). */
 router.get('/mine', requireAuth, async (req, res) => {
@@ -15,8 +22,12 @@ router.get('/mine', requireAuth, async (req, res) => {
     const userId = req.user.sub;
     const role = req.user.role;
     const rows = await listWarehousesForUser(userId, role);
-    const u = await dbGet(`SELECT default_warehouse_id FROM users WHERE id = ?`, [userId]);
-    res.json({ warehouses: rows || [], default_warehouse_id: u?.default_warehouse_id ?? null });
+    const u = await dbGet(`SELECT default_warehouse_id, role FROM users WHERE id = ?`, [userId]);
+    res.json({
+      warehouses: rows || [],
+      default_warehouse_id: u?.default_warehouse_id ?? null,
+      role: String(u?.role || role || '').toLowerCase(),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -24,11 +35,20 @@ router.get('/mine', requireAuth, async (req, res) => {
 
 router.get('/', requireAuth, requireAdmin, async (_req, res) => {
   try {
-    const rows = await dbAll(
-      `SELECT id, warehouse_code, warehouse_name, warehouse_number, location, manager_name, remarks, is_active, created_at, updated_at
-       FROM warehouses ORDER BY warehouse_code`
-    );
+    const rows = await dbAll(`${WAREHOUSE_SELECT} ORDER BY w.warehouse_code`);
     res.json(rows || []);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/:id/staff', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const warehouseId = Number(req.params.id);
+    if (!warehouseId) return res.status(400).json({ error: 'Invalid id' });
+    const staff = await listWarehouseStaff(warehouseId);
+    const wh = await dbGet(`${WAREHOUSE_SELECT} WHERE w.id = ?`, [warehouseId]);
+    res.json({ warehouse: wh, staff: staff || [] });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -46,7 +66,7 @@ router.post('/', requireAuth, requireAdmin, async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 1), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       [code, name, regNo, location || null, manager_name || null, remarks || null, is_active != null ? (is_active ? 1 : 0) : 1]
     );
-    const row = await dbGet(`SELECT * FROM warehouses WHERE warehouse_code = ?`, [code]);
+    const row = await dbGet(`${WAREHOUSE_SELECT} WHERE w.warehouse_code = ?`, [code]);
     res.status(201).json(row);
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -85,8 +105,22 @@ router.patch('/:id', requireAuth, requireAdmin, async (req, res) => {
         id,
       ]
     );
-    const row = await dbGet(`SELECT * FROM warehouses WHERE id = ?`, [id]);
+    const row = await dbGet(`${WAREHOUSE_SELECT} WHERE w.id = ?`, [id]);
     res.json(row);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** Assign manager user to warehouse (admin). Body: { user_id } */
+router.post('/:id/manager', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const warehouseId = Number(req.params.id);
+    const uid = Number(req.body?.user_id);
+    if (!warehouseId || !uid) return res.status(400).json({ error: 'warehouse id and user_id required' });
+    const row = await assignWarehouseManager(warehouseId, uid);
+    const staff = await listWarehouseStaff(warehouseId);
+    res.json({ ok: true, warehouse: row, staff });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
