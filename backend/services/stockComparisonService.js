@@ -263,9 +263,15 @@ function sapPhysicalForFilter(agg, materialKey, slSet) {
   };
 }
 
+/** Qty from SAP Stock upload for ticked storage locations only (e.g. 1004 alone → q1004). */
+function stockUploadQtyForSelectedSl(agg, sapPart, partNum, slSet) {
+  const mk = resolveAggMaterialKey(agg, sapPart, partNum);
+  if (!mk) return 0;
+  return sapPhysicalForFilter(agg, mk, slSet).physical;
+}
+
 function mainStockSapPhysicalTotals(agg, sapPart, partNum, slSet) {
   const mk = resolveAggMaterialKey(agg, sapPart, partNum);
-
   if (!mk) {
     return {
       sap_physical_qty: 0,
@@ -297,6 +303,44 @@ function mainStockSapPhysicalTotals(agg, sapPart, partNum, slSet) {
   };
 }
 
+/** Classic stock comparison row (full columns); match on adjusted main vs SAP SL sum. */
+function buildClassicMainVsSapRow(ms, agg, slSet, pickedByMaterial) {
+  const mainAvail = Number(ms.available_qty) || 0;
+  const totals = mainStockSapPhysicalTotals(agg, ms.sap_part_number, ms.part_number, slSet);
+  const sapPhysical = totals.sap_physical_qty;
+  const sapCompare = buildMainSapCompareFields(
+    mainAvail,
+    pickedByMaterial,
+    ms.part_number,
+    ms.sap_part_number,
+    sapPhysical
+  );
+  return {
+    part_number: ms.part_number,
+    sap_part_number: ms.sap_part_number,
+    description: ms.description,
+    vendor_number: ms.vendor_number,
+    vendor_name: ms.vendor_name,
+    main_stock_available_qty: mainAvail,
+    picked_not_delivered_qty: sapCompare.picked_not_delivered_qty,
+    compare_result_qty: sapCompare.compare_result_qty,
+    main_stock_compare_qty: sapCompare.compare_result_qty,
+    adjusted_main_qty: sapCompare.compare_result_qty,
+    sap_physical_qty: sapPhysical,
+    stock_upload_qty: sapPhysical,
+    sap_transit_1002: totals.sap_transit_1002,
+    sap_qty_1003: totals.sap_qty_1003,
+    sap_qty_1004: totals.sap_qty_1004,
+    sap_qty_1007: totals.sap_qty_1007,
+    difference: sapCompare.difference,
+    main_vs_sap_difference: sapCompare.main_vs_sap_difference,
+    qty_difference: sapCompare.qty_difference,
+    sap_balance: sapCompare.sap_balance,
+    comparison_result: sapCompare.comparison_result,
+    status: sapCompare.comparison_result,
+  };
+}
+
 function pickMainStockQtyForSapMaterial(agg, msList, materialKeyFromSap) {
   const target = resolveAggMaterialKey(agg, materialKeyFromSap, '');
   if (!target) return 0;
@@ -315,8 +359,11 @@ function passesRowFilters(row, status) {
     row.difference != null && row.difference !== ''
       ? Number(row.difference)
       : Number(row.main_vs_sap_difference) || 0;
-  const mainQ = Number(row.main_stock_available_qty ?? row.main_stock_qty ?? 0) || 0;
-  const sapQ = Number(row.sap_physical_qty ?? 0) || 0;
+  const mainQ =
+    Number(
+      row.compare_result_qty ?? row.adjusted_main_qty ?? row.main_stock_compare_qty ?? row.main_stock_available_qty ?? row.main_stock_qty ?? 0
+    ) || 0;
+  const sapQ = Number(row.stock_upload_qty ?? row.sap_physical_qty ?? 0) || 0;
   const comparison_result = row.comparison_result ?? row.status;
   const sap_balance = row.sap_balance;
   const rack_balance = row.rack_balance;
@@ -396,6 +443,144 @@ function rackQtyForMain(ms, rackLines) {
   return s;
 }
 
+/** Material keys for picked-not-delivered lookup (leading-zero / hyphen variants). */
+function materialKeysForPart(partNum, sapPart) {
+  const keys = new Set();
+  for (const raw of [partNum, sapPart]) {
+    const t = String(raw ?? '').trim();
+    if (!t) continue;
+    const k = normalizeMaterialKey(t);
+    if (!k) continue;
+    keys.add(k);
+    if (k.includes('-')) keys.add(k.replace(/-/g, ''));
+  }
+  return keys;
+}
+
+/** Max bucket qty across part/SAP keys (avoids double-count when keys alias the same material). */
+function qtyFromPickedNotDeliveredMap(pickedByMaterial, partNum, sapPart) {
+  const keys = materialKeysForPart(partNum, sapPart);
+  if (!keys.size) return 0;
+  let best = 0;
+  for (const k of keys) {
+    const v = Number(pickedByMaterial.get(k)) || 0;
+    if (v > best) best = v;
+  }
+  return best;
+}
+
+function addPickedToMaterialMap(map, partNum, sapPart, qty) {
+  const q = Number(qty) || 0;
+  if (q <= EPS) return;
+  const canon =
+    normalizeMaterialKey(partNum) ||
+    normalizeMaterialKey(sapPart) ||
+    '';
+  if (!canon) return;
+  const next = (map.get(canon) || 0) + q;
+  map.set(canon, next);
+  if (canon.includes('-')) map.set(canon.replace(/-/g, ''), next);
+}
+
+/**
+ * Picked qty on outbound orders not yet marked delivered (still on hand for SAP compare).
+ * @returns {Promise<Map<string, number>>}
+ */
+async function loadPickedNotDeliveredByMaterial(db, warehouseId) {
+  const dbAll = promisify(db.all.bind(db));
+  const params = [];
+  let sql = `
+    SELECT
+      TRIM(COALESCE(NULLIF(TRIM(oi.part_number), ''), TRIM(oi.material), '')) AS part_number,
+      TRIM(COALESCE(oi.sap_part_number, '')) AS sap_part_number,
+      SUM(
+        COALESCE(
+          (
+            SELECT SUM(pt.picked_qty)
+            FROM picked_transactions pt
+            WHERE pt.outbound_item_id = oi.id
+              AND COALESCE(pt.outbound_bom_requirement_id, 0) = 0
+          ),
+          oi.picked_qty,
+          0
+        )
+      ) AS picked_qty
+    FROM outbound_items oi
+    INNER JOIN outbound_orders o ON o.id = oi.outbound_id
+    LEFT JOIN delivered_outbounds de ON de.outbound_id = o.id
+    WHERE de.id IS NULL
+      AND LOWER(TRIM(COALESCE(o.status, ''))) NOT IN ('delivered', 'cancelled')`;
+  if (warehouseId != null && Number(warehouseId) > 0) {
+    sql += ` AND o.warehouse_id = ?`;
+    params.push(Number(warehouseId));
+  }
+  sql += `
+    GROUP BY
+      TRIM(COALESCE(NULLIF(TRIM(oi.part_number), ''), TRIM(oi.material), '')),
+      TRIM(COALESCE(oi.sap_part_number, ''))`;
+  const rows = await dbAll(sql, params).catch(() => []);
+  const map = new Map();
+  for (const r of rows || []) {
+    const picked = Number(r.picked_qty) || 0;
+    if (picked <= EPS) continue;
+    addPickedToMaterialMap(map, r.part_number, r.sap_part_number, picked);
+  }
+  return map;
+}
+
+/**
+ * Result = main stock total − picked not delivered.
+ * Difference = result − SAP stock (ticked SL sum). Matching when difference is 0.
+ */
+function buildMainSapCompareFields(mainAvail, pickedByMaterial, partNum, sapPart, sapPhysical) {
+  const picked_not_delivered_qty = qtyFromPickedNotDeliveredMap(pickedByMaterial, partNum, sapPart);
+  const compare_result_qty = (Number(mainAvail) || 0) - picked_not_delivered_qty;
+  const sapQ = Number(sapPhysical) || 0;
+  const difference = compare_result_qty - sapQ;
+  const sap_balance = qtyBalanceRemark(compare_result_qty, sapQ);
+  const comparison_result = nearZero(difference) ? 'Matching' : 'Mismatching';
+  return {
+    picked_not_delivered_qty,
+    compare_result_qty,
+    main_stock_compare_qty: compare_result_qty,
+    adjusted_main_qty: compare_result_qty,
+    stock_upload_qty: sapQ,
+    main_vs_sap_difference: difference,
+    difference,
+    qty_difference: difference,
+    sap_balance,
+    comparison_result,
+    status: comparison_result,
+  };
+}
+
+/** API row for main vs stock-upload compare (minimal fields for UI/export). */
+function mainVsStockUploadRow({
+  part_number,
+  sap_part_number,
+  description,
+  mainAvail,
+  sapCompare,
+  sapPhysical,
+}) {
+  return {
+    part_number,
+    sap_part_number: sap_part_number ?? null,
+    description: description ?? '',
+    main_stock_available_qty: mainAvail,
+    picked_not_delivered_qty: sapCompare.picked_not_delivered_qty,
+    main_stock_compare_qty: sapCompare.main_stock_compare_qty,
+    adjusted_main_qty: sapCompare.adjusted_main_qty,
+    stock_upload_qty: sapPhysical,
+    main_vs_sap_difference: sapCompare.main_vs_sap_difference,
+    difference: sapCompare.difference,
+    qty_difference: sapCompare.qty_difference,
+    comparison_result: sapCompare.comparison_result,
+    status: sapCompare.status,
+    sap_balance: sapCompare.sap_balance,
+  };
+}
+
 /** SAP upload material # used for lookup (blank if no batch match). */
 function resolveSapLookupMaterial(agg, sapPart, partNum) {
   const mkRes = resolveAggMaterialKey(agg, sapPart, partNum);
@@ -409,8 +594,9 @@ function passesUnifiedFilters(row, status) {
   if (f === 'all') return true;
   const dSap = Number(row.main_vs_sap_difference) || 0;
   const dRack = Number(row.main_vs_rack_difference) || 0;
-  const mainQ = Number(row.main_stock_available_qty) || 0;
-  const sapQ = Number(row.sap_physical_qty) || 0;
+  const mainQ =
+    Number(row.compare_result_qty ?? row.adjusted_main_qty ?? row.main_stock_compare_qty ?? row.main_stock_available_qty) || 0;
+  const sapQ = Number(row.stock_upload_qty ?? row.sap_physical_qty ?? 0) || 0;
   const diffFilters = new Set([
     'diff_gt_0',
     'difference_gt_0',
@@ -568,6 +754,7 @@ async function getStockComparison(db, query) {
   });
 
   const rackLines = await loadRackLines(db, whId);
+  const pickedNotDeliveredByMaterial = await loadPickedNotDeliveredByMaterial(db, whId);
 
   const attachMeta = (partial) => ({
     ...partial,
@@ -578,46 +765,23 @@ async function getStockComparison(db, query) {
     storage_locs,
     storage_location: storage_location_label,
     comparison_note:
-      'Vendor filter picks main rows by vendor key (e.g. 1103). SAP rows included when material_group/vendor matches that key, or when SAP material matches any filtered main part/SAP part (so unrestricted qty still compares if SAP line vendor codes differ). Quantities prefer unrestricted_qty then stock_qty; SL filter applies to summed buckets.',
+      'Result = main stock total − picked not delivered. Difference = result − SAP stock (ticked SL). Matching when difference = 0; less or excess = Mismatching.',
+    comparison_formula:
+      'result = main − picked; difference = result − sap_stock; match when difference = 0',
+    picked_not_delivered_scope: whId != null ? `warehouse_id=${whId}` : 'all_warehouses',
   });
 
   const rows = [];
 
   if (comparison_type === 'main_unified' || comparison_type === 'main_vs_all') {
     for (const ms of msList) {
+      const row = buildClassicMainVsSapRow(ms, agg, slSet, pickedNotDeliveredByMaterial);
       const mainAvail = Number(ms.available_qty) || 0;
-      const totals = mainStockSapPhysicalTotals(agg, ms.sap_part_number, ms.part_number, slSet);
-      const sapPhysical = totals.sap_physical_qty;
-      const diffSap = mainAvail - sapPhysical;
       const rackAvail = rackQtyForMain(ms, rackLines);
       const diffRack = mainAvail - rackAvail;
-      const sap_balance = qtyBalanceRemark(mainAvail, sapPhysical);
-      const rack_balance = qtyBalanceRemark(mainAvail, rackAvail);
-      const comparison_result =
-        nearZero(diffSap) && nearZero(diffRack) ? 'Matching' : 'Mismatching';
-      const sapLookupMaterial = resolveSapLookupMaterial(agg, ms.sap_part_number, ms.part_number);
-      const row = {
-        part_number: ms.part_number,
-        sap_part_number: ms.sap_part_number,
-        sap_lookup_material: sapLookupMaterial,
-        description: ms.description,
-        vendor_number: ms.vendor_number,
-        vendor_name: ms.vendor_name,
-        main_stock_available_qty: mainAvail,
-        sap_qty_on_main: ms.sap_qty != null ? Number(ms.sap_qty) : null,
-        sap_physical_qty: sapPhysical,
-        sap_transit_1002: totals.sap_transit_1002,
-        sap_qty_1003: totals.sap_qty_1003,
-        sap_qty_1004: totals.sap_qty_1004,
-        sap_qty_1007: totals.sap_qty_1007,
-        main_vs_sap_difference: diffSap,
-        sap_balance,
-        stock_by_rack_available_qty: rackAvail,
-        main_vs_rack_difference: diffRack,
-        rack_balance,
-        comparison_result,
-        status: comparison_result,
-      };
+      row.stock_by_rack_available_qty = rackAvail;
+      row.main_vs_rack_difference = diffRack;
+      row.rack_balance = qtyBalanceRemark(mainAvail, rackAvail);
       if (!searchHaystack(row, search)) continue;
       if (!matchesPartSapSearch(row, search_part_number, search_sap_part_number)) continue;
       if (!passesUnifiedFilters(row, status)) continue;
@@ -631,7 +795,7 @@ async function getStockComparison(db, query) {
         batch_id: batchId,
         filter: status,
         note:
-          'One row per main stock item. With vendor filter: SAP rows restricted to same material_group/vendor key (e.g. 1103). SAP qty uses selected SL filter; rack sums stock_by_rack by part/SAP part.',
+          'One row per main stock item. Result = Matching only when (main available − picked not delivered) equals stock upload qty.',
       }),
     };
   }
@@ -676,28 +840,7 @@ async function getStockComparison(db, query) {
   if (comparison_type === 'main_vs_sap' && comparison_base === 'main_stock') {
     for (const ms of msList) {
       const mainAvail = Number(ms.available_qty) || 0;
-      const totals = mainStockSapPhysicalTotals(agg, ms.sap_part_number, ms.part_number, slSet);
-      const sapPhysical = totals.sap_physical_qty;
-      const diff = mainAvail - sapPhysical;
-      const sap_balance = qtyBalanceRemark(mainAvail, sapPhysical);
-      const comparison_result = nearZero(diff) ? 'Matching' : 'Mismatching';
-      const row = {
-        part_number: ms.part_number,
-        sap_part_number: ms.sap_part_number,
-        description: ms.description,
-        vendor_number: ms.vendor_number,
-        vendor_name: ms.vendor_name,
-        main_stock_available_qty: mainAvail,
-        sap_physical_qty: sapPhysical,
-        sap_transit_1002: totals.sap_transit_1002,
-        sap_qty_1003: totals.sap_qty_1003,
-        sap_qty_1004: totals.sap_qty_1004,
-        sap_qty_1007: totals.sap_qty_1007,
-        difference: diff,
-        sap_balance,
-        comparison_result,
-        status: comparison_result,
-      };
+      const row = buildClassicMainVsSapRow(ms, agg, slSet, pickedNotDeliveredByMaterial);
       if (!searchHaystack(row, search)) continue;
       if (!matchesPartSapSearch(row, search_part_number, search_sap_part_number)) continue;
       if (!passesRowFilters(row, status)) continue;
@@ -736,22 +879,31 @@ async function getStockComparison(db, query) {
       const t = sapPhysicalForFilter(agg, mk, slSet);
       const sapPhysical = t.physical;
       const mainQty = pickMainStockQtyForSapMaterial(agg, msList, mk);
-      const diff = mainQty - sapPhysical;
-      const sap_balance = qtyBalanceRemark(mainQty, sapPhysical);
-      const comparison_result = nearZero(diff) ? 'Matching' : 'Mismatching';
+      const sapCompare = buildMainSapCompareFields(
+        mainQty,
+        pickedNotDeliveredByMaterial,
+        mk,
+        mk,
+        sapPhysical
+      );
       const info = agg.byMaterial.get(mk) || {};
       const sample = (agg.rows || []).find((x) => resolveAggMaterialKey(agg, x.material, '') === mk);
       const row = {
+        ...buildClassicMainVsSapRow(
+          {
+            part_number: sample?.material ?? mk,
+            sap_part_number: sample?.material ?? mk,
+            description: info.description || sample?.description || '',
+            vendor_number: info.vendor_number || sample?.vendor_number || '',
+            vendor_name: '',
+            available_qty: mainQty,
+          },
+          agg,
+          slSet,
+          pickedNotDeliveredByMaterial
+        ),
         sap_material: sample?.material ?? mk,
-        description: info.description || sample?.description || '',
-        sap_physical_qty: sapPhysical,
         main_stock_qty: mainQty,
-        difference: diff,
-        sap_balance,
-        comparison_result,
-        status: comparison_result,
-        material_group: info.material_group || sample?.material_group || '',
-        vendor_number: info.vendor_number || sample?.vendor_number || '',
       };
 
       if (!searchHaystack({ ...row, part_number: row.sap_material, sap_part_number: row.sap_material }, search)) {
@@ -790,4 +942,7 @@ module.exports = {
   resolveComparisonBatchId,
   loadSapAggregates,
   refreshMainStockSapQtyFromBatch,
+  qtyFromPickedNotDeliveredMap,
+  buildMainSapCompareFields,
+  addPickedToMaterialMap,
 };

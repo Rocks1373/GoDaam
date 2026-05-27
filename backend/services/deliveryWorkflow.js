@@ -43,11 +43,10 @@ function asNumber(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Locked only after final delivery — pre-delivery "close" is no longer used in the web flow. */
 function dnIsLocked(dn) {
   if (!dn) return true;
-  if (Number(dn.is_closed) === 1) return true;
-  const ds = String(dn.delivery_status || '').toLowerCase();
-  if (ds === 'closed') return true;
+  if (String(dn.status || '').toLowerCase() === 'delivered') return true;
   return false;
 }
 

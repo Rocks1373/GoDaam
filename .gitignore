@@ -49,6 +49,7 @@ releases/*.apk
 
 # Local-only exports, temp tool output, and ad-hoc documents
 local-nonessential-archive/
+delete/
 
 # Local tooling / logs
 .godam/

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Barcode, Cpu, Database, Loader2, Network, Server, Truck, Warehouse } from 'lucide-react';
+import { GoogleLogin } from '@react-oauth/google';
+import { Barcode, Cpu, Database, Eye, EyeOff, Loader2, Network, Server, Truck, Warehouse } from 'lucide-react';
 import { authApi } from '../services/api';
 import ThemeSwitcher from '../components/ThemeSwitcher';
+
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID || '';
 
 /** Huawei Streamlit (etc.) sends users here with ?redirect=<absolute streamlit URL>. */
 function isAllowedAppRedirect(urlStr) {
@@ -196,6 +199,7 @@ export default function Login({ onLoggedIn }) {
   const [searchParams] = useSearchParams();
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('admin123');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -225,34 +229,73 @@ export default function Login({ onLoggedIn }) {
     setLoading(true);
     try {
       const res = await authApi.login(username, password);
-      authApi.setToken(res.token, res.expires_at);
-
-      const redirectRaw = searchParams.get('redirect');
-      if (redirectRaw && isAllowedAppRedirect(redirectRaw)) {
-        const u = new URL(redirectRaw);
-        u.searchParams.set('godam_token', res.token);
-        window.location.replace(u.toString());
-        return;
-      }
-
-      let nextUser = res.user;
-      try {
-        const me = await authApi.me();
-        if (me?.user && Number(me.user.id) > 0) nextUser = me.user;
-      } catch {
-        /* keep login payload */
-      }
-      if (!nextUser || typeof nextUser !== 'object' || !Number(nextUser.id) || Number(nextUser.id) <= 0) {
-        setError('Sign-in succeeded but your profile could not be loaded. Please try again or contact an admin.');
-        authApi.logout();
-        return;
-      }
-
-      onLoggedIn?.(nextUser);
-      navigate('/dashboard', { replace: true });
+      await finishLogin(res);
     } catch (err) {
-      const msg = err?.response?.data?.error || err.message || 'Login failed';
+      const st = err?.response?.data?.status;
+      const msg = err?.response?.data?.message || err?.response?.data?.error || err.message || 'Login failed';
+      if (st === 'PENDING_APPROVAL' || st === 'REJECTED' || st === 'BLOCKED') {
+        navigate('/auth/pending', { replace: true, state: { status: st, message: msg } });
+        return;
+      }
       setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const finishLogin = async (res) => {
+    authApi.setToken(res.token, res.expires_at);
+    const redirectRaw = searchParams.get('redirect');
+    if (redirectRaw && isAllowedAppRedirect(redirectRaw)) {
+      const u = new URL(redirectRaw);
+      u.searchParams.set('godam_token', res.token);
+      window.location.replace(u.toString());
+      return;
+    }
+    let nextUser = res.user;
+    try {
+      const me = await authApi.me();
+      if (me?.user && Number(me.user.id) > 0) nextUser = me.user;
+    } catch {
+      /* keep login payload */
+    }
+    if (!nextUser || !Number(nextUser.id)) {
+      setError('Profile could not be loaded.');
+      authApi.logout();
+      return;
+    }
+    onLoggedIn?.(nextUser);
+    navigate('/dashboard', { replace: true });
+  };
+
+  const onGoogleSuccess = async (credentialResponse) => {
+    const credential = credentialResponse?.credential;
+    if (!credential) return;
+    setError('');
+    setLoading(true);
+    try {
+      const res = await authApi.googleLogin(credential);
+      if (res?.token) {
+        await finishLogin(res);
+        return;
+      }
+      if (res?.status === 'PENDING_APPROVAL' || res?.success === false) {
+        sessionStorage.setItem('godam_google_id_token', credential);
+        navigate('/auth/pending', {
+          replace: true,
+          state: { status: res.status || 'PENDING_APPROVAL', message: res.message },
+        });
+        return;
+      }
+    } catch (err) {
+      const st = err?.response?.data?.status;
+      const msg = err?.response?.data?.message || err?.response?.data?.error || err.message;
+      if (st === 'PENDING_APPROVAL' || st === 'REJECTED' || st === 'BLOCKED') {
+        sessionStorage.setItem('godam_google_id_token', credential);
+        navigate('/auth/pending', { replace: true, state: { status: st, message: msg } });
+        return;
+      }
+      setError(msg || 'Google sign-in failed');
     } finally {
       setLoading(false);
     }
@@ -303,6 +346,32 @@ export default function Login({ onLoggedIn }) {
               </p>
             </div>
 
+              {GOOGLE_CLIENT_ID ? (
+                <div className="mb-6 flex flex-col items-stretch gap-3">
+                  <p className="text-center text-[12px] font-semibold uppercase tracking-[0.2em] text-theme-fg-secondary">
+                    Sign in with Google
+                  </p>
+                  <div className="flex justify-center rounded-xl border border-theme-border bg-[#1a1a1a] px-4 py-3 shadow-sm">
+                    <GoogleLogin
+                      onSuccess={onGoogleSuccess}
+                      onError={() => setError('Google sign-in was cancelled or failed')}
+                      theme="filled_black"
+                      size="large"
+                      text="continue_with"
+                      shape="pill"
+                      width="300"
+                    />
+                  </div>
+                  <p className="text-center text-[11px] text-theme-fg-muted uppercase tracking-widest">
+                    or sign in with username
+                  </p>
+                </div>
+              ) : (
+                <p className="mb-4 text-center text-[11px] text-amber-700">
+                  Google Sign-In is not configured. Set VITE_GOOGLE_WEB_CLIENT_ID and restart the frontend dev server.
+                </p>
+              )}
+
               <form className="space-y-[1.15rem]" onSubmit={submit} noValidate>
                 <div>
                   <label htmlFor="login-user" className="mb-1.5 block text-left text-[11px] font-bold uppercase tracking-[0.14em] text-theme-fg-muted sm:text-[12px]">
@@ -322,16 +391,28 @@ export default function Login({ onLoggedIn }) {
                   <label htmlFor="login-pass" className="mb-1.5 block text-left text-[11px] font-bold uppercase tracking-[0.14em] text-theme-fg-muted sm:text-[12px]">
                     Password
                   </label>
-                  <input
-                    id="login-pass"
-                    name="password"
-                    className="godam-login-field"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    autoComplete="current-password"
-                    disabled={loading}
-                  />
+                  <div className="relative">
+                    <input
+                      id="login-pass"
+                      name="password"
+                      className="godam-login-field pr-11"
+                      type={showPassword ? 'text' : 'password'}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      autoComplete="current-password"
+                      disabled={loading}
+                    />
+                    <button
+                      type="button"
+                      className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-theme-fg-muted transition-colors hover:text-theme-fg disabled:opacity-50"
+                      onClick={() => setShowPassword((v) => !v)}
+                      disabled={loading}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      aria-pressed={showPassword}
+                    >
+                      {showPassword ? <EyeOff className="h-4 w-4" aria-hidden /> : <Eye className="h-4 w-4" aria-hidden />}
+                    </button>
+                  </div>
                 </div>
 
                 {error ? (

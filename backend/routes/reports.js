@@ -5,6 +5,12 @@ const XLSX = require('xlsx');
 const db = require('../db');
 const { getStockComparison } = require('../services/stockComparisonService');
 const { assertExplicitWarehouseParamAllowed, resolveReadWarehouseScope } = require('../services/warehouseContext');
+const { requirePermission } = require('../middleware/auth');
+const {
+  listOrderPickStatus,
+  getOrderPickStatusDetail,
+  detailToExcelRows,
+} = require('../services/orderPickStatusReport');
 
 const router = express.Router();
 const dbAll = promisify(db.all.bind(db));
@@ -82,8 +88,57 @@ async function runOutboundPicks(req, res) {
 router.get('/outbound-picks', runOutboundPicks);
 router.get('/outbound', runOutboundPicks);
 
+async function putawayFilterSuggestions(dbAll, field, q, limit, warehouseId) {
+  const lim = Math.min(50, Math.max(1, limit || 30));
+  const like = q ? `%${q}%` : '%';
+  const wh = warehouseId ? ` AND b.warehouse_id = ? ` : '';
+  const whParams = warehouseId ? [warehouseId] : [];
+
+  if (field === 'lpo') {
+    const rows = await dbAll(
+      `SELECT DISTINCT TRIM(b.lpo) AS v FROM inbound_batches b
+       JOIN inbound_items i ON i.inbound_batch_id = b.id
+       WHERE TRIM(COALESCE(b.lpo,'')) != '' AND b.lpo LIKE ? ${wh}
+       ORDER BY v LIMIT ?`,
+      [like, ...whParams, lim]
+    );
+    return (rows || []).map((r) => r.v).filter(Boolean);
+  }
+  if (field === 'sap_po') {
+    const rows = await dbAll(
+      `SELECT DISTINCT TRIM(b.sap_po) AS v FROM inbound_batches b
+       JOIN inbound_items i ON i.inbound_batch_id = b.id
+       WHERE TRIM(COALESCE(b.sap_po,'')) != '' AND b.sap_po LIKE ? ${wh}
+       ORDER BY v LIMIT ?`,
+      [like, ...whParams, lim]
+    );
+    return (rows || []).map((r) => r.v).filter(Boolean);
+  }
+  if (field === 'invoice') {
+    const rows = await dbAll(
+      `SELECT DISTINCT TRIM(b.invoice_number) AS v FROM inbound_batches b
+       JOIN inbound_items i ON i.inbound_batch_id = b.id
+       WHERE TRIM(COALESCE(b.invoice_number,'')) != '' AND b.invoice_number LIKE ? ${wh}
+       ORDER BY v LIMIT ?`,
+      [like, ...whParams, lim]
+    );
+    return (rows || []).map((r) => r.v).filter(Boolean);
+  }
+  if (field === 'part') {
+    const rows = await dbAll(
+      `SELECT DISTINCT TRIM(i.part_number) AS v FROM inbound_items i
+       JOIN inbound_batches b ON b.id = i.inbound_batch_id
+       WHERE TRIM(COALESCE(i.part_number,'')) != '' AND i.part_number LIKE ? ${wh}
+       ORDER BY v LIMIT ?`,
+      [like, ...whParams, lim]
+    );
+    return (rows || []).map((r) => r.v).filter(Boolean);
+  }
+  return null;
+}
+
 function inboundPutawaySql(req, scope) {
-  const { batch, vendor, from, to, status } = req.query;
+  const { batch, vendor, from, to, status, lpo, sap_po, invoice, part_number, part } = req.query;
   const params = [];
   let sql = `
       SELECT
@@ -92,6 +147,9 @@ function inboundPutawaySql(req, scope) {
         b.vendor_name,
         b.upload_date,
         b.status AS batch_status,
+        b.lpo,
+        b.sap_po,
+        b.invoice_number,
         i.id AS inbound_item_id,
         i.part_number,
         i.sap_part_number,
@@ -130,9 +188,45 @@ function inboundPutawaySql(req, scope) {
     sql += ` AND i.status = ?`;
     params.push(status);
   }
+  const lpoQ = String(lpo || '').trim();
+  const sapPoQ = String(sap_po || '').trim();
+  const invQ = String(invoice || '').trim();
+  const partQ = String(part_number || part || '').trim();
+  if (lpoQ) {
+    sql += ` AND COALESCE(b.lpo,'') LIKE ?`;
+    params.push(`%${lpoQ}%`);
+  }
+  if (sapPoQ) {
+    sql += ` AND COALESCE(b.sap_po,'') LIKE ?`;
+    params.push(`%${sapPoQ}%`);
+  }
+  if (invQ) {
+    sql += ` AND COALESCE(b.invoice_number,'') LIKE ?`;
+    params.push(`%${invQ}%`);
+  }
+  if (partQ) {
+    sql += ` AND i.part_number LIKE ?`;
+    params.push(`%${partQ}%`);
+  }
   sql += ` ORDER BY b.id DESC, i.part_number`;
   return { sql, params };
 }
+
+router.get('/inbound/filter-suggestions', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const field = String(req.query.field || '').trim().toLowerCase();
+    const q = String(req.query.q || '').trim();
+    const lim = Math.min(50, Math.max(1, Number(req.query.limit) || 30));
+    const wid = scope.mode === 'one' && scope.warehouseId ? scope.warehouseId : null;
+    const values = await putawayFilterSuggestions(dbAll, field, q, lim, wid);
+    if (values === null) return res.status(400).json({ error: 'field must be lpo, sap_po, invoice, or part' });
+    res.json(values);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 router.get('/inbound', async (req, res) => {
   try {
@@ -146,6 +240,18 @@ router.get('/inbound', async (req, res) => {
   }
 });
 
+/** Calendar date for DN filters (dn_date stored as TEXT; created_at is timestamp). */
+const DN_REPORT_DATE_SQL = `COALESCE(
+  CASE WHEN NULLIF(TRIM(COALESCE(dn.dn_date, '')), '') IS NOT NULL THEN date(dn.dn_date) END,
+  date(dn.created_at)
+)`;
+
+/** Match outbound the same way as delivery-notes / document-flow (DN key may be outbound_number or sales "delivery"). */
+const DELIVERY_REPORT_OUTBOUND_JOIN = `(
+  TRIM(COALESCE(o.outbound_number,'')) = TRIM(COALESCE(dn.outbound_number,''))
+  OR TRIM(COALESCE(o.delivery,'')) = TRIM(COALESCE(dn.outbound_number,''))
+)`;
+
 function deliveryWhereClause(q) {
   const params = [];
   const fragments = [];
@@ -153,31 +259,36 @@ function deliveryWhereClause(q) {
     fragments.push(clause);
     params.push(...vals);
   };
+  /** Postgres LIKE is case-sensitive; SQLite LIKE is ASCII-insensitive — align behavior. */
+  const likeI = (expr) => `LOWER(${expr}) LIKE LOWER(?)`;
 
-  if (q.date_from) add(`date(COALESCE(dn.dn_date, dn.created_at)) >= date(?)`, q.date_from);
-  if (q.date_to) add(`date(COALESCE(dn.dn_date, dn.created_at)) <= date(?)`, q.date_to);
-  if (q.outbound_number) add(`COALESCE(dn.outbound_number,'') LIKE ?`, `%${String(q.outbound_number).trim()}%`);
+  if (q.date_from) add(`${DN_REPORT_DATE_SQL} >= date(?)`, q.date_from);
+  if (q.date_to) add(`${DN_REPORT_DATE_SQL} <= date(?)`, q.date_to);
+  if (q.outbound_number) add(likeI(`COALESCE(dn.outbound_number,'')`), `%${String(q.outbound_number).trim()}%`);
   if (q.gapp_po) {
-    add(`(COALESCE(dn.gapp_po,'') LIKE ? OR COALESCE(o.gapp_po,'') LIKE ?)`, `%${String(q.gapp_po).trim()}%`, `%${String(q.gapp_po).trim()}%`);
+    const pat = `%${String(q.gapp_po).trim()}%`;
+    add(`(${likeI(`COALESCE(dn.gapp_po,'')`)} OR ${likeI(`COALESCE(o.gapp_po,'')`)})`, pat, pat);
   }
   if (q.customer_reference) {
+    const pat = `%${String(q.customer_reference).trim()}%`;
     add(
-      `(COALESCE(dn.customer_po,'') LIKE ? OR COALESCE(o.customer_reference,'') LIKE ? OR COALESCE(o.customer_po_number,'') LIKE ?)`,
-      `%${String(q.customer_reference).trim()}%`,
-      `%${String(q.customer_reference).trim()}%`,
-      `%${String(q.customer_reference).trim()}%`
+      `(${likeI(`COALESCE(dn.customer_po,'')`)} OR ${likeI(`COALESCE(o.customer_reference,'')`)} OR ${likeI(`COALESCE(o.customer_po_number,'')`)})`,
+      pat,
+      pat,
+      pat
     );
   }
   if (q.invoice_number) {
-    add(`(COALESCE(dn.invoice_number,'') LIKE ? OR COALESCE(o.invoice_number,'') LIKE ?)`, `%${String(q.invoice_number).trim()}%`, `%${String(q.invoice_number).trim()}%`);
+    const pat = `%${String(q.invoice_number).trim()}%`;
+    add(`(${likeI(`COALESCE(dn.invoice_number,'')`)} OR ${likeI(`COALESCE(o.invoice_number,'')`)})`, pat, pat);
   }
-  if (q.customer_name) add(`COALESCE(dn.customer_name,'') LIKE ?`, `%${String(q.customer_name).trim()}%`);
-  if (q.sold_to) add(`COALESCE(o.sold_to,'') LIKE ?`, `%${String(q.sold_to).trim()}%`);
-  if (q.transportation_type) add(`COALESCE(dn.transportation_type,'') LIKE ?`, `%${String(q.transportation_type).trim()}%`);
-  if (q.carrier_name) add(`COALESCE(dn.carrier_name,'') LIKE ?`, `%${String(q.carrier_name).trim()}%`);
-  if (q.driver_name) add(`COALESCE(dn.driver_name,'') LIKE ?`, `%${String(q.driver_name).trim()}%`);
-  if (q.truck_type) add(`COALESCE(dn.truck_type,'') LIKE ?`, `%${String(q.truck_type).trim()}%`);
-  if (q.status) add(`COALESCE(dn.status,'') LIKE ?`, `%${String(q.status).trim()}%`);
+  if (q.customer_name) add(likeI(`COALESCE(dn.customer_name,'')`), `%${String(q.customer_name).trim()}%`);
+  if (q.sold_to) add(likeI(`COALESCE(o.sold_to,'')`), `%${String(q.sold_to).trim()}%`);
+  if (q.transportation_type) add(likeI(`COALESCE(dn.transportation_type,'')`), `%${String(q.transportation_type).trim()}%`);
+  if (q.carrier_name) add(likeI(`COALESCE(dn.carrier_name,'')`), `%${String(q.carrier_name).trim()}%`);
+  if (q.driver_name) add(likeI(`COALESCE(dn.driver_name,'')`), `%${String(q.driver_name).trim()}%`);
+  if (q.truck_type) add(likeI(`COALESCE(dn.truck_type,'')`), `%${String(q.truck_type).trim()}%`);
+  if (q.status) add(likeI(`COALESCE(dn.status,'')`), `%${String(q.status).trim()}%`);
 
   return { fragments, params };
 }
@@ -191,8 +302,9 @@ router.get('/delivery', async (req, res) => {
     const frags = [...fragments];
     const pms = [...params];
     if (scope.mode === 'one' && scope.warehouseId) {
-      frags.push('dn.warehouse_id = ?');
-      pms.push(scope.warehouseId);
+      // Many rows have outbound warehouse on `o` but stale/NULL on `dn`; include both.
+      frags.push('(dn.warehouse_id = ? OR o.warehouse_id = ?)');
+      pms.push(scope.warehouseId, scope.warehouseId);
     }
     const whereExtra = frags.length ? ` AND ${frags.join(' AND ')}` : '';
 
@@ -237,7 +349,7 @@ router.get('/delivery', async (req, res) => {
           CASE WHEN lower(COALESCE(dn.status,'')) = 'delivered' THEN 'Yes' ELSE 'No' END AS pod_attached,
           COALESCE(dn.deliver_to_remarks, dn.transportation_remarks, '') AS remarks
         FROM delivery_notes dn
-        LEFT JOIN outbound_orders o ON TRIM(COALESCE(o.outbound_number,'')) = TRIM(COALESCE(dn.outbound_number,''))
+        LEFT JOIN outbound_orders o ON ${DELIVERY_REPORT_OUTBOUND_JOIN}
         WHERE 1=1
         ${whereExtra}
         ORDER BY dn.id DESC
@@ -281,7 +393,7 @@ router.get('/delivery', async (req, res) => {
         i.item_no AS item_no
       FROM delivery_notes dn
       INNER JOIN delivery_note_items i ON i.dn_id = dn.id
-      LEFT JOIN outbound_orders o ON TRIM(COALESCE(o.outbound_number,'')) = TRIM(COALESCE(dn.outbound_number,''))
+      LEFT JOIN outbound_orders o ON ${DELIVERY_REPORT_OUTBOUND_JOIN}
       WHERE 1=1
       ${whereExtra}
       ORDER BY dn.id DESC, i.item_no ASC, i.id ASC
@@ -672,6 +784,355 @@ router.get('/audit-logs/export-excel', async (req, res) => {
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="audit-logs.xlsx"');
     res.send(buf);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Rack updates from stock_in (mobile + web). */
+router.get('/rack-update', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const { from, to, part_number, rack_location, source_type, user_id } = req.query;
+    const params = [];
+    let sql = `
+      SELECT si.id, si.transaction_date, si.part_number, si.sap_part_number, si.description,
+             si.rack_location, si.qty_in, si.source_type, si.reference_no, si.remarks, si.warehouse_id,
+             w.warehouse_code
+      FROM stock_in si
+      LEFT JOIN warehouses w ON w.id = si.warehouse_id
+      WHERE si.source_type IN ('MOBILE_RACK_UPDATE', 'MOBILE_ADD_DURING_PICK', 'WEB_STOCK_IN')
+         OR si.source_type LIKE 'MOBILE%'
+    `;
+    if (scope.mode !== 'all') {
+      sql += ' AND si.warehouse_id = ? ';
+      params.push(scope.warehouseId);
+    }
+    if (from) {
+      sql += ' AND date(si.transaction_date) >= date(?) ';
+      params.push(from);
+    }
+    if (to) {
+      sql += ' AND date(si.transaction_date) <= date(?) ';
+      params.push(to);
+    }
+    if (part_number) {
+      sql += ' AND si.part_number LIKE ? ';
+      params.push(`%${part_number}%`);
+    }
+    if (rack_location) {
+      sql += ' AND si.rack_location LIKE ? ';
+      params.push(`%${rack_location}%`);
+    }
+    if (source_type) {
+      sql += ' AND si.source_type = ? ';
+      params.push(source_type);
+    }
+    sql += ' ORDER BY si.transaction_date DESC, si.id DESC LIMIT 5000';
+    const rows = await dbAll(sql, params);
+    res.json({ rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Picking activity by rack (picked_transactions + stock context). */
+router.get('/picking-by-rack', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const { from, to, outbound_number, part_number, rack_location, picker } = req.query;
+    const params = [];
+    let sql = `
+      SELECT pt.id, pt.picked_at, pt.user_name AS picker, pt.material AS part_number, pt.sap_part_number,
+             pt.description, pt.rack_location, pt.picked_qty, pt.picked_method,
+             o.outbound_number, o.delivery, oi.required_qty, oi.picked_qty AS order_picked_qty
+      FROM picked_transactions pt
+      JOIN outbound_orders o ON o.id = pt.outbound_order_id
+      JOIN outbound_items oi ON oi.id = pt.outbound_item_id
+      WHERE 1=1
+    `;
+    if (scope.mode !== 'all') {
+      sql += ' AND o.warehouse_id = ? ';
+      params.push(scope.warehouseId);
+    }
+    if (from) {
+      sql += ' AND date(pt.picked_at) >= date(?) ';
+      params.push(from);
+    }
+    if (to) {
+      sql += ' AND date(pt.picked_at) <= date(?) ';
+      params.push(to);
+    }
+    if (outbound_number) {
+      sql += ' AND (o.outbound_number LIKE ? OR o.delivery LIKE ?) ';
+      params.push(`%${outbound_number}%`, `%${outbound_number}%`);
+    }
+    if (part_number) {
+      sql += ' AND (pt.material LIKE ? OR pt.sap_part_number LIKE ?) ';
+      params.push(`%${part_number}%`, `%${part_number}%`);
+    }
+    if (rack_location) {
+      sql += ' AND pt.rack_location LIKE ? ';
+      params.push(`%${rack_location}%`);
+    }
+    if (picker) {
+      sql += ' AND pt.user_name LIKE ? ';
+      params.push(`%${picker}%`);
+    }
+    sql += ' ORDER BY pt.picked_at DESC, pt.id DESC LIMIT 5000';
+    const rows = await dbAll(sql, params);
+    res.json({ rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Document tracking report — same data as GET /api/sales-order-documents/report */
+router.get('/document-tracking', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    if (scope.mode === 'all') {
+      return res.status(400).json({ error: 'Select a single warehouse for document tracking' });
+    }
+    const wid = scope.warehouseId;
+    const clauses = ['d.warehouse_id = ?'];
+    const params = [wid];
+    const q = (k) => String(req.query[k] || '').trim();
+    if (q('sales_order_number')) {
+      clauses.push(`TRIM(d.sales_order_number) = TRIM(?)`);
+      params.push(q('sales_order_number'));
+    }
+    if (q('outbound_number')) {
+      clauses.push(`TRIM(COALESCE(d.outbound_number,'')) LIKE ?`);
+      params.push(`%${q('outbound_number')}%`);
+    }
+    if (q('invoice_number')) {
+      clauses.push(`TRIM(COALESCE(d.invoice_number,'')) LIKE ?`);
+      params.push(`%${q('invoice_number')}%`);
+    }
+    if (q('dn_number')) {
+      clauses.push(`TRIM(COALESCE(d.dn_number,'')) LIKE ?`);
+      params.push(`%${q('dn_number')}%`);
+    }
+    if (q('customer_po_number')) {
+      clauses.push(`TRIM(COALESCE(d.customer_po_number,'')) LIKE ?`);
+      params.push(`%${q('customer_po_number')}%`);
+    }
+    if (q('document_type')) {
+      clauses.push(`d.document_type = ?`);
+      params.push(q('document_type').toUpperCase());
+    }
+    if (q('upload_status')) {
+      clauses.push(`d.upload_status = ?`);
+      params.push(q('upload_status').toUpperCase());
+    }
+    if (q('verification_status')) {
+      clauses.push(`d.verification_status = ?`);
+      params.push(q('verification_status').toUpperCase());
+    }
+    if (q('date_from')) {
+      clauses.push(`d.uploaded_at >= ?`);
+      params.push(q('date_from'));
+    }
+    if (q('date_to')) {
+      clauses.push(`d.uploaded_at <= ?`);
+      params.push(`${q('date_to')}T23:59:59.999Z`);
+    }
+    const sql = `SELECT d.*, u.username AS uploaded_by_username
+       FROM sales_order_documents d
+       LEFT JOIN users u ON u.id = d.uploaded_by
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY d.uploaded_at DESC, d.id DESC
+       LIMIT 5000`;
+    const rows = await dbAll(sql, params);
+    res.json({ rows: rows || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/document-tracking/export-excel', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    if (scope.mode === 'all') {
+      return res.status(400).json({ error: 'Select a single warehouse for document tracking export' });
+    }
+    const wid = scope.warehouseId;
+    const clauses = ['d.warehouse_id = ?'];
+    const params = [wid];
+    const q = (k) => String(req.query[k] || '').trim();
+    if (q('sales_order_number')) {
+      clauses.push(`TRIM(d.sales_order_number) = TRIM(?)`);
+      params.push(q('sales_order_number'));
+    }
+    if (q('outbound_number')) {
+      clauses.push(`TRIM(COALESCE(d.outbound_number,'')) LIKE ?`);
+      params.push(`%${q('outbound_number')}%`);
+    }
+    const sql = `SELECT d.sales_order_number, d.outbound_number, d.invoice_number, d.dn_number, d.customer_po_number,
+      d.document_type, d.stored_file_name, d.cloud_web_url, d.upload_status, d.verification_status,
+      d.upload_source, d.source_pdf_name, d.selected_pages_json, u.username AS uploaded_by, d.uploaded_at
+      FROM sales_order_documents d
+      LEFT JOIN users u ON u.id = d.uploaded_by
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY d.uploaded_at DESC LIMIT 5000`;
+    const rows = await dbAll(sql, params);
+    const ws = XLSX.utils.json_to_sheet(rows || []);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Document Tracking');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="document-tracking.xlsx"');
+    res.send(buf);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Outbound document workflow status report */
+router.get('/document-workflow', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    if (scope.mode === 'all') {
+      return res.status(400).json({ error: 'Select a single warehouse for document workflow report' });
+    }
+    const { listWorkflows } = require('../services/outboundDocumentWorkflowService');
+    const rows = await listWorkflows(scope.warehouseId, {
+      sales_order_number: req.query.sales_order_number,
+      outbound_number: req.query.outbound_number,
+      invoice_number: req.query.invoice_number,
+      workflow_status: req.query.workflow_status,
+      missing_only: req.query.missing_only === '1' || String(req.query.missing_only).toLowerCase() === 'true',
+    });
+    res.json({ rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/document-workflow/export-excel', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    if (scope.mode === 'all') {
+      return res.status(400).json({ error: 'Select a single warehouse for export' });
+    }
+    const { listWorkflows } = require('../services/outboundDocumentWorkflowService');
+    const rows = await listWorkflows(scope.warehouseId, {
+      sales_order_number: req.query.sales_order_number,
+      outbound_number: req.query.outbound_number,
+      invoice_number: req.query.invoice_number,
+      workflow_status: req.query.workflow_status,
+      missing_only: req.query.missing_only === '1',
+    });
+    const flat = (rows || []).map((r) => ({
+      sales_order_number: r.sales_order_number,
+      outbound_number: r.outbound_number,
+      invoice_number: r.invoice_number,
+      dn_number: r.dn_number,
+      accounting_document_number: r.accounting_document_number,
+      customer_po_number: r.customer_po_number,
+      customer_po_status: r.customer_po_status,
+      invoice_status: r.invoice_status,
+      dn_status: r.dn_status,
+      pod_status: r.pod_status,
+      accounting_status: r.accounting_status,
+      workflow_status: r.workflow_status,
+      missing_documents: (r.missing_documents || []).join('; '),
+      drive_folder_link: r.drive_folder_link,
+    }));
+    const ws = XLSX.utils.json_to_sheet(flat);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Document Workflow');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="document-workflow.xlsx"');
+    res.send(buf);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Order-wise pick status — list for dropdown filters */
+router.get('/order-pick-status', requirePermission('can_view_order_pick_status'), async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const rows = await listOrderPickStatus({
+      dbAll,
+      scope,
+      orderType: req.query.order_type,
+      status: req.query.status,
+      search: req.query.search,
+      vendorNumber: req.query.vendor_number,
+      dateFrom: req.query.date_from,
+      dateTo: req.query.date_to,
+    });
+    res.json({ orders: rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Order-wise pick status — Excel export (register before :ref detail) */
+router.get(
+  '/order-pick-status/:ref/export-excel',
+  requirePermission('can_export_order_pick_status'),
+  async (req, res) => {
+    try {
+      const scope = await readScopeOrError(req, res);
+      if (!scope) return;
+      const detail = await getOrderPickStatusDetail({
+        dbGet,
+        dbAll,
+        ref: req.params.ref,
+        scope,
+        orderType: req.query.order_type,
+      });
+      if (!detail) return res.status(404).json({ error: 'Order not found' });
+      const rows = detailToExcelRows(detail);
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.json_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, ws, 'Pick Status');
+      const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      const slug = String(req.params.ref).replace(/[^\w.-]+/g, '_');
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="order-pick-status-${slug}.xlsx"`);
+      res.send(buf);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+/** Order-wise pick status — full detail for modal */
+router.get('/order-pick-status/:ref', requirePermission('can_view_order_pick_status'), async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const detail = await getOrderPickStatusDetail({
+      dbGet,
+      dbAll,
+      ref: req.params.ref,
+      scope,
+      orderType: req.query.order_type,
+    });
+    if (!detail) return res.status(404).json({ error: 'Order not found' });
+    const role = String(req.user?.role || '').toLowerCase();
+    detail.permissions_hint = {
+      can_edit:
+        role === 'admin' ||
+        role === 'checker' ||
+        !!(req.user?.permissions?.can_edit_pick_details),
+      can_print: !!(req.user?.permissions?.can_print_order_pick_status) || role === 'admin',
+      can_export: !!(req.user?.permissions?.can_export_order_pick_status) || role === 'admin',
+    };
+    res.json(detail);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

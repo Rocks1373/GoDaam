@@ -2,6 +2,7 @@ const express = require('express');
 const { promisify } = require('util');
 
 const db = require('../db');
+const { insertRowById } = require('../utils/dbRun');
 const { requirePermission } = require('../middleware/auth');
 
 const router = express.Router();
@@ -61,14 +62,15 @@ router.post('/customers/:customer_number/locations', requirePermission('can_acce
 
     if (!address) return res.status(400).json({ error: 'address is required' });
 
-    await dbRun(
+    const row = await insertRowById(
+      db,
+      dbGet,
       `INSERT INTO customer_locations
         (customer_id, label, address, gps, contact_person, contact_number, contact_person_2, contact_number_2, is_active, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      [c.id, label || null, address, gps || null, contact_person || null, contact_number || null, contact_person_2 || null, contact_number_2 || null]
+      [c.id, label || null, address, gps || null, contact_person || null, contact_number || null, contact_person_2 || null, contact_number_2 || null],
+      'customer_locations'
     );
-
-    const row = await dbGet(`SELECT * FROM customer_locations WHERE id = last_insert_rowid()`);
     res.status(201).json(row);
   } catch (e) {
     res.status(500).json({ error: e.message });

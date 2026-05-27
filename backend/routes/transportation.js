@@ -5,8 +5,10 @@ const multer = require('multer');
 const { promisify } = require('util');
 const XLSX = require('xlsx');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const { sanitizeTextForPdfWinAnsi } = require('../lib/pdfWinAnsiText');
 
 const db = require('../db');
+const { insertRowById } = require('../utils/dbRun');
 const {
   normCarrierType,
   computeAutoWarning,
@@ -114,12 +116,14 @@ router.post('/carriers', requireTransportManage, async (req, res) => {
     if (!carrier_name) return res.status(400).json({ error: 'carrier_name is required' });
     if (!CARRIER_TYPES.includes(carrier_type)) return res.status(400).json({ error: 'Invalid carrier_type' });
 
-    await dbRun(
+    const row = await insertRowById(
+      db,
+      dbGet,
       `INSERT INTO transportation_carriers (carrier_type, carrier_name, contact_person, phone_number, email, remarks, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      [carrier_type, carrier_name, contact_person, phone_number, email, remarks, status]
+      [carrier_type, carrier_name, contact_person, phone_number, email, remarks, status],
+      'transportation_carriers'
     );
-    const row = await dbGet(`SELECT * FROM transportation_carriers WHERE id = last_insert_rowid()`);
     res.status(201).json(row);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -377,7 +381,9 @@ router.post('/drivers', requireTransportManage, async (req, res) => {
       carrier_name: c.carrier_name,
     };
     const auto_warning = computeAutoWarning(draft);
-    await dbRun(
+    const row = await insertRowById(
+      db,
+      dbGet,
       `INSERT INTO transportation_drivers (
         carrier_id, carrier_type, carrier_name, driver_name, driver_phone,
         iqama_number, iqama_expiry, license_number, license_expiry, national_id,
@@ -407,9 +413,9 @@ router.post('/drivers', requireTransportManage, async (req, res) => {
         data.remarks,
         data.status,
         auto_warning,
-      ]
+      ],
+      'transportation_drivers'
     );
-    const row = await dbGet(`SELECT * FROM transportation_drivers WHERE id = last_insert_rowid()`);
     res.status(201).json(mapDriverRow(row));
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -499,12 +505,14 @@ router.post('/drivers/:driver_id/attachments', requireTransportManage, (req, res
       }
       if (!req.file) return res.status(400).json({ error: 'file is required' });
       const rel = path.join(UPLOAD_REL, String(driver_id), req.file.filename).replace(/\\/g, '/');
-      await dbRun(
+      const row = await insertRowById(
+        db,
+        dbGet,
         `INSERT INTO transportation_driver_attachments (driver_id, attachment_type, file_name, file_path, file_mime_type, uploaded_at, uploaded_by)
          VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)`,
-        [driver_id, attachment_type, req.file.originalname || req.file.filename, rel, req.file.mimetype, req.user.sub]
+        [driver_id, attachment_type, req.file.originalname || req.file.filename, rel, req.file.mimetype, req.user.sub],
+        'transportation_driver_attachments'
       );
-      const row = await dbGet(`SELECT * FROM transportation_driver_attachments WHERE id = last_insert_rowid()`);
       res.status(201).json(row);
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -585,7 +593,13 @@ router.get('/drivers/:driver_id/export/pdf', requireTransportManage, async (req,
     ];
     let y = 780;
     for (const line of lines) {
-      cover.drawText(line, { x: 50, y, size: line.startsWith('Transportation') ? 16 : 11, font, color: rgb(0, 0, 0) });
+      cover.drawText(sanitizeTextForPdfWinAnsi(line), {
+        x: 50,
+        y,
+        size: line.startsWith('Transportation') ? 16 : 11,
+        font,
+        color: rgb(0, 0, 0),
+      });
       y -= line ? 22 : 12;
     }
 

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Sync local repo to production path on the VPS (SSH host from ~/.ssh/config).
-# Preserves server DBs and uploads; skips huge dev-only trees.
+# CODE ONLY — does NOT touch production PostgreSQL:
+#   • Excludes .env, backend/warehouse.db (server uses /etc/godaam/backend.env + DATABASE_URL)
+#   • --deploy = rsync + frontend build + systemctl restart godaam-backend
+#   • Restart runs additive schema-migrate only (new columns/tables), never wipes rows
+# Never run on the VPS: npm run fresh-db, wipe-db, migrate:sqlite-to-pg, or seed:* against production DATABASE_URL
 #
 # Usage (from repo root):
 #   bash deploy/vps/rsync-to-godaam-vps.sh              # copy files only
@@ -9,6 +13,7 @@
 #   bash deploy/vps/rsync-to-godaam-vps.sh --quick      # copy + restart API only (skip vite build)
 #   bash deploy/vps/rsync-to-godaam-vps.sh --install --deploy   # also npm ci (deps / lockfile changed)
 #   bash deploy/vps/rsync-to-godaam-vps.sh --venv --deploy      # refresh Huawei GoDam Python venv on VPS
+#   bash deploy/vps/rsync-to-godaam-vps.sh --ai --deploy        # AI microservice (Gemini + Ollama qwen2.5:1.5b)
 #   bash deploy/vps/rsync-to-godaam-vps.sh --nginx              # refresh nginx TLS site (includes /huawei-godam-app proxy)
 #
 # Android APK: bash scripts/build-android-apk.sh (writes backend/uploads/mobile/GoDam.apk),
@@ -26,6 +31,7 @@ DO_QUICK=0
 DO_INSTALL=0
 DO_VENV=0
 DO_NGINX=0
+DO_AI=0
 
 usage() {
   sed -n '1,18p' "$0" | tail -n +2
@@ -39,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --install) DO_INSTALL=1; shift ;;
     --venv) DO_VENV=1; shift ;;
     --nginx) DO_NGINX=1; shift ;;
+    --ai) DO_AI=1; shift ;;
     -h | --help) usage ;;
     *)
       echo "Unknown option: $1 (try --help)" >&2
@@ -49,7 +56,7 @@ done
 
 rsync -avz \
   --exclude '.claude/' \
-  --exclude 'Deepak_test_1/' \
+  --exclude 'delete/' \
   --exclude '.codex-tmp/' \
   --exclude 'openclaw-videos/' \
   --exclude '.git/' \
@@ -60,6 +67,7 @@ rsync -avz \
   --exclude 'godam-mobile/android/build/' \
   --exclude 'godam-mobile/android/app/build/' \
   --exclude 'godam-mobile/ios/Pods/' \
+  --exclude '.venv/' \
   --exclude 'plugins/GoDam-1.0/.venv/' \
   --exclude 'GoDam/GoDam-1.0/.venv/' \
   --exclude 'backend/warehouse.db' \
@@ -93,12 +101,13 @@ fi
 
 echo "Deploying on ${SSH_HOST} (MODE=$([[ "$DO_QUICK" -eq 1 ]] && echo quick || echo full))..."
 
-ssh -o BatchMode=yes "${SSH_HOST}" bash -s "$APP" "$DO_INSTALL" "$DO_VENV" "$DO_QUICK" <<'REMOTE_EOF'
+ssh -o BatchMode=yes "${SSH_HOST}" bash -s "$APP" "$DO_INSTALL" "$DO_VENV" "$DO_QUICK" "$DO_AI" <<'REMOTE_EOF'
 set -euo pipefail
 APP_PATH="$1"
 DO_INSTALL="$2"
 DO_VENV="$3"
 DO_QUICK="$4"
+DO_AI="$5"
 cd "$APP_PATH"
 chmod 755 "$APP_PATH" "$APP_PATH/frontend" "$APP_PATH/frontend/dist" 2>/dev/null || true
 
@@ -119,9 +128,46 @@ fi
 chown -R www-data:www-data "$APP_PATH/backend" "$APP_PATH/frontend/dist" 2>/dev/null || true
 chmod 755 "$APP_PATH" "$APP_PATH/frontend" "$APP_PATH/frontend/dist" 2>/dev/null || true
 
-systemctl restart godaam-backend
+if [[ "$DO_AI" == "1" ]] && [[ -f "$APP_PATH/deploy/vps/setup-ai-service-vps.sh" ]]; then
+  echo "Setting up AI microservice on VPS…"
+  bash "$APP_PATH/deploy/vps/setup-ai-service-vps.sh"
+else
+  systemctl restart godaam-backend
+fi
 sleep 1
 systemctl is-active godaam-backend
+if [[ "$DO_AI" == "1" ]]; then
+  systemctl is-active godaam-ai-service 2>/dev/null || echo "WARN: godaam-ai-service not active"
+fi
+
+echo ""
+echo "PostgreSQL check (same DATABASE_URL as production API — password masked):"
+node -e "
+require('dotenv').config({ path: '/etc/godaam/backend.env' });
+const url = String(process.env.DATABASE_URL || '').trim();
+if (!url) {
+  console.log('  WARNING: DATABASE_URL missing in /etc/godaam/backend.env');
+  process.exit(0);
+}
+const masked = url.replace(/:([^:@/]+)@/, ':***@');
+const { Client } = require('pg');
+(async () => {
+  const c = new Client({ connectionString: url });
+  await c.connect();
+  let users = '?';
+  try {
+    const r = await c.query('SELECT COUNT(*)::int AS c FROM users');
+    users = r.rows[0].c;
+  } catch (e) {
+    users = 'table missing?';
+  }
+  const db = await c.query('SELECT current_database() AS db');
+  console.log('  DB:', db.rows[0].db, '| users:', users, '|', masked);
+  await c.end();
+})().catch((e) => {
+  console.log('  DB check failed:', e.message);
+});
+" 2>/dev/null || echo "  (skip: run from $APP_PATH/backend if pg module path differs)"
 REMOTE_EOF
 
 echo "Deploy finished on ${SSH_HOST}:${APP} (godaam-backend restarted)."

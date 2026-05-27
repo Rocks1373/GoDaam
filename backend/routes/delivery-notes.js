@@ -4,7 +4,9 @@ const path = require('path');
 const { promisify } = require('util');
 
 const db = require('../db');
+const { insertRowById } = require('../utils/dbRun');
 const { requirePermission, requireAdmin, requireAnyPermission } = require('../middleware/auth');
+const { requireMarkDelivered } = require('../middleware/outboundAccess');
 const { markOutboundDelivered } = require('../services/markOutboundDelivered');
 const {
   DS,
@@ -19,14 +21,62 @@ const { notifyWebDeliveryStaff } = require('../services/deliveryNotifications');
 const { sendExpoPushToUserIds } = require('../services/notificationService');
 const { logAudit } = require('../services/auditLogger');
 const { loadOutboundPickFootprint } = require('../services/outboundPickFootprint');
+const { getDefaultWarehouseId } = require('../services/warehouseContext');
+const { writeDeliveryNotePdfToTemp } = require('../services/deliveryNotePdfService');
+const {
+  resolveDnLineMasterFields,
+  enrichDnItemsFromMasterData,
+} = require('../services/dnMasterDataLookup');
+const multer = require('multer');
+const {
+  getDeliveryNotePodUploadContext,
+  uploadDeliveryNotePodFromWeb,
+} = require('../services/salesOrderDocumentsService');
+
+const POD_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'pod');
+if (!fs.existsSync(POD_UPLOAD_DIR)) fs.mkdirSync(POD_UPLOAD_DIR, { recursive: true });
+const podUploadMulter = multer({
+  dest: POD_UPLOAD_DIR,
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok =
+      /\.(pdf|jpe?g|png)$/i.test(file.originalname || '') ||
+      /^(image\/|application\/pdf)/i.test(file.mimetype || '');
+    cb(ok ? null : new Error('Only PDF, JPG, PNG allowed'), ok);
+  },
+});
 
 const router = express.Router();
 const dbAll = promisify(db.all.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const dbRun = promisify(db.run.bind(db));
 
+const podUploadPerms = ['can_upload_pod', 'can_upload_outbound', 'can_confirm_picked'];
+const dnWritePerms = ['can_upload_outbound', 'can_confirm_picked'];
+const dnDownloadPerms = [
+  'can_upload_outbound',
+  'can_confirm_picked',
+  'can_view_delivery_notes',
+  'can_download_documents',
+];
+const requireDnWrite = requireAnyPermission(dnWritePerms);
+
 function trimStr(v) {
   return String(v ?? '').trim();
+}
+
+function canonicalOutboundRef(order, requested) {
+  const req = trimStr(requested);
+  if (req) return req;
+  return trimStr(order?.outbound_number) || trimStr(order?.delivery) || '';
+}
+
+function parseDnDateOnly(raw) {
+  const s = trimStr(raw);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return null;
 }
 
 async function warehouseIdForOutboundNumber(outboundNum) {
@@ -36,31 +86,50 @@ async function warehouseIdForOutboundNumber(outboundNum) {
   return o?.warehouse_id != null ? Number(o.warehouse_id) : null;
 }
 
-/** Main stock row for DN lines: UOM/description source of truth; match trimmed part or SAP. */
-async function lookupMainStockForDnLine(partNumber, sapPartNumber) {
-  const pn = trimStr(partNumber);
-  const sap = trimStr(sapPartNumber);
-  if (!pn && !sap) return null;
-  return dbGet(
-    `SELECT description, uom, sap_part_number
-     FROM main_stock
-     WHERE (? != '' AND TRIM(COALESCE(part_number, '')) = TRIM(?))
-        OR (? != '' AND TRIM(COALESCE(sap_part_number, '')) = TRIM(?))
-     LIMIT 1`,
-    [pn, pn, sap, sap]
-  );
+/** Prefer outbound order warehouse, then DN header warehouse (for UOM lookup from main_stock). */
+async function resolveWarehouseIdForDnRow(dn) {
+  if (!dn) return null;
+  const ob = trimStr(dn.outbound_number);
+  let wid = dn.warehouse_id != null ? Number(dn.warehouse_id) : null;
+  if (!Number.isFinite(wid) || wid <= 0) wid = null;
+  if (ob) {
+    const fromOrder = await warehouseIdForOutboundNumber(ob);
+    if (fromOrder && Number.isFinite(fromOrder) && fromOrder > 0) return fromOrder;
+  }
+  return wid;
 }
 
-/** Overlay UOM from main_stock so print/API always match current master (stored DN row may be stale). */
-async function enrichDnItemsUomFromMainStock(items) {
-  const rows = items || [];
-  const out = [];
-  for (const it of rows) {
-    const ms = await lookupMainStockForDnLine(it.part_number, it.sap_part_number);
-    const uom = trimStr(ms?.uom) || trimStr(it.uom) || '';
-    out.push({ ...it, uom });
+/** Required for delivery_notes / delivery_note_items (NOT NULL warehouse_id). */
+async function resolveDnWarehouseId(order, outboundNumber, req, opts = {}) {
+  const fromOpts = Number(opts?.warehouse_id);
+  if (Number.isFinite(fromOpts) && fromOpts > 0) return fromOpts;
+  const fromOrder = Number(order?.warehouse_id);
+  if (Number.isFinite(fromOrder) && fromOrder > 0) return fromOrder;
+  const fromOb = await warehouseIdForOutboundNumber(order?.outbound_number || outboundNumber);
+  if (fromOb) return fromOb;
+  if (req?.user?.sub) {
+    const { resolveWarehouseIdForRequest } = require('../services/warehouseContext');
+    const fromReq = await resolveWarehouseIdForRequest({
+      userId: req.user.sub,
+      role: req.user.role,
+      explicitWarehouseId: req.get?.('X-Warehouse-Id') || req.body?.warehouse_id,
+    });
+    if (fromReq) return fromReq;
   }
-  return out;
+  const fromDn = order?.outbound_number
+    ? await dbGet(`SELECT warehouse_id FROM delivery_notes WHERE outbound_number = ? LIMIT 1`, [
+        order.outbound_number,
+      ])
+    : null;
+  const widDn = Number(fromDn?.warehouse_id);
+  if (Number.isFinite(widDn) && widDn > 0) return widDn;
+  const def = await getDefaultWarehouseId();
+  if (!def) {
+    const err = new Error('warehouse_id could not be resolved for this delivery note');
+    err.statusCode = 400;
+    throw err;
+  }
+  return def;
 }
 
 function assertDnEditable(dn, res) {
@@ -99,7 +168,9 @@ async function resolveCustomerForOutbound(order) {
   return { customer, dnCustomerNumber, soldTo };
 }
 
-async function getOrCreateDnFromOutbound(outbound_number, req) {
+async function getOrCreateDnFromOutbound(outbound_number, req, opts = {}) {
+  const requestedDnDate = parseDnDateOnly(opts?.dn_date);
+  const defaultDnDate = requestedDnDate || new Date().toISOString().slice(0, 10);
   const order = await dbGet(`SELECT * FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`, [
     outbound_number,
     outbound_number,
@@ -112,14 +183,23 @@ async function getOrCreateDnFromOutbound(outbound_number, req) {
 
   const items = await dbAll(`SELECT * FROM outbound_items WHERE outbound_id = ? ORDER BY id ASC`, [order.id]);
   const { customer, dnCustomerNumber } = await resolveCustomerForOutbound(order);
-  const dnExisting = await dbGet(`SELECT * FROM delivery_notes WHERE outbound_number = ? LIMIT 1`, [
-    order.outbound_number,
+  const canonOb = canonicalOutboundRef(order, outbound_number);
+  if (!canonOb) {
+    const err = new Error('Outbound number could not be resolved for this order');
+    err.statusCode = 400;
+    throw err;
+  }
+  const warehouseId = await resolveDnWarehouseId(order, canonOb, req, opts);
+  const dnExisting = await dbGet(`SELECT * FROM delivery_notes WHERE TRIM(COALESCE(outbound_number,'')) = TRIM(?) LIMIT 1`, [
+    canonOb,
   ]);
 
   if (!dnExisting) {
     await dbRun('BEGIN IMMEDIATE');
     try {
-      await dbRun(
+      const dnRow = await insertRowById(
+        db,
+        dbGet,
         `INSERT INTO delivery_notes (
           dn_number, dn_date, sales_order_number, gapp_po, customer_po, outbound_number, invoice_number,
           customer_id, customer_number, customer_name, delivery_address, gps, contact_person, contact_number,
@@ -128,12 +208,12 @@ async function getOrCreateDnFromOutbound(outbound_number, req) {
           status, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Ignore', 0, 0, 0, 0, ?, 'Draft', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
         [
-          order.outbound_number,
-          order.dn_date || new Date().toISOString().slice(0, 10),
+          canonOb,
+          requestedDnDate || order.dn_date || defaultDnDate,
           order.sales_order_number || order.sales_doc || '',
           order.gapp_po || order.sales_doc || '',
           order.customer_po_number || '',
-          order.outbound_number,
+          canonOb,
           order.invoice_number || '',
           customer?.id || null,
           dnCustomerNumber,
@@ -142,25 +222,27 @@ async function getOrCreateDnFromOutbound(outbound_number, req) {
           customer?.gps || '',
           customer?.contact_person || order.contact_person || '',
           rowPrimaryPhone(customer) || '',
-          order.warehouse_id || null,
-        ]
+          warehouseId,
+        ],
+        'delivery_notes'
       );
-      const dnRow = await dbGet(`SELECT * FROM delivery_notes WHERE id = last_insert_rowid()`);
       const dnId = dnRow.id;
       let itemNo = 1;
       for (const it of items) {
         const pn = String(it.part_number || it.material || '').trim();
         const sap = String(it.sap_part_number || '').trim();
-        const ms = await lookupMainStockForDnLine(pn, sap);
-        const desc = (ms?.description ?? it.description ?? '').toString();
-        const uom = (ms?.uom ?? it.uom ?? '').toString();
+        const { description: desc, uom } = await resolveDnLineMasterFields(pn, sap, warehouseId, {
+          description: it.description,
+          uom: it.uom,
+        });
 
         await dbRun(
           `INSERT INTO delivery_note_items
-            (dn_id, item_no, part_number, sap_part_number, description, qty, uom, serial_no, condition_text, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+            (dn_id, warehouse_id, item_no, part_number, sap_part_number, description, qty, uom, serial_no, condition_text, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
           [
             dnId,
+            warehouseId,
             itemNo++,
             pn,
             sap,
@@ -175,7 +257,7 @@ async function getOrCreateDnFromOutbound(outbound_number, req) {
       await dbRun('COMMIT');
       if (req) {
         logAudit({
-          warehouse_id: order.warehouse_id,
+          warehouse_id: warehouseId,
           req,
           module_name: 'DELIVERY',
           action_type: 'DN_CREATED',
@@ -185,7 +267,7 @@ async function getOrCreateDnFromOutbound(outbound_number, req) {
           status_after: 'Draft',
         });
       }
-      return dnRow;
+      return await getDnView(dnId);
     } catch (e) {
       await dbRun('ROLLBACK').catch(() => {});
       throw e;
@@ -197,7 +279,7 @@ async function getOrCreateDnFromOutbound(outbound_number, req) {
   // Keep DN header in sync with current outbound header (but do not overwrite transportation/package if already entered).
   await dbRun(
     `UPDATE delivery_notes
-     SET dn_date = COALESCE(dn_date, ?),
+     SET dn_date = COALESCE(?, dn_date, ?),
          sales_order_number = COALESCE(sales_order_number, ?),
          gapp_po = COALESCE(gapp_po, ?),
          customer_po = COALESCE(customer_po, ?),
@@ -211,10 +293,12 @@ async function getOrCreateDnFromOutbound(outbound_number, req) {
          contact_number = COALESCE(contact_number, ?),
          contact_person_2 = COALESCE(contact_person_2, ?),
          contact_number_2 = COALESCE(contact_number_2, ?),
+         warehouse_id = COALESCE(warehouse_id, ?),
          updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
     [
-      order.dn_date || new Date().toISOString().slice(0, 10),
+      requestedDnDate,
+      requestedDnDate || order.dn_date || defaultDnDate,
       order.sales_order_number || order.sales_doc || '',
       order.gapp_po || order.sales_doc || '',
       order.customer_po_number || '',
@@ -228,10 +312,57 @@ async function getOrCreateDnFromOutbound(outbound_number, req) {
       rowPrimaryPhone(customer) || '',
       customer?.second_name || '',
       customer?.second_number || '',
+      warehouseId,
       dnExisting.id,
     ]
   );
-  return await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [dnExisting.id]);
+  await dbRun(
+    `UPDATE delivery_note_items SET warehouse_id = ? WHERE dn_id = ? AND warehouse_id IS NULL`,
+    [warehouseId, dnExisting.id]
+  ).catch(() => {});
+  return await getDnView(dnExisting.id);
+}
+
+const { syncGappDeliveryNoteFromHuaweiPo, HUAWEI_SYSTEM_PO_LABEL } = require('../services/huaweiDnGappSyncService');
+
+async function getOrCreateDnFromHuaweiPo(sap_po, req, opts = {}) {
+  const po = trimStr(sap_po);
+  if (!po) {
+    const err = new Error('sap_po is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  const rebuild = Boolean(opts?.rebuild);
+  const { resolveWarehouseIdForRequest } = require('../services/warehouseContext');
+  const warehouseId =
+    Number(opts?.warehouse_id) ||
+    (await resolveWarehouseIdForRequest({
+      userId: req.user?.sub,
+      role: req.user?.role,
+      explicitWarehouseId: req.get?.('X-Warehouse-Id') || req.body?.warehouse_id,
+    })) ||
+    (await getDefaultWarehouseId());
+
+  const synced = await syncGappDeliveryNoteFromHuaweiPo({
+    sap_po: po,
+    warehouseId,
+    userId: req.user?.sub,
+    rebuild,
+    dn_date: opts?.dn_date,
+  });
+
+  logAudit({
+    warehouse_id: Number(warehouseId),
+    req,
+    module_name: 'DELIVERY',
+    action_type: 'DN_CREATED',
+    reference_type: 'delivery_note',
+    reference_id: synced.id,
+    reference_number: synced.dn_number,
+    status_after: 'Draft',
+    remarks: `huawei_po:${po};mode:box;lines:${synced.item_count};rebuilt:${synced.rebuilt}`,
+  });
+  return getDnView(synced.id);
 }
 
 /**
@@ -270,8 +401,9 @@ function formatSpoLabel(vendorName) {
 async function getDnView(id) {
   const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
   if (!dn) return null;
+  const enrichWarehouseId = await resolveWarehouseIdForDnRow(dn);
   const rawItems = await dbAll(`SELECT * FROM delivery_note_items WHERE dn_id = ? ORDER BY item_no ASC, id ASC`, [id]);
-  const items = await enrichDnItemsUomFromMainStock(rawItems);
+  const items = await enrichDnItemsFromMasterData(rawItems, enrichWarehouseId);
   const outboundNum = trimStr(dn.outbound_number);
   let outbound_sold_to = null;
   let outbound_name_1 = null;
@@ -279,20 +411,39 @@ async function getDnView(id) {
   let outbound_sales_doc = null;
   let outbound_header_customer_name = null;
   let outbound_invoice_number = null;
+  let outbound_order_id = null;
+  let warehouse_id = dn.warehouse_id != null ? Number(dn.warehouse_id) : null;
+  let warehouse_code = null;
+  let warehouse_name = null;
   let pick_footprint = null;
+  if (warehouse_id) {
+    const whDn = await dbGet(
+      `SELECT warehouse_code, warehouse_name FROM warehouses WHERE id = ?`,
+      [warehouse_id]
+    );
+    warehouse_code = whDn?.warehouse_code || null;
+    warehouse_name = whDn?.warehouse_name || null;
+  }
   if (outboundNum) {
     const ord = await dbGet(
-      `SELECT id, sold_to, name_1, customer_reference, sales_doc, customer_name, invoice_number
-       FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`,
+      `SELECT o.id, o.sold_to, o.name_1, o.customer_reference, o.sales_doc, o.customer_name, o.invoice_number,
+              o.warehouse_id, w.warehouse_code, w.warehouse_name
+       FROM outbound_orders o
+       LEFT JOIN warehouses w ON w.id = o.warehouse_id
+       WHERE o.outbound_number = ? OR o.delivery = ? LIMIT 1`,
       [outboundNum, outboundNum]
     );
     if (ord) {
+      outbound_order_id = ord.id;
       outbound_sold_to = trimStr(ord.sold_to) || null;
       outbound_name_1 = ord.name_1 || null;
       outbound_customer_reference = ord.customer_reference || null;
       outbound_sales_doc = ord.sales_doc || null;
       outbound_header_customer_name = ord.customer_name || null;
       outbound_invoice_number = trimStr(ord.invoice_number) || null;
+      warehouse_id = ord.warehouse_id != null ? Number(ord.warehouse_id) : warehouse_id;
+      warehouse_code = ord.warehouse_code || warehouse_code;
+      warehouse_name = ord.warehouse_name || warehouse_name;
       if (ord.id) {
         pick_footprint = await loadOutboundPickFootprint({ dbGet, dbAll, orderId: ord.id });
       }
@@ -325,6 +476,10 @@ async function getDnView(id) {
 
   return {
     ...dn,
+    outbound_order_id,
+    warehouse_id,
+    warehouse_code,
+    warehouse_name,
     outbound_sold_to,
     outbound_name_1,
     outbound_customer_reference,
@@ -344,7 +499,13 @@ router.get('/', async (req, res) => {
   try {
     const status = String(req.query.status || '').trim();
     const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
-    let rows = await dbAll(`SELECT * FROM delivery_notes ORDER BY id DESC LIMIT ?`, [limit]);
+    let rows = await dbAll(
+      `SELECT dn.*, w.warehouse_code, w.warehouse_name
+       FROM delivery_notes dn
+       LEFT JOIN warehouses w ON w.id = dn.warehouse_id
+       ORDER BY dn.id DESC LIMIT ?`,
+      [limit]
+    );
     if (status) rows = rows.filter((r) => String(r.status || '').toLowerCase() === status.toLowerCase());
     res.json(rows);
   } catch (e) {
@@ -374,11 +535,15 @@ router.get('/outbound-options', async (_req, res) => {
     `;
     const picked = await dbAll(
       `SELECT
+         o.id AS outbound_order_id,
          COALESCE(NULLIF(TRIM(po.delivery), ''), TRIM(o.outbound_number)) AS outbound_number,
          o.status AS status,
          o.customer_name AS customer_name,
          o.customer_reference AS customer_reference,
          o.sold_to AS sold_to,
+         o.warehouse_id AS warehouse_id,
+         w.warehouse_code AS warehouse_code,
+         w.warehouse_name AS warehouse_name,
          NULLIF(TRIM(COALESCE(
            NULLIF(TRIM(COALESCE(o.sales_doc, '')), ''),
            NULLIF(TRIM(COALESCE(o.sales_order_number, '')), ''),
@@ -386,38 +551,56 @@ router.get('/outbound-options', async (_req, res) => {
          )), '') AS sales_doc
        FROM picked_orders po
        INNER JOIN outbound_orders o ON o.id = po.outbound_order_id
+       LEFT JOIN warehouses w ON w.id = o.warehouse_id
        WHERE ${outboundEligible}
+         AND LOWER(TRIM(COALESCE(po.status, ''))) != 'reversed'
        ORDER BY po.confirmed_at DESC
        LIMIT 800`
     );
     const pickedWithoutRow = await dbAll(
       `SELECT
+         o.id AS outbound_order_id,
          COALESCE(NULLIF(TRIM(o.delivery), ''), TRIM(o.outbound_number)) AS outbound_number,
          o.status AS status,
          o.customer_name AS customer_name,
          o.customer_reference AS customer_reference,
          COALESCE(o.sold_to, o.vendor_name, '') AS sold_to,
+         o.warehouse_id AS warehouse_id,
+         w.warehouse_code AS warehouse_code,
+         w.warehouse_name AS warehouse_name,
          NULLIF(TRIM(COALESCE(
            NULLIF(TRIM(COALESCE(o.sales_doc, '')), ''),
            NULLIF(TRIM(COALESCE(o.sales_order_number, '')), ''),
            NULLIF(TRIM(COALESCE(o.gapp_po, '')), '')
          )), '') AS sales_doc
        FROM outbound_orders o
+       LEFT JOIN warehouses w ON w.id = o.warehouse_id
        WHERE LOWER(TRIM(COALESCE(o.status, ''))) IN ('picked', 'checked')
-         AND NOT EXISTS (SELECT 1 FROM picked_orders po2 WHERE po2.outbound_order_id = o.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM picked_orders po2
+          WHERE po2.outbound_order_id = o.id
+            AND LOWER(TRIM(COALESCE(po2.status, ''))) != 'reversed'
+        )
          AND ${outboundEligible}
        ORDER BY o.updated_at DESC
        LIMIT 400`
     );
     const holds = await dbAll(
-      `SELECT outbound_number, status, customer_name, '' AS customer_reference, customer_number AS sold_to,
+      `SELECT dn.outbound_number, dn.status, dn.customer_name, '' AS customer_reference, dn.customer_number AS sold_to,
+         dn.warehouse_id,
+         w.warehouse_code,
+         w.warehouse_name,
+         o.id AS outbound_order_id,
          NULLIF(TRIM(COALESCE(
-           NULLIF(TRIM(COALESCE(gapp_po, '')), ''),
-           NULLIF(TRIM(COALESCE(sales_order_number, '')), '')
+           NULLIF(TRIM(COALESCE(dn.gapp_po, '')), ''),
+           NULLIF(TRIM(COALESCE(dn.sales_order_number, '')), '')
          )), '') AS sales_doc
-       FROM delivery_notes
-       WHERE lower(status) = 'on hold'
-       ORDER BY updated_at DESC
+       FROM delivery_notes dn
+       LEFT JOIN warehouses w ON w.id = dn.warehouse_id
+       LEFT JOIN outbound_orders o ON TRIM(COALESCE(o.outbound_number, '')) = TRIM(COALESCE(dn.outbound_number, ''))
+         OR TRIM(COALESCE(o.delivery, '')) = TRIM(COALESCE(dn.outbound_number, ''))
+       WHERE lower(dn.status) = 'on hold'
+       ORDER BY dn.updated_at DESC
        LIMIT 400`
     );
     const map = new Map();
@@ -433,11 +616,28 @@ router.get('/outbound-options', async (_req, res) => {
 });
 
 // POST /api/delivery-notes  { outbound_number }
-router.post('/', async (req, res) => {
+router.post('/', requireDnWrite, async (req, res) => {
   try {
+    const source = String(req.body?.source || '').trim().toLowerCase();
+    if (source === 'huawei') {
+      const sap_po = trimStr(req.body?.sap_po || req.body?.po_number);
+      if (!sap_po) return res.status(400).json({ error: 'sap_po is required for Huawei source' });
+      const dn = await getOrCreateDnFromHuaweiPo(sap_po, req, {
+        dn_date: req.body?.dn_date,
+        warehouse_id: req.body?.warehouse_id,
+        rebuild: Boolean(req.body?.rebuild),
+      });
+      const { fireAndForgetEnsureFromDeliveryNote } = require('../services/salesOrderDocumentsService');
+      void fireAndForgetEnsureFromDeliveryNote(dn);
+      return res.status(201).json(dn);
+    }
+
     const outbound_number = String(req.body?.outbound_number || '').trim();
     if (!outbound_number) return res.status(400).json({ error: 'outbound_number is required' });
-    const dn = await getOrCreateDnFromOutbound(outbound_number, req);
+    const dn = await getOrCreateDnFromOutbound(outbound_number, req, {
+      dn_date: req.body?.dn_date,
+      warehouse_id: req.body?.warehouse_id,
+    });
     const { fireAndForgetEnsureFromDeliveryNote } = require('../services/salesOrderDocumentsService');
     void fireAndForgetEnsureFromDeliveryNote(dn);
     res.status(201).json(dn);
@@ -704,11 +904,60 @@ router.get('/:id/timeline', async (req, res) => {
   }
 });
 
-// GET /api/delivery-notes/:id/pod — download POD (image/PDF) if present
-router.get(
-  '/:id/pod',
-  requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']),
+router.get('/:id/pod-upload-context', requireAnyPermission(podUploadPerms), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const ctx = await getDeliveryNotePodUploadContext(id);
+    if (!ctx) return res.status(404).json({ error: 'Delivery note not found' });
+    res.json(ctx);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post(
+  '/:id/upload-pod',
+  requireAnyPermission(podUploadPerms),
+  (req, res, next) => {
+    podUploadMulter.single('file')(req, res, (err) => {
+      if (err) return res.status(400).json({ error: err.message || String(err) });
+      next();
+    });
+  },
   async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'file is required' });
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+      const duplicate_action = trimStr(req.body?.duplicate_action) || null;
+      const pod_reference = trimStr(req.body?.pod_reference) || null;
+      const result = await uploadDeliveryNotePodFromWeb({
+        deliveryNoteId: id,
+        multerFile: req.file,
+        userId: Number(req.user.sub),
+        req,
+        duplicate_action,
+        pod_reference,
+      });
+      if (result.conflict) {
+        return res.status(409).json({
+          conflict: true,
+          existing: result.existing,
+          delivery_note: result.delivery_note,
+          expected_pod_filename: result.expected_pod_filename,
+        });
+      }
+      res.json(result);
+    } catch (e) {
+      if (req.file?.path) fs.unlink(req.file.path, () => {});
+      res.status(400).json({ error: e.message });
+    }
+  }
+);
+
+// GET /api/delivery-notes/:id/pod — download POD (image/PDF) if present
+router.get('/:id/pod', requireAnyPermission(dnDownloadPerms), async (req, res) => {
     try {
       const id = Number(req.params.id);
       if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -733,8 +982,39 @@ router.get(
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
-  }
-);
+});
+
+// GET /api/delivery-notes/:id/customer-pdf — compact PDF for sharing with customer (e.g. WhatsApp)
+router.get('/:id/customer-pdf', requireAnyPermission(dnDownloadPerms), async (req, res) => {
+    let tmpPath = null;
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+      const view = await getDnView(id);
+      if (!view) return res.status(404).json({ error: 'DN not found' });
+      const uid = Number(req.user?.sub || req.user?.id);
+      let checked_by_user_name = '';
+      if (uid) {
+        const u = await dbGet(`SELECT username, full_name FROM users WHERE id = ?`, [uid]);
+        checked_by_user_name = String(u?.full_name || u?.username || '').trim();
+      }
+      tmpPath = await writeDeliveryNotePdfToTemp({ ...view, checked_by_user_name });
+      const ob = trimStr(view.outbound_number);
+      const dnNo = trimStr(view.dn_number || view.id);
+      const base = ob && dnNo ? `DN_${ob}_${dnNo}` : `delivery-note-${id}`;
+      const safe = base.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 100);
+      const buf = await fs.promises.readFile(tmpPath);
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      tmpPath = null;
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${safe}.pdf"`);
+      res.setHeader('Cache-Control', 'no-store, private');
+      return res.send(buf);
+    } catch (e) {
+      if (tmpPath) await fs.promises.unlink(tmpPath).catch(() => {});
+      return res.status(500).json({ error: e.message });
+    }
+});
 
 // POST /api/delivery-notes/:id/confirm — GAPP only; creates driver task + notifications
 router.post('/:id/confirm', requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']), async (req, res) => {
@@ -791,7 +1071,8 @@ router.post('/:id/confirm', requireAnyPermission(['can_upload_outbound', 'can_co
        LIMIT 8`,
       [id]
     );
-    const items = await enrichDnItemsUomFromMainStock(rawPushItems);
+    const enrichWh = await resolveWarehouseIdForDnRow(dn);
+    const items = await enrichDnItemsFromMasterData(rawPushItems, enrichWh);
     const details =
       (items || [])
         .map((it) => {
@@ -805,7 +1086,9 @@ router.post('/:id/confirm', requireAnyPermission(['can_upload_outbound', 'can_co
 
     await dbRun('BEGIN IMMEDIATE');
     try {
-      await dbRun(
+      const taskRow = await insertRowById(
+        db,
+        dbGet,
         `INSERT INTO driver_delivery_tasks (
           dn_id, outbound_number, invoice_number, customer_name, delivery_address, city_name, gps_link,
           contact_person, contact_number, driver_user_id, driver_name, driver_mobile, status,
@@ -825,9 +1108,9 @@ router.post('/:id/confirm', requireAnyPermission(['can_upload_outbound', 'can_co
           driverName,
           trimStr(dn.driver_mobile),
           DS.CONFIRMED,
-        ]
+        ],
+        'driver_delivery_tasks'
       );
-      const taskRow = await dbGet(`SELECT * FROM driver_delivery_tasks WHERE id = last_insert_rowid()`);
       await dbRun(
         `UPDATE delivery_notes SET
           delivery_status = ?,
@@ -1004,7 +1287,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // POST /api/delivery-notes/:id/hold  { is_hold: true|false }
-router.post('/:id/hold', async (req, res) => {
+router.post('/:id/hold', requireDnWrite, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -1023,12 +1306,12 @@ router.post('/:id/hold', async (req, res) => {
 });
 
 // POST /api/delivery-notes/:id/delivery-to — apply Address Book row or temporary_manual snapshot
-router.post('/:id/delivery-to', postDeliveryTo);
+router.post('/:id/delivery-to', requireDnWrite, postDeliveryTo);
 // Legacy alias
-router.post('/:id/deliver-to', postDeliveryTo);
+router.post('/:id/deliver-to', requireDnWrite, postDeliveryTo);
 
 // POST /api/delivery-notes/:id/transportation
-router.post('/:id/transportation', async (req, res) => {
+router.post('/:id/transportation', requireDnWrite, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -1132,8 +1415,50 @@ router.post('/:id/transportation', async (req, res) => {
   }
 });
 
+// POST /api/delivery-notes/:id/invoice — update invoice number only (DN + outbound)
+router.post('/:id/invoice', requireDnWrite, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
+    if (!dn) return res.status(404).json({ error: 'DN not found' });
+    if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'DN already delivered' });
+    if (!assertDnEditable(dn, res)) return;
+
+    const invoice_number = String(req.body?.invoice_number || '').trim();
+    if (!invoice_number) return res.status(400).json({ error: 'Invoice Number is required' });
+
+    await dbRun(`UPDATE delivery_notes SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
+      invoice_number,
+      id,
+    ]);
+    const ob = trimStr(dn.outbound_number);
+    if (ob) {
+      await dbRun(
+        `UPDATE outbound_orders SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE outbound_number = ? OR delivery = ?`,
+        [invoice_number, ob, ob]
+      );
+    }
+    const whInv = await warehouseIdForOutboundNumber(ob);
+    logAudit({
+      warehouse_id: whInv,
+      req,
+      module_name: 'DELIVERY',
+      action_type: 'UPDATED',
+      reference_type: 'delivery_note',
+      reference_id: id,
+      reference_number: ob || trimStr(dn.dn_number),
+      remarks: 'invoice_number_updated',
+      new_value: { invoice_number },
+    });
+    res.json(await getDnView(id));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/delivery-notes/:id/package-info
-router.post('/:id/package-info', async (req, res) => {
+router.post('/:id/package-info', requireDnWrite, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -1166,6 +1491,9 @@ router.post('/:id/package-info', async (req, res) => {
 
     const pallet_qty = package_type === 'Pallet' ? package_qty : 0;
     const box_qty = package_type === 'Box' ? package_qty : 0;
+    const isIgnorePkg = package_type === 'Ignore';
+    const finalGross = isIgnorePkg && req.body?.gross_weight_kg === undefined ? dn.gross_weight_kg : gross_weight_kg;
+    const finalVolume = isIgnorePkg && req.body?.volume_cbm === undefined ? dn.volume_cbm : volume_cbm;
 
     await dbRun(
       `UPDATE delivery_notes SET
@@ -1177,9 +1505,16 @@ router.post('/:id/package-info', async (req, res) => {
          volume_cbm = ?,
          updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
-      [invoice_number, package_type, pallet_qty, box_qty, gross_weight_kg, volume_cbm, id]
+      [invoice_number, package_type, pallet_qty, box_qty, finalGross, finalVolume, id]
     );
-    const whPkg = await warehouseIdForOutboundNumber(trimStr(dn.outbound_number));
+    const obPkg = trimStr(dn.outbound_number);
+    if (obPkg && trimStr(invoice_number)) {
+      await dbRun(
+        `UPDATE outbound_orders SET invoice_number = ?, updated_at = CURRENT_TIMESTAMP WHERE outbound_number = ? OR delivery = ?`,
+        [trimStr(invoice_number), obPkg, obPkg]
+      );
+    }
+    const whPkg = await warehouseIdForOutboundNumber(obPkg);
     logAudit({
       warehouse_id: whPkg,
       req,
@@ -1191,7 +1526,42 @@ router.post('/:id/package-info', async (req, res) => {
       remarks: 'package_info_saved',
       new_value: { package_type, invoice_number: trimStr(invoice_number) || null },
     });
-    res.json(await getDnView(id));
+    const view = await getDnView(id);
+    try {
+      const { autoSaveRawDeliveryNotePdf } = require('../services/salesOrderDocumentsService');
+      void autoSaveRawDeliveryNotePdf(id, req.user?.sub);
+    } catch {
+      /* best-effort raw DN PDF */
+    }
+    res.json(view);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/delivery-notes/:id/dn-date — editable delivery note date (YYYY-MM-DD)
+router.post('/:id/dn-date', requireDnWrite, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+    const dn = await dbGet(`SELECT * FROM delivery_notes WHERE id = ?`, [id]);
+    if (!dn) return res.status(404).json({ error: 'DN not found' });
+    if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'DN already delivered' });
+    if (!assertDnEditable(dn, res)) return;
+
+    const dn_date = parseDnDateOnly(req.body?.dn_date) || new Date().toISOString().slice(0, 10);
+    await dbRun(
+      `UPDATE delivery_notes SET dn_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [dn_date, id]
+    );
+    const viewDn = await getDnView(id);
+    try {
+      const { autoSaveRawDeliveryNotePdf } = require('../services/salesOrderDocumentsService');
+      void autoSaveRawDeliveryNotePdf(id, req.user?.sub);
+    } catch {
+      /* best-effort */
+    }
+    res.json(viewDn);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1222,7 +1592,7 @@ router.post('/:id/contact-person-2', requirePermission('can_upload_outbound'), a
 // POST /api/delivery-notes/:id/mark-delivered
 router.post(
   '/:id/mark-delivered',
-  requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']),
+  requireMarkDelivered,
   async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -1232,16 +1602,6 @@ router.post(
     if (String(dn.status || '').toLowerCase() === 'delivered') return res.status(400).json({ error: 'This DN is already delivered.' });
 
     const trans = normalizeTransportType(dn.transportation_type);
-    if (trans === 'GAPP') {
-      if (!dn.confirmed_at) {
-        return res.status(400).json({ error: 'GAPP: confirm for delivery is required before marking delivered.' });
-      }
-      if (!Number(dn.is_closed)) {
-        return res
-          .status(400)
-          .json({ error: 'GAPP: driver must close the delivery (POD) before marking delivered — or use admin close.' });
-      }
-    }
 
     // Validate transportation
     if (!String(dn.transportation_type || '').trim()) return res.status(400).json({ error: 'Transportation Method must be saved before Delivered.' });
@@ -1306,10 +1666,17 @@ router.post(
     const delivered_date = new Date().toISOString().slice(0, 10);
 
     await dbRun('BEGIN IMMEDIATE');
+    const enrichWhDelivered = await resolveWarehouseIdForDnRow(dnLatest);
     try {
       for (const it of dnItems) {
-        const ms = await lookupMainStockForDnLine(it.part_number, it.sap_part_number);
-        const uomDelivered = trimStr(ms?.uom) || trimStr(it.uom) || '';
+        const masterDelivered = await resolveDnLineMasterFields(
+          it.part_number,
+          it.sap_part_number,
+          enrichWhDelivered,
+          { description: it.description, uom: it.uom }
+        );
+        const uomDelivered = masterDelivered.uom;
+        const descDelivered = masterDelivered.description;
         await dbRun(
           `INSERT INTO delivered (
             dn_id, dn_number, delivered_date, sales_order_number, gapp_po, customer_po, outbound_number, invoice_number,
@@ -1358,7 +1725,7 @@ router.post(
             dnLatest.address_source || '',
             it.part_number || '',
             it.sap_part_number || '',
-            it.description || '',
+            descDelivered || '',
             asNumber(it.qty) || 0,
             uomDelivered,
           ]
@@ -1426,4 +1793,5 @@ router.get('/:id/print', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.getDnView = getDnView;
 

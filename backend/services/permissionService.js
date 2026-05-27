@@ -10,11 +10,19 @@ function allPermissionsTrue() {
   return o;
 }
 
+function effectiveApprovalStatus(user) {
+  if (!user) return 'PENDING';
+  if (user.is_blocked != null && Number(user.is_blocked) === 1) return 'BLOCKED';
+  const s = String(user.approval_status || 'APPROVED').toUpperCase();
+  return s || 'APPROVED';
+}
+
 async function getUserRow(userId) {
   const get = promisify(db.get.bind(db));
   return get(
     `SELECT id, username, role, full_name, mobile_number, email, is_active,
-            token_expiry_days, can_access_web, can_access_mobile, default_warehouse_id
+            token_expiry_days, can_access_web, can_access_mobile, default_warehouse_id,
+            approval_status, is_blocked, auth_provider, google_picture
      FROM users WHERE id = ?`,
     [userId]
   );
@@ -28,6 +36,8 @@ async function getPermissionMapForUserId(userId) {
   if (!user) return null;
   // Only treat explicit 0/false as inactive; NULL defaults to active (SQLite / legacy rows).
   if (user.is_active != null && Number(user.is_active) === 0) return null;
+  const approval = effectiveApprovalStatus(user);
+  if (approval !== 'APPROVED') return null;
 
   const role = String(user.role || '').toLowerCase();
   let map = {};
@@ -67,6 +77,7 @@ function requirePermissionKey(req, key) {
 module.exports = {
   getPermissionMapForUserId,
   getUserRow,
+  effectiveApprovalStatus,
   requirePermissionKey,
   allPermissionsTrue,
   PERMISSION_DEFS,

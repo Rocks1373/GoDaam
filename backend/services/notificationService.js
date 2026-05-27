@@ -5,6 +5,9 @@ const { getDefaultWarehouseId } = require('./warehouseContext');
 
 const expo = new Expo();
 
+/** Android 8+ — must match godam-mobile GODAM_PUSH_CHANNEL_ID */
+const ANDROID_CHANNEL_ID = 'godam-alerts-v2';
+
 async function logNotification(userId, title, body, data) {
   const run = promisify(db.run.bind(db));
   let wid = data != null && data.warehouse_id != null && data.warehouse_id !== '' ? Number(data.warehouse_id) : null;
@@ -136,9 +139,12 @@ async function getUserIdsWhoHaveAnyPermission(permissionKeys, warehouseId = null
 }
 
 async function sendExpoPushToTokens(rows, title, body, data = {}) {
-  if (!rows || !rows.length) return [];
+  if (!rows || !rows.length) {
+    return { ok: false, sent: 0, tickets: [], errors: ['no_tokens'] };
+  }
   const messages = [];
   for (const r of rows) {
+    if (!r.expo_push_token || !Expo.isExpoPushToken(r.expo_push_token)) continue;
     messages.push({
       to: r.expo_push_token,
       sound: 'default',
@@ -146,24 +152,50 @@ async function sendExpoPushToTokens(rows, title, body, data = {}) {
       title,
       body,
       data,
+      channelId: ANDROID_CHANNEL_ID,
       android: {
+        channelId: ANDROID_CHANNEL_ID,
         sound: 'default',
         priority: 'high',
       },
     });
   }
+  if (!messages.length) {
+    return { ok: false, sent: 0, tickets: [], errors: ['no_valid_expo_tokens'] };
+  }
 
   const chunks = expo.chunkPushNotifications(messages);
-  const receipts = [];
+  const tickets = [];
+  const errors = [];
+  let msgIndex = 0;
   for (const chunk of chunks) {
     try {
       const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-      receipts.push(...ticketChunk);
+      for (let i = 0; i < ticketChunk.length; i += 1) {
+        const ticket = ticketChunk[i];
+        const to = chunk[i]?.to;
+        tickets.push({ ...ticket, to });
+        if (ticket?.status === 'error') {
+          const detail = ticket.details?.error || ticket.message || 'unknown';
+          errors.push({ to, error: detail });
+          console.error('[push] ticket error:', detail, to ? String(to).slice(0, 36) : '');
+        } else if (ticket?.status === 'ok') {
+          console.log('[push] ticket ok:', ticket.id, to ? String(to).slice(0, 36) : '');
+        }
+      }
+      msgIndex += chunk.length;
     } catch (e) {
-      console.error('Expo push error:', e.message);
+      const msg = String(e.message || e);
+      errors.push({ error: msg });
+      console.error('[push] send chunk failed:', msg);
     }
   }
-  return receipts;
+  return {
+    ok: errors.length === 0,
+    sent: messages.length,
+    tickets,
+    errors,
+  };
 }
 
 async function resolveOutboundWarehouseId(data) {
@@ -284,12 +316,36 @@ async function sendExpoPushToUserIds(userIds, title, body, data = {}) {
   return valid;
 }
 
+/** Notify all admins when a new Google access request is created. */
+async function notifyAdminsAccessRequest({ full_name, email, google_id, requested_role }) {
+  const title = 'New user access request';
+  const body = `${full_name || 'User'} (${email}) requested access${requested_role ? ` as ${requested_role}` : ''}.`;
+  const payload = {
+    notif_category: 'access_request',
+    email,
+    google_id,
+    requested_role: requested_role || 'picker',
+  };
+  const adminRows = await getExpoTokensForRoles(['admin'], null);
+  await sendExpoPushToTokens(adminRows, title, body, payload);
+  const all = promisify(db.all.bind(db));
+  const admins = await all(`SELECT id FROM users WHERE lower(role) = 'admin' AND COALESCE(is_active, 1) = 1`);
+  const seen = new Set();
+  for (const a of admins || []) {
+    const uid = Number(a.id);
+    if (!uid || seen.has(uid)) continue;
+    seen.add(uid);
+    await logNotification(uid, title, body, payload);
+  }
+}
+
 module.exports = {
   logNotification,
   notifyPickOrder,
   notifyPickProgress,
   notifyAdminChecker,
   notifyInboundPutaway,
+  notifyAdminsAccessRequest,
   sendExpoPushToTokens,
   sendExpoPushToUserIds,
   getExpoTokensForPermission,

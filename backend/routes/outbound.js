@@ -8,14 +8,18 @@ const { z } = require('zod');
 
 const db = require('../db');
 const { requirePermission, requireAdmin, requireAnyPermission } = require('../middleware/auth');
+const { requireUploadOutbound, requireMarkDelivered } = require('../middleware/outboundAccess');
 const { zodValidate } = require('../middleware/zodValidate');
 const MainStock = require('../models/MainStock');
 const OutboundOrder = require('../models/OutboundOrder');
 const OutboundItem = require('../models/OutboundItem');
 const { generateFifoForOutboundOrder, listFifoForOrder } = require('../services/godamFifo');
-const { notifyPickOrder, notifyPickProgress } = require('../services/notificationService');
+const { fifoDateOrderExpr } = require('../lib/safeDateSql');
+const { notifyPickProgress } = require('../services/notificationService');
+const { sendOutboundOrderForPick } = require('../services/outboundSendForPick');
 const { normalizeExcelRows } = require('../utils/excelDates');
 const { markOutboundDelivered, reverseOutboundDelivered } = require('../services/markOutboundDelivered');
+const { reversePickedOrder } = require('../services/reversePickedOrder');
 const {
   expandOutboundBomForOrder,
   refreshAllOutboundItemsStock,
@@ -27,8 +31,15 @@ const {
 const { resolveWarehouseIdForRequest, assertExplicitWarehouseParamAllowed, resolveReadWarehouseScope, userHasWarehouseAccess } = require('../services/warehouseContext');
 const { logAudit } = require('../services/auditLogger');
 const { loadOutboundPickFootprint } = require('../services/outboundPickFootprint');
+const { pickedOrderInsertFields, requireOutboundWarehouseId } = require('../services/pickedOrderWrite');
+const { resolvePickWarehouseId } = require('../lib/pickWarehouseId');
+const { insertPickStockOut } = require('../lib/pickStockOut');
+const { uploadDocumentFlow, DOC_TYPES } = require('../services/salesOrderDocumentsService');
+const { ensureWorkflowForOutbound } = require('../services/outboundDocumentWorkflowService');
+const { reassignOutboundWarehouse } = require('../services/outboundWarehouseReassign');
 
 const router = express.Router();
+const EPS = 1e-6;
 const outboundOrder = new OutboundOrder();
 const outboundItem = new OutboundItem();
 const mainStock = new MainStock();
@@ -44,30 +55,26 @@ async function upsertPickedOrderRow(dbRun, dbGet, { orderId, order, userId, conf
   const existing = await dbGet(`SELECT id FROM picked_orders WHERE outbound_order_id = ? ORDER BY id DESC LIMIT 1`, [
     orderId,
   ]);
-  const delivery = order.delivery || order.outbound_number;
-  const salesDoc = order.sales_doc || order.sales_order_number;
-  const customerRef = order.customer_reference || order.customer_po_number;
-  const soldTo = order.sold_to || order.vendor_name;
-  const name1 = order.name_1 || order.customer_name;
+  const { warehouseId, delivery, salesDoc, customerRef, soldTo, name1 } = pickedOrderInsertFields(order);
   const byName = confirmedByName || 'Admin Manual';
 
   if (existing?.id) {
     await dbRun(
       `UPDATE picked_orders SET
-        delivery = ?, sales_doc = ?, customer_reference = ?, sold_to = ?, name_1 = ?,
+        warehouse_id = ?, delivery = ?, sales_doc = ?, customer_reference = ?, sold_to = ?, name_1 = ?,
         confirmed_by_user_id = ?, confirmed_by_user_name = ?, confirmed_at = CURRENT_TIMESTAMP, status = 'Picked'
        WHERE id = ?`,
-      [delivery, salesDoc, customerRef, soldTo, name1, userId, byName, existing.id]
+      [warehouseId, delivery, salesDoc, customerRef, soldTo, name1, userId, byName, existing.id]
     );
     return;
   }
 
   await dbRun(
     `INSERT INTO picked_orders (
-      outbound_order_id, delivery, sales_doc, customer_reference, sold_to, name_1,
+      outbound_order_id, warehouse_id, delivery, sales_doc, customer_reference, sold_to, name_1,
       confirmed_by_user_id, confirmed_by_user_name, confirmed_at, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Picked')`,
-    [orderId, delivery, salesDoc, customerRef, soldTo, name1, userId, byName]
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Picked')`,
+    [orderId, warehouseId, delivery, salesDoc, customerRef, soldTo, name1, userId, byName]
   );
 }
 
@@ -95,7 +102,7 @@ async function forceOutboundLinesFullyPickedForAdminOverride(dbRun, dbGet, dbAll
   }
 }
 
-const OUTBOUND_DOC_STAGE_PRESETS = new Set(['order_created', 'post_delivery', 'other']);
+const OUTBOUND_DOC_STAGE_PRESETS = new Set(['sales_order', 'order_created', 'post_delivery', 'other']);
 
 const UPLOAD_DOC_REL = 'uploads/outbound-documents';
 const UPLOAD_DOC_ABS = path.join(__dirname, '..', UPLOAD_DOC_REL);
@@ -125,7 +132,7 @@ function normalizeOutboundDocStage(raw) {
     .toLowerCase()
     .replace(/\s+/g, '_');
   if (OUTBOUND_DOC_STAGE_PRESETS.has(s)) return s;
-  if (!s) return 'order_created';
+  if (!s) return 'sales_order';
   if (/^[a-z][a-z0-9_]{0,39}$/.test(s)) return s.slice(0, 40);
   return 'other';
 }
@@ -156,7 +163,7 @@ async function listOutboundOrderDocuments(orderId) {
        FROM outbound_order_documents d
        LEFT JOIN users u ON u.id = d.uploaded_by
       WHERE d.outbound_order_id = ?
-   ORDER BY CASE d.upload_stage WHEN 'order_created' THEN 0 WHEN 'post_delivery' THEN 1 ELSE 2 END,
+   ORDER BY CASE d.upload_stage WHEN 'sales_order' THEN 0 WHEN 'order_created' THEN 1 WHEN 'post_delivery' THEN 2 ELSE 3 END,
             d.uploaded_at ASC, d.id ASC`,
     [orderId]
   );
@@ -208,6 +215,7 @@ function headerFromRows(rows) {
     customer_reference: String(pick(r0, 'Customer Reference', 'customer_reference')).trim(),
     sold_to: String(pick(r0, 'Sold-to', 'Sold-To', 'sold_to')).trim(),
     name_1: String(pick(r0, 'Name 1', 'Name1', 'name_1')).trim(),
+    invoice_number: String(pick(r0, 'Invoice', 'Invoice Number', 'invoice_number')).trim() || null,
   };
 }
 
@@ -229,7 +237,7 @@ function dedupeOutboundItems(items) {
 }
 
 // --- GoDam: Excel upload (before /:id routes) ---
-router.post('/upload', requirePermission('can_upload_outbound'), upload.single('file'), async (req, res) => {
+router.post('/upload', requireUploadOutbound, upload.single('file'), async (req, res) => {
   try {
     if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
 
@@ -257,7 +265,7 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
     if (!warehouseId) return res.status(400).json({ error: 'warehouse_id could not be resolved for this upload' });
     const created = [];
     const results = [];
-    const { fireAndForgetEnsureFromOutboundOrder } = require('../services/salesOrderDocumentsService');
+    const { ensureWorkflowForOutbound } = require('../services/outboundDocumentWorkflowService');
 
     for (const [, groupRows] of byDelivery) {
       const head = headerFromRows(groupRows);
@@ -277,38 +285,24 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
       await dbRun('BEGIN IMMEDIATE');
       try {
         const existing = await dbGet(
-          `SELECT * FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`,
-          [deliveryKey, deliveryKey]
+          `SELECT id, status FROM outbound_orders
+           WHERE warehouse_id = ?
+             AND (TRIM(COALESCE(outbound_number, '')) = TRIM(?) OR TRIM(COALESCE(delivery, '')) = TRIM(?))
+           LIMIT 1`,
+          [warehouseId, deliveryKey, deliveryKey]
         );
 
-        if (existing) {
-          const st = String(existing.status || '').toLowerCase();
-          if (['picked', 'delivered'].includes(st)) {
-            throw new Error(`Cannot re-upload delivery ${deliveryKey} because it is already ${existing.status}`);
-          }
+        if (existing?.id) {
+          throw new Error('Uploaded delivery is already processed.');
         }
 
-        let orderId;
-        if (existing?.id) {
-          orderId = Number(existing.id);
-          await dbRun(
-            `UPDATE outbound_orders
-             SET outbound_number = ?,
-                 delivery = ?,
-                 sales_doc = ?,
-                 gapp_po = ?,
-                 customer_reference = ?,
-                 sold_to = ?,
-                 name_1 = ?,
-                 sales_order_number = ?,
-                 customer_po_number = ?,
-                 customer_name = ?,
-                 vendor_name = ?,
-                 status = 'Uploaded',
-                 uploaded_by_user_id = ?,
-                 warehouse_id = ?,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?`,
+        const orderId = await new Promise((resolve, reject) => {
+          db.run(
+            `INSERT INTO outbound_orders (
+              outbound_number, delivery, sales_doc, gapp_po, customer_reference, sold_to, name_1,
+              sales_order_number, customer_po_number, customer_name, vendor_name,
+              status, uploaded_by_user_id, warehouse_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Uploaded', ?, ?, CURRENT_TIMESTAMP)`,
             [
               deliveryKey,
               deliveryKey,
@@ -323,42 +317,13 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
               head.sold_to,
               userId,
               warehouseId,
-              orderId,
-            ]
+            ],
+            function (err) {
+              if (err) reject(err);
+              else resolve(this.lastID);
+            }
           );
-          // Make upload idempotent: replace lines + fifo for this delivery.
-          await dbRun(`DELETE FROM outbound_items WHERE outbound_id = ?`, [orderId]);
-          await dbRun(`DELETE FROM fifo_suggestions WHERE outbound_order_id = ?`, [orderId]);
-        } else {
-          orderId = await new Promise((resolve, reject) => {
-            db.run(
-              `INSERT INTO outbound_orders (
-              outbound_number, delivery, sales_doc, gapp_po, customer_reference, sold_to, name_1,
-              sales_order_number, customer_po_number, customer_name, vendor_name,
-              status, uploaded_by_user_id, warehouse_id, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Uploaded', ?, ?, CURRENT_TIMESTAMP)`,
-              [
-                deliveryKey,
-                deliveryKey,
-                head.sales_doc,
-                head.sales_doc,
-                head.customer_reference,
-                head.sold_to,
-                head.name_1,
-                head.sales_doc,
-                head.customer_reference,
-                head.name_1,
-                head.sold_to,
-                userId,
-                warehouseId,
-              ],
-              function (err) {
-                if (err) reject(err);
-                else resolve(this.lastID);
-              }
-            );
-          });
-        }
+        });
 
         for (const it of items) {
           const pn = it.material || it.sap_part_number;
@@ -376,27 +341,50 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
         await refreshAllOutboundItemsStock(mainStock, dbAll, dbRun, orderId);
         await generateFifoForOutboundOrder(orderId);
         const order = await outboundOrder.findById(orderId);
+        requireOutboundWarehouseId(order, 'upload outbound');
         created.push(order);
+        let wfResult = { drive_folder: null, workflow: null, message: null, drive_error: null };
+        try {
+          wfResult = await ensureWorkflowForOutbound({
+            warehouseId,
+            orderRow: order,
+            userId: Number(req.user.sub),
+            invoice_number: head.invoice_number,
+            customer_po_number: head.customer_reference,
+          });
+        } catch (wfErr) {
+          wfResult = {
+            drive_folder: { error: wfErr.message },
+            drive_error: wfErr.message,
+            workflow: null,
+            message: null,
+          };
+        }
         results.push({
           ok: true,
           delivery: deliveryKey,
           order_id: order.id,
           item_count: items.length,
           status: order.status,
+          outbound_number: order.outbound_number || order.delivery,
+          sales_doc: order.sales_doc || order.sales_order_number,
+          drive_folder: wfResult.drive_folder,
+          workflow: wfResult.workflow,
+          drive_message: wfResult.message,
+          drive_error: wfResult.drive_error || wfResult.drive_folder?.error || null,
         });
         logAudit({
           warehouse_id: order.warehouse_id || warehouseId,
           req,
           module_name: 'OUTBOUND',
-          action_type: existing ? 'UPDATED' : 'UPLOADED',
+          action_type: 'UPLOADED',
           reference_type: 'outbound_order',
           reference_id: order.id,
           reference_number: order.outbound_number || order.delivery,
-          status_before: existing ? existing.status : null,
+          status_before: null,
           status_after: order.status,
           new_value: { source: 'excel_upload', filename: req.file?.originalname || null },
         });
-        void fireAndForgetEnsureFromOutboundOrder(order);
       } catch (e) {
         await dbRun('ROLLBACK').catch(() => {});
         results.push({
@@ -410,6 +398,31 @@ router.post('/upload', requirePermission('can_upload_outbound'), upload.single('
     }
 
     res.status(201).json({ orders: created, success: created.length, total: results.length, results });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** Create or repair Google Drive SO folder tree for an existing outbound (after upload). */
+router.post('/:id/ensure-drive-folders', requirePermission('can_upload_outbound'), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const order = await outboundOrder.findById(orderId);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const { ensureWorkflowForOutbound } = require('../services/outboundDocumentWorkflowService');
+    const payload = await ensureWorkflowForOutbound({
+      warehouseId: order.warehouse_id,
+      orderRow: order,
+      userId: Number(req.user.sub),
+      customer_po_number: order.customer_po_number || order.customer_reference,
+    });
+    if (payload.drive_error || payload.drive_folder?.error) {
+      return res.status(400).json({
+        error: payload.drive_error || payload.drive_folder.error,
+        ...payload,
+      });
+    }
+    res.json(payload);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -494,54 +507,45 @@ router.post('/:id/expand-bom', requirePermission('can_upload_outbound'), async (
   }
 });
 
-router.post('/:id/send-for-pick', requireAdmin, async (req, res) => {
+/** Uploaders, managers, and checkers can release orders to mobile pickers. */
+function requireSendForPick(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  const role = String(req.user.role || '').toLowerCase();
+  if (role === 'admin' || role === 'manager' || role === 'checker') return next();
+  const perms = req.user.permissions || {};
+  if (perms.can_upload_outbound || perms.can_confirm_picked || perms.can_pick_orders) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+router.post('/:id/send-for-pick', requireSendForPick, async (req, res) => {
   try {
     const orderId = Number(req.params.id);
-    const order = await dbGet('SELECT * FROM outbound_orders WHERE id = ?', [orderId]);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!['Uploaded', 'Stock Checked'].includes(String(order.status || ''))) {
-      return res.status(400).json({ error: 'Only Uploaded or Stock Checked orders can be sent for pick' });
-    }
-
-    await dbRun(`UPDATE outbound_orders SET status = 'Sent For Pick', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
-      orderId,
-    ]);
-
-    const sold_to = order.sold_to || order.vendor_name || '';
-    const delivery = order.delivery || order.outbound_number || '';
-    const sales_doc = order.sales_doc || order.sales_order_number || '';
-    const body = `Prepare: ${sold_to}_${delivery}_${sales_doc}`;
-
-    await notifyPickOrder('New Pick Order', body, { outbound_order_id: orderId, type: 'send_for_pick' });
-
-    logAudit({
-      warehouse_id: order.warehouse_id,
-      req,
-      module_name: 'OUTBOUND',
-      action_type: 'SENT_FOR_PICK',
-      reference_type: 'outbound_order',
-      reference_id: orderId,
-      reference_number: order.outbound_number || order.delivery,
-      status_before: order.status,
-      status_after: 'Sent For Pick',
-    });
-
-    res.json({ ok: true, status: 'Sent For Pick', notification_preview: { title: 'New Pick Order', body } });
+    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+    const result = await sendOutboundOrderForPick(dbRun, dbGet, orderId, req);
+    res.json(result);
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(e.status || 400).json({ error: e.message, code: e.code });
   }
 });
 
 router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
   const orderId = Number(req.params.id);
-  const override = !!req.body?.override;
-  const reason = String(req.body?.reason || '').trim();
+  const direct = !!req.body?.direct;
+  const override = !!req.body?.override || direct;
+  const reason =
+    String(req.body?.reason || '').trim() ||
+    (direct ? 'Admin direct pick (skip mobile workflow)' : '');
   if (!orderId) return res.status(400).json({ error: 'Invalid id' });
   if (override && !reason) return res.status(400).json({ error: 'Override reason is required' });
 
   try {
     const adminRow = await dbGet(`SELECT id, full_name, username FROM users WHERE id = ?`, [req.user.sub]);
     const adminName = adminRow?.full_name || adminRow?.username || req.user.username || 'Admin';
+
+    if (direct) {
+      await refreshAllOutboundItemsStock(mainStock, dbAll, dbRun, orderId);
+      await generateFifoForOutboundOrder(orderId);
+    }
 
     await dbRun('BEGIN IMMEDIATE');
 
@@ -608,7 +612,7 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
           (SELECT COALESCE(SUM(picked_qty), 0) FROM picked_transactions WHERE fifo_suggestion_id = f.id) AS fifo_picked_qty
          FROM fifo_suggestions f
          WHERE f.outbound_order_id = ? AND f.outbound_item_id = ?
-         ORDER BY date(COALESCE(f.entry_date, '1970-01-01')) ASC, f.id ASC`,
+         ORDER BY ${fifoDateOrderExpr('f.entry_date', db)} ASC, f.id ASC`,
         [orderId, item.id]
       );
 
@@ -632,7 +636,12 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
         if (!rack) throw new Error(`Rack row missing for FIFO line ${f.id}`);
         const rackAvail = Number(rack.available_qty) || 0;
         if (pickQty > rackAvail + QTY_EPS) {
-          throw new Error(`Insufficient rack qty at ${f.rack_location}: need ${pickQty}, available ${rackAvail}`);
+          if (override) {
+            pickQty = Math.min(remaining, fifoRemaining, rackAvail);
+            if (pickQty <= QTY_EPS) continue;
+          } else {
+            throw new Error(`Insufficient rack qty at ${f.rack_location}: need ${pickQty}, available ${rackAvail}`);
+          }
         }
 
         const obrId = Number(f.outbound_bom_requirement_id) || 0;
@@ -645,14 +654,18 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
         const childPn = obr ? obr.child_part_number : null;
         const childPer = obr ? obr.child_qty_per_parent : null;
 
+        const warehouseId = resolvePickWarehouseId({ order: orderFresh, rackRow: rack, fifoSuggestion: f });
+        if (!warehouseId) throw new Error('Order warehouse is not set; cannot record pick.');
+
         await dbRun(
           `INSERT INTO picked_transactions (
-            outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
+            warehouse_id, outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
             material, sap_part_number, description, rack_location, picked_qty, device_id,
             picked_method, is_manual_pick, manual_pick_reason, picked_by_role,
             outbound_bom_requirement_id, parent_part_number, child_part_number, is_bom_pick, child_qty_per_parent
-          ) VALUES (?, ?, ?, ?, 'Admin Manual', ?, ?, ?, ?, ?, NULL, 'Manual Admin', 1, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, 'Admin Manual', ?, ?, ?, ?, ?, NULL, 'Manual Admin', 1, ?, ?, ?, ?, ?, ?, ?)`,
           [
+            warehouseId,
             orderId,
             item.id,
             f.id,
@@ -680,23 +693,18 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
         );
 
         const today = new Date().toISOString().slice(0, 10);
-        await dbRun(
-          `INSERT INTO stock_out (
-            transaction_date, part_number, sap_part_number, description, rack_location,
-            qty_out, outbound_number, reference_no, remarks
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            today,
-            rack.part_number,
-            rack.sap_part_number || '',
-            rack.description || '',
-            f.rack_location,
-            pickQty,
-            orderFresh.delivery || orderFresh.outbound_number || String(orderId),
-            `manual_pick_fifo_${f.id}`,
-            override ? `Admin Manual override:${reason}` : `Admin Manual:${adminName}`,
-          ]
-        );
+        await insertPickStockOut(dbRun, {
+          warehouseId,
+          transaction_date: today,
+          part_number: rack.part_number,
+          sap_part_number: rack.sap_part_number || '',
+          description: rack.description || '',
+          rack_location: f.rack_location,
+          qty_out: pickQty,
+          outbound_number: orderFresh.delivery || orderFresh.outbound_number || String(orderId),
+          reference_no: `manual_pick_fifo_${f.id}`,
+          remarks: override ? `Admin Manual override:${reason}` : `Admin Manual:${adminName}`,
+        });
 
         remaining -= pickQty;
         itemPickedNow += pickQty;
@@ -719,7 +727,7 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
           `SELECT * FROM stock_by_rack
            WHERE available_qty > 0
              AND (part_number IN (${ph}) OR COALESCE(sap_part_number,'') IN (${ph}))
-           ORDER BY date(COALESCE(first_entry_date,'1970-01-01')) ASC, id ASC`,
+           ORDER BY ${fifoDateOrderExpr('first_entry_date', db)} ASC, id ASC`,
           [...keys, ...keys]
         ) : [];
 
@@ -731,17 +739,26 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
           const mat = partKey || rack.part_number;
           const today = new Date().toISOString().slice(0, 10);
 
+          const warehouseIdFallback = resolvePickWarehouseId({ order: orderFresh, rackRow: rack });
+          if (!warehouseIdFallback) throw new Error('Order warehouse is not set; cannot record pick.');
+
           await dbRun(
             `INSERT INTO picked_transactions (
-              outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
+              warehouse_id, outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
               material, sap_part_number, description, rack_location, picked_qty, device_id,
               picked_method, is_manual_pick, manual_pick_reason, picked_by_role,
               outbound_bom_requirement_id, parent_part_number, child_part_number, is_bom_pick, child_qty_per_parent
-            ) VALUES (?, ?, NULL, ?, 'Admin Manual', ?, ?, ?, ?, ?, NULL, 'Manual Admin (no FIFO)', 1, ?, ?, NULL, NULL, NULL, 0, NULL)`,
+            ) VALUES (?, ?, ?, NULL, ?, 'Admin Manual', ?, ?, ?, ?, ?, NULL, 'Manual Admin (no FIFO)', 1, ?, ?, NULL, NULL, NULL, 0, NULL)`,
             [
-              orderId, item.id, req.user.sub,
-              mat, sapKey, item.description || '',
-              rack.rack_location, pickQty,
+              warehouseIdFallback,
+              orderId,
+              item.id,
+              req.user.sub,
+              mat,
+              sapKey,
+              item.description || '',
+              rack.rack_location,
+              pickQty,
               override ? reason : 'Picked without FIFO suggestion',
               String(req.user.role || 'admin').toLowerCase(),
             ]
@@ -752,19 +769,18 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
             [rackAvail - pickQty, (Number(rack.total_out_qty) || 0) + pickQty, rack.id]
           );
 
-          await dbRun(
-            `INSERT INTO stock_out (
-              transaction_date, part_number, sap_part_number, description, rack_location,
-              qty_out, outbound_number, reference_no, remarks
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              today, rack.part_number, rack.sap_part_number || '', rack.description || '',
-              rack.rack_location, pickQty,
-              orderFresh.delivery || orderFresh.outbound_number || String(orderId),
-              `manual_pick_no_fifo_rack_${rack.id}`,
-              override ? `Admin Manual override:${reason}` : `Admin Manual (no FIFO):${adminName}`,
-            ]
-          );
+          await insertPickStockOut(dbRun, {
+            warehouseId: warehouseIdFallback,
+            transaction_date: today,
+            part_number: rack.part_number,
+            sap_part_number: rack.sap_part_number || '',
+            description: rack.description || '',
+            rack_location: rack.rack_location,
+            qty_out: pickQty,
+            outbound_number: orderFresh.delivery || orderFresh.outbound_number || String(orderId),
+            reference_no: `manual_pick_no_fifo_rack_${rack.id}`,
+            remarks: override ? `Admin Manual override:${reason}` : `Admin Manual (no FIFO):${adminName}`,
+          });
 
           remaining -= pickQty;
           itemPickedNow += pickQty;
@@ -841,6 +857,7 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
     res.json({
       ok: true,
       status: 'Picked',
+      direct: !!direct,
       partial_pick: shortfallLineCount > 0,
       shortfall_line_count: shortfallLineCount,
       picked_lines: pickedLines,
@@ -853,7 +870,7 @@ router.post('/:id/manual-pick', requireAdmin, async (req, res) => {
 });
 
 /** Same as delivery-note deliver — deduct main_stock only here (sold_out_qty), insert sold_out + guard double delivery. */
-router.post('/:id/mark-delivered', requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']), async (req, res) => {
+router.post('/:id/mark-delivered', requireMarkDelivered, async (req, res) => {
   const orderId = Number(req.params.id);
   if (!orderId) return res.status(400).json({ error: 'Invalid id' });
   try {
@@ -902,7 +919,59 @@ router.post('/:id/reverse-delivery', requirePermission('can_upload_outbound'), a
   }
 });
 
-/** Attach a file to an outbound (sales) order; optional upload_stage: order_created | post_delivery | other */
+/** Undo picked order: restore rack quantities, remove pick tx rows, keep picked_orders row as Reversed. */
+router.post('/:id/reverse-picked', requireAnyPermission(['can_upload_outbound', 'can_confirm_picked']), async (req, res) => {
+  const orderId = Number(req.params.id);
+  if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const userRow = await dbGet(`SELECT full_name, username FROM users WHERE id = ?`, [req.user.sub]).catch(() => null);
+    const result = await reversePickedOrder(db, orderId, {
+      userId: req.user.sub,
+      userName: userRow?.full_name || userRow?.username || req.user.username,
+      reason: req.body?.reason || 'web reverse picked',
+    });
+    const o = await dbGet(`SELECT outbound_number, delivery, warehouse_id, status FROM outbound_orders WHERE id = ?`, [orderId]);
+    logAudit({
+      warehouse_id: o?.warehouse_id,
+      req,
+      module_name: 'OUTBOUND',
+      action_type: 'PICK_REVERSED',
+      reference_type: 'outbound_order',
+      reference_id: orderId,
+      reference_number: o?.outbound_number || o?.delivery,
+      remarks: req.body?.reason || 'reverse-picked',
+      status_after: o?.status,
+      new_value: result,
+    });
+    res.json(result);
+  } catch (e) {
+    const code = e.statusCode || 500;
+    res.status(code).json({ error: e.message });
+  }
+});
+
+/** Link outbound to customer master ID (customer_number) for Drive Customer_PO folder naming. */
+router.patch('/:id/customer-link', requirePermission('can_upload_outbound'), async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+    const customer_number = String(req.body?.customer_number || '').trim();
+    if (!customer_number) return res.status(400).json({ error: 'customer_number is required' });
+    const order = await dbGet(`SELECT id, warehouse_id FROM outbound_orders WHERE id = ?`, [orderId]);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const gate = await assertOutboundWarehouseReadable(req, order);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
+    await dbRun(
+      `UPDATE outbound_orders SET customer_po_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [customer_number, orderId]
+    );
+    res.json(await outboundOrder.findById(orderId));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+/** Sales order attachment (single stage) + Google Drive Customer_PO folder when Sales Doc. is set. */
 router.post(
   '/:id/order-documents',
   requirePermission('can_upload_outbound'),
@@ -916,11 +985,26 @@ router.post(
     try {
       const orderId = Number(req.params.id);
       if (!orderId) return res.status(400).json({ error: 'Invalid id' });
-      const order = await dbGet(`SELECT id, warehouse_id, outbound_number, delivery FROM outbound_orders WHERE id = ?`, [orderId]);
+      const order = await dbGet(
+        `SELECT id, warehouse_id, outbound_number, delivery, sales_doc, sales_order_number,
+                customer_po_number, customer_reference, customer_name, sold_to, name_1
+         FROM outbound_orders WHERE id = ?`,
+        [orderId]
+      );
       const gate = await assertOutboundWarehouseReadable(req, order);
       if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
       if (!req.file) return res.status(400).json({ error: 'file is required' });
-      const upload_stage = normalizeOutboundDocStage(req.body?.upload_stage);
+
+      const customer_number = String(req.body?.customer_number || '').trim();
+      if (customer_number) {
+        await dbRun(
+          `UPDATE outbound_orders SET customer_po_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [customer_number, orderId]
+        );
+        order.customer_po_number = customer_number;
+      }
+
+      const upload_stage = normalizeOutboundDocStage(req.body?.upload_stage || 'sales_order');
       const rel = path.join(UPLOAD_DOC_REL, req.file.filename).replace(/\\/g, '/');
       const insertId = await new Promise((resolve, reject) => {
         db.run(
@@ -941,6 +1025,58 @@ router.post(
         );
       });
       const row = await dbGet(`SELECT * FROM outbound_order_documents WHERE id = ?`, [insertId]);
+
+      const salesOrderNumber = String(order.sales_doc || order.sales_order_number || '').trim();
+      let drive_document = null;
+      let drive_error = null;
+      let drive_folder_link = null;
+
+      if (salesOrderNumber) {
+        try {
+          const wf = await ensureWorkflowForOutbound({
+            warehouseId: order.warehouse_id,
+            orderRow: order,
+            userId: Number(req.user.sub),
+            customer_po_number: order.customer_po_number || order.customer_reference,
+          });
+          drive_folder_link = wf?.drive_folder?.folder_link || wf?.folder_link || null;
+
+          let flow = await uploadDocumentFlow({
+            warehouseId: order.warehouse_id,
+            salesOrderNumber,
+            documentType: DOC_TYPES.CUSTOMER_PO,
+            localPath: req.file.path,
+            mimeType: req.file.mimetype,
+            originalName: req.file.originalname,
+            userId: Number(req.user.sub),
+            outbound_number: order.outbound_number || order.delivery,
+            customer_po_number: order.customer_po_number || customer_number || order.customer_reference,
+            customer_name: order.customer_name || order.name_1,
+            duplicate_action: null,
+          });
+          if (flow?.conflict && !flow?.document) {
+            flow = await uploadDocumentFlow({
+              warehouseId: order.warehouse_id,
+              salesOrderNumber,
+              documentType: DOC_TYPES.CUSTOMER_PO,
+              localPath: req.file.path,
+              mimeType: req.file.mimetype,
+              originalName: req.file.originalname,
+              userId: Number(req.user.sub),
+              outbound_number: order.outbound_number || order.delivery,
+              customer_po_number: order.customer_po_number || customer_number || order.customer_reference,
+              customer_name: order.customer_name || order.name_1,
+              duplicate_action: 'version',
+            });
+          }
+          drive_document = flow?.document || null;
+        } catch (e) {
+          drive_error = e.message;
+        }
+      } else {
+        drive_error = 'Sales Doc. missing on outbound — cannot save to Google Drive.';
+      }
+
       logAudit({
         warehouse_id: order.warehouse_id,
         req,
@@ -949,9 +1085,21 @@ router.post(
         reference_type: 'outbound_order',
         reference_id: orderId,
         reference_number: order.outbound_number || order.delivery,
-        new_value: { document_id: row?.id, upload_stage, file_name: row?.file_name },
+        new_value: {
+          document_id: row?.id,
+          upload_stage,
+          file_name: row?.file_name,
+          customer_number: customer_number || order.customer_po_number,
+          drive_file_id: drive_document?.cloud_file_id,
+        },
       });
-      res.status(201).json(row);
+      res.status(201).json({
+        ...row,
+        drive_document,
+        drive_error,
+        drive_folder_link,
+        customer_po_number: order.customer_po_number,
+      });
     } catch (e) {
       if (req.file?.path) fs.unlink(req.file.path, () => {});
       res.status(400).json({ error: e.message });
@@ -1170,6 +1318,21 @@ router.put('/:id/items/:itemId', requirePermission('can_upload_outbound'), async
   }
 });
 
+// PATCH /api/outbound/:id/warehouse — admin reassign order to another warehouse
+router.patch('/:id/warehouse', requireAdmin, async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    const newWarehouseId = Number(req.body?.warehouse_id);
+    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+    if (!newWarehouseId) return res.status(400).json({ error: 'warehouse_id is required' });
+    const result = await reassignOutboundWarehouse({ orderId, newWarehouseId, req });
+    res.json(result);
+  } catch (e) {
+    const code = e.statusCode || 400;
+    res.status(code).json({ error: e.message });
+  }
+});
+
 // GET /api/outbound - List orders
 router.get('/', async (req, res) => {
   try {
@@ -1184,7 +1347,30 @@ router.get('/', async (req, res) => {
       limit: parseInt(limit, 10),
       warehouse_id: scope.mode === 'all' ? undefined : scope.warehouseId,
     });
-    res.json(orders);
+    const ids = (orders || []).map((o) => Number(o.id)).filter(Boolean);
+    if (!ids.length) return res.json(orders);
+    const placeholders = ids.map(() => '?').join(',');
+    const whRows = await dbAll(
+      `SELECT o.id, o.warehouse_id, w.warehouse_code, w.warehouse_name
+       FROM outbound_orders o
+       LEFT JOIN warehouses w ON w.id = o.warehouse_id
+       WHERE o.id IN (${placeholders})`,
+      ids
+    );
+    const whMap = new Map((whRows || []).map((r) => [Number(r.id), r]));
+    res.json(
+      orders.map((o) => {
+        const w = whMap.get(Number(o.id));
+        return w
+          ? {
+              ...o,
+              warehouse_id: w.warehouse_id,
+              warehouse_code: w.warehouse_code,
+              warehouse_name: w.warehouse_name,
+            }
+          : o;
+      })
+    );
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1283,7 +1469,13 @@ router.get('/:id', async (req, res) => {
   try {
     const gate = await assertExplicitWarehouseParamAllowed(req);
     if (!gate.ok) return res.status(gate.status).json({ error: gate.message });
-    const order = await outboundOrder.findById(req.params.id);
+    const order = await dbGet(
+      `SELECT o.*, w.warehouse_code, w.warehouse_name
+       FROM outbound_orders o
+       LEFT JOIN warehouses w ON w.id = o.warehouse_id
+       WHERE o.id = ?`,
+      [req.params.id]
+    );
     if (!order) return res.status(404).json({ error: 'Order not found' });
     const role = String(req.user?.role || '').toLowerCase();
     if (role !== 'admin') {
@@ -1294,7 +1486,20 @@ router.get('/:id', async (req, res) => {
     const fifo = await listFifoForOrder(order.id);
     const order_documents = await listOutboundOrderDocuments(order.id);
     const pickFootprint = await loadOutboundPickFootprint({ dbGet, dbAll, orderId: order.id });
-    res.json({ ...order, fifo_suggestions: fifo, order_documents, ...pickFootprint });
+    const itemsWithTx = await dbAll(
+      `SELECT i.*,
+        (SELECT COALESCE(SUM(picked_qty), 0) FROM picked_transactions
+         WHERE outbound_item_id = i.id AND COALESCE(is_bom_pick, 0) = 0) AS picked_from_tx
+       FROM outbound_items i WHERE i.outbound_id = ? ORDER BY i.id`,
+      [order.id]
+    );
+    const items = (itemsWithTx || []).map((it) => {
+      const txSum = Number(it.picked_from_tx) || 0;
+      const col = Number(it.picked_qty) || 0;
+      const picked_qty = txSum > EPS ? txSum : col;
+      return { ...it, picked_qty, picked_qty_column: col, picked_qty_from_transactions: txSum };
+    });
+    res.json({ ...order, items, fifo_suggestions: fifo, order_documents, ...pickFootprint });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

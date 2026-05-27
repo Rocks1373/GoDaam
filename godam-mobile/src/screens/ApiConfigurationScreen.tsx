@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
-import { persistAndConfigureApiBase, setAuthHeader } from '../api/client';
+import { persistAndConfigureApiBase, resolveApiBaseForDevice, setAuthHeader } from '../api/client';
 import { getDefaultApiBaseUrl, normalizeToApiBase } from '../config/apiConfig';
 import { clearAuth } from '../storage/tokenStorage';
 import { getSavedBackendApiUrl } from '../storage/backendUrlStorage';
@@ -94,17 +94,40 @@ export default function ApiConfigurationScreen({ navigation }: Props) {
       );
       return;
     }
+    const resolved = resolveApiBaseForDevice(base);
     setBusy(true);
     try {
-      const client = axios.create({ baseURL: base, timeout: 30000 });
+      const client = axios.create({ baseURL: resolved, timeout: 30000 });
       const res = await client.get('/health');
       const data = res.data as Record<string, unknown>;
       const ok = res.status === 200 && healthLooksOk(data);
-      if (ok) Alert.alert('Success', 'Connected — health check passed.');
-      else Alert.alert('Unexpected response', JSON.stringify(data).slice(0, 280));
+      if (ok) {
+        const extra =
+          resolved !== base.replace(/\/$/, '')
+            ? `\n\n(Device URL used: ${resolved})`
+            : '';
+        Alert.alert('Success', `Connected — health check passed.${extra}`);
+      } else Alert.alert('Unexpected response', JSON.stringify(data).slice(0, 280));
     } catch (e: unknown) {
-      const ax = e as { message?: string };
-      Alert.alert('Connection failed', ax.message || 'Unknown error');
+      const ax = e as { message?: string; code?: string };
+      const isLocalhost = /localhost|127\.0\.0\.1/i.test(base);
+      let hint =
+        '1) Start backend on your Mac: ./dev.sh (port 3001)\n' +
+        '2) Phone and Mac on same Wi‑Fi\n';
+      if (isLocalhost && Platform.OS !== 'web') {
+        hint +=
+          '3) On a real phone, localhost does NOT work — use your Mac IP, e.g.\n' +
+          '   http://192.168.1.XX:3001/api\n' +
+          '   (System Settings → Network)\n';
+      }
+      if (Platform.OS === 'android') {
+        hint += '4) Android emulator: localhost is OK (maps to 10.0.2.2).\n';
+      }
+      hint += '\nProduction: https://godam.divadivya.cloud/api';
+      Alert.alert(
+        'Connection failed',
+        `${ax.message || 'Network Error'}\n\n${hint}`
+      );
     } finally {
       setBusy(false);
     }
@@ -157,6 +180,13 @@ export default function ApiConfigurationScreen({ navigation }: Props) {
           placeholderTextColor={palette.textMuted}
         />
         <Text style={styles.hint}>Example: https://godam.divadivya.cloud/api</Text>
+        <Pressable
+          style={styles.btnSecondary}
+          onPress={() => setUrl(getDefaultApiBaseUrl() || 'https://godam.divadivya.cloud/api')}
+          disabled={busy}
+        >
+          <Text style={styles.btnSecondaryText}>Use production server (recommended)</Text>
+        </Pressable>
         <Pressable style={styles.btnSecondary} onPress={testConnection} disabled={busy}>
           {busy ? (
             <ActivityIndicator color={palette.primaryHover} />

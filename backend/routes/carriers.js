@@ -2,6 +2,7 @@ const express = require('express');
 const { promisify } = require('util');
 
 const db = require('../db');
+const { insertRowById } = require('../utils/dbRun');
 const { requireAdmin } = require('../middleware/auth');
 const {
   normCarrierType,
@@ -44,12 +45,14 @@ router.post('/', requireAdmin, async (req, res) => {
     if (!carrier_name) return res.status(400).json({ error: 'carrier_name is required' });
     if (!carrier_type) return res.status(400).json({ error: 'carrier_type is required' });
 
-    await dbRun(
+    const row = await insertRowById(
+      db,
+      dbGet,
       `INSERT INTO transportation_carriers (carrier_name, carrier_type, status, created_at, updated_at)
        VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      [carrier_name, carrier_type, status]
+      [carrier_name, carrier_type, status],
+      'transportation_carriers'
     );
-    const row = await dbGet(`SELECT * FROM transportation_carriers WHERE id = last_insert_rowid()`);
     res.status(201).json(toLegacyCarrier(row));
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -65,7 +68,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
     if (!existing) return res.status(404).json({ error: 'Carrier not found' });
 
     const carrier_name = req.body?.carrier_name !== undefined ? String(req.body.carrier_name || '').trim() : existing.carrier_name;
-    const carrier_type = req.body?.carrier_type !== undefined ? normType(req.body.carrier_type) : existing.carrier_type;
+    const carrier_type = req.body?.carrier_type !== undefined ? normCarrierType(req.body.carrier_type) : existing.carrier_type;
     const is_active = req.body?.is_active === undefined ? (existing.status === 'Active' ? 1 : 0) : req.body.is_active ? 1 : 0;
     const status = is_active ? 'Active' : 'Inactive';
 
@@ -168,14 +171,16 @@ router.post('/:carrier_id/drivers', requireAdmin, async (req, res) => {
     };
     const auto_warning = computeAutoWarning(draft);
 
-    await dbRun(
+    const row = await insertRowById(
+      db,
+      dbGet,
       `INSERT INTO transportation_drivers (
         carrier_id, carrier_type, carrier_name, driver_name, driver_phone,
         vehicle_number, vehicle_type, status, auto_warning, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      [carrier_id, c.carrier_type, c.carrier_name, driver_name, phone_number || '', vehicle_number, vehicle_type, status, auto_warning]
+      [carrier_id, c.carrier_type, c.carrier_name, driver_name, phone_number || '', vehicle_number, vehicle_type, status, auto_warning],
+      'transportation_drivers'
     );
-    const row = await dbGet(`SELECT * FROM transportation_drivers WHERE id = last_insert_rowid()`);
     res.status(201).json(toLegacyDriver(row));
   } catch (e) {
     res.status(500).json({ error: e.message });

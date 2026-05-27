@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { GitCompare, Printer, Download } from 'lucide-react';
+import { GitCompare, Printer, Download, FileDown } from 'lucide-react';
 import { reportsApi } from '../services/api';
 import { useTableSort } from '../hooks/useTableSort';
 import {
@@ -8,9 +8,43 @@ import {
   WIDTH_STORAGE_KEY,
   UNIFIED_GROUP_HEADER,
 } from './stockComparisonColumnMeta';
+import { exportJsonToExcel } from '../utils/exportExcel';
 
 const SAP_STORAGE_CODES = ['1001', '1002', '1003', '1004', '1005', '1007'];
-const FILTER_SESSION_KEY = 'godam_stock_comparison_filters_v1';
+
+/** Simple compare: result = main − picked; difference = result − SAP stock; match when difference = 0. */
+const SIMPLE_COMPARE_COLS = [
+  ['part_number', 'Part #'],
+  ['sap_part_number', 'SAP Part #'],
+  ['description', 'Description'],
+  ['main_stock_available_qty', 'Main stock total'],
+  ['picked_not_delivered_qty', 'Picked not delivered'],
+  ['compare_result_qty', 'Result'],
+  ['sap_physical_qty', 'SAP stock'],
+  ['difference', 'Difference'],
+  ['comparison_result', 'Match'],
+];
+
+const SIMPLE_UNIFIED_COLS = [
+  ...SIMPLE_COMPARE_COLS.slice(0, -1),
+  ['stock_by_rack_available_qty', 'Rack sum'],
+  ['main_vs_rack_difference', 'Main − rack'],
+  ['comparison_result', 'Match'],
+];
+
+const SIMPLE_EXPORT_KEYS = [
+  'part_number',
+  'sap_part_number',
+  'description',
+  'main_stock_available_qty',
+  'picked_not_delivered_qty',
+  'compare_result_qty',
+  'sap_physical_qty',
+  'difference',
+  'comparison_result',
+];
+
+const FILTER_SESSION_KEY = 'godam_stock_comparison_filters_v5';
 
 function readFilterSession() {
   try {
@@ -51,7 +85,12 @@ function isNumishKey(k) {
     k === 'main_vs_sap_difference' ||
     k === 'main_vs_rack_difference' ||
     k === 'sap_qty_on_main' ||
-    k === 'main_stock_qty'
+    k === 'main_stock_qty' ||
+    k === 'picked_not_delivered_qty' ||
+    k === 'main_stock_compare_qty' ||
+    k === 'adjusted_main_qty' ||
+    k === 'compare_result_qty' ||
+    k === 'stock_upload_qty'
   );
 }
 
@@ -168,8 +207,8 @@ export default function StockComparisonReport() {
   );
 
   const layoutKey = useMemo(() => {
-    if (comparisonType === 'main_vs_sap') return `main_vs_sap|${comparisonBase}|sl:${storageLocsSig}|v:${vendorKeysSig}|v4`;
-    return `${comparisonType}|sl:${storageLocsSig}|v:${vendorKeysSig}|v4`;
+    if (comparisonType === 'main_vs_sap') return `main_vs_sap|sl:${storageLocsSig}|v:${vendorKeysSig}|v7-adj`;
+    return `${comparisonType}|sl:${storageLocsSig}|v:${vendorKeysSig}|v7-adj`;
   }, [comparisonType, comparisonBase, storageLocsSig, vendorKeysSig]);
 
   useEffect(() => {
@@ -204,12 +243,13 @@ export default function StockComparisonReport() {
     setLoading(true);
     setErr('');
     try {
-      const base =
-        comparisonType === 'main_vs_rack' || comparisonType === 'main_unified'
-          ? 'main_stock'
-          : comparisonBase === 'sap_stock'
-            ? 'sap_stock'
-            : 'main_stock';
+      if (comparisonType !== 'main_vs_rack' && selectedStorageLocs.length === 0) {
+        setRows([]);
+        setMeta(null);
+        setErr('Select at least one SAP storage location (e.g. 1004).');
+        return;
+      }
+      const base = comparisonType === 'main_vs_rack' ? 'main_stock' : 'main_stock';
       const storage_locs =
         comparisonType === 'main_vs_rack'
           ? undefined
@@ -248,29 +288,8 @@ export default function StockComparisonReport() {
   const { displayRows, sortKey, direction, requestSort } = useTableSort(rows, sortValue);
 
   const thList = useMemo(() => {
-    if (comparisonType === 'main_unified') {
-      return [
-        ['part_number', 'Part #'],
-        ['sap_part_number', 'SAP part # (main)'],
-        ['sap_lookup_material', 'SAP material (upload)'],
-        ['description', 'Description'],
-        ['vendor_number', 'Vendor #'],
-        ['vendor_name', 'Vendor name'],
-        ['main_stock_available_qty', 'Main qty'],
-        ['sap_qty_on_main', 'SAP qty on main'],
-        ['sap_physical_qty', 'SAP physical'],
-        ['sap_transit_1002', 'Transit 1002'],
-        ['sap_qty_1003', 'SAP 1003'],
-        ['sap_qty_1004', 'SAP 1004'],
-        ['sap_qty_1007', 'SAP 1007'],
-        ['main_vs_sap_difference', 'Main − SAP'],
-        ['sap_balance', 'SAP vs main'],
-        ['stock_by_rack_available_qty', 'Rack sum'],
-        ['main_vs_rack_difference', 'Main − rack'],
-        ['rack_balance', 'Rack vs main'],
-        ['comparison_result', 'Match'],
-      ];
-    }
+    if (comparisonType === 'main_unified') return SIMPLE_UNIFIED_COLS;
+    if (comparisonType === 'main_vs_sap') return SIMPLE_COMPARE_COLS;
     if (comparisonType === 'main_vs_rack') {
       return [
         ['part_number', 'Part #'],
@@ -286,35 +305,7 @@ export default function StockComparisonReport() {
         ['comparison_result', 'Match'],
       ];
     }
-    if (comparisonBase === 'sap_stock') {
-      return [
-        ['sap_material', 'SAP material'],
-        ['description', 'Description'],
-        ['sap_physical_qty', 'SAP physical'],
-        ['main_stock_qty', 'Main qty'],
-        ['difference', 'Diff'],
-        ['sap_balance', 'Main vs SAP'],
-        ['comparison_result', 'Match'],
-        ['material_group', 'Mat. group'],
-        ['vendor_number', 'Vendor #'],
-      ];
-    }
-    return [
-      ['part_number', 'Part #'],
-      ['sap_part_number', 'SAP Part #'],
-      ['description', 'Description'],
-      ['vendor_number', 'Vendor #'],
-      ['vendor_name', 'Vendor name'],
-      ['main_stock_available_qty', 'Main avail'],
-      ['sap_physical_qty', 'SAP physical'],
-      ['sap_transit_1002', 'Transit 1002'],
-      ['sap_qty_1003', '1003'],
-      ['sap_qty_1004', '1004'],
-      ['sap_qty_1007', '1007'],
-      ['difference', 'Diff'],
-      ['sap_balance', 'SAP vs main'],
-      ['comparison_result', 'Match'],
-    ];
+    return SIMPLE_COMPARE_COLS;
   }, [comparisonType, comparisonBase]);
 
   const tablePixelWidth = useMemo(
@@ -375,28 +366,9 @@ export default function StockComparisonReport() {
 
   const headersForCsv = useMemo(() => {
     if (comparisonType === 'main_unified') {
-      return [
-        'part_number',
-        'sap_part_number',
-        'sap_lookup_material',
-        'description',
-        'vendor_number',
-        'vendor_name',
-        'main_stock_available_qty',
-        'sap_qty_on_main',
-        'sap_physical_qty',
-        'sap_transit_1002',
-        'sap_qty_1003',
-        'sap_qty_1004',
-        'sap_qty_1007',
-        'main_vs_sap_difference',
-        'sap_balance',
-        'stock_by_rack_available_qty',
-        'main_vs_rack_difference',
-        'rack_balance',
-        'comparison_result',
-      ];
+      return [...SIMPLE_EXPORT_KEYS, 'stock_by_rack_available_qty', 'main_vs_rack_difference'];
     }
+    if (comparisonType === 'main_vs_sap') return SIMPLE_EXPORT_KEYS;
     if (comparisonType === 'main_vs_rack') {
       return [
         'part_number',
@@ -412,50 +384,12 @@ export default function StockComparisonReport() {
         'comparison_result',
       ];
     }
-    if (comparisonBase === 'sap_stock') {
-      return [
-        'sap_material',
-        'description',
-        'sap_physical_qty',
-        'main_stock_qty',
-        'difference',
-        'sap_balance',
-        'comparison_result',
-        'material_group',
-        'vendor_number',
-      ];
-    }
-    return [
-      'part_number',
-      'sap_part_number',
-      'description',
-      'vendor_number',
-      'vendor_name',
-      'main_stock_available_qty',
-      'sap_physical_qty',
-      'sap_transit_1002',
-      'sap_qty_1003',
-      'sap_qty_1004',
-      'sap_qty_1007',
-      'difference',
-      'sap_balance',
-      'comparison_result',
-    ];
+    return SIMPLE_EXPORT_KEYS;
   }, [comparisonType, comparisonBase]);
 
   const mismatchExportKeys = useMemo(() => {
-    if (comparisonType === 'main_unified') {
-      return [
-        'part_number',
-        'sap_part_number',
-        'comparison_result',
-        'sap_balance',
-        'rack_balance',
-        'main_stock_available_qty',
-        'sap_physical_qty',
-        'main_vs_sap_difference',
-        'main_vs_rack_difference',
-      ];
+    if (comparisonType === 'main_unified' || comparisonType === 'main_vs_sap') {
+      return SIMPLE_EXPORT_KEYS;
     }
     if (comparisonType === 'main_vs_rack') {
       return [
@@ -468,20 +402,22 @@ export default function StockComparisonReport() {
         'difference',
       ];
     }
-    if (comparisonBase === 'sap_stock') {
-      return ['sap_material', 'comparison_result', 'sap_balance', 'main_stock_qty', 'sap_physical_qty', 'difference'];
-    }
-    return ['part_number', 'sap_part_number', 'comparison_result', 'sap_balance', 'main_stock_available_qty', 'sap_physical_qty', 'difference'];
+    return SIMPLE_EXPORT_KEYS;
   }, [comparisonType, comparisonBase]);
 
-  const exportRows = (subset, keysOverride) => {
+  const buildExportObjects = (subset, keysOverride) => {
     const list = subset || displayRows;
     const keys = keysOverride || headersForCsv;
-    const objRows = list.map((r) => {
+    return list.map((r) => {
       const o = {};
       for (const h of keys) o[h] = r[h];
       return o;
     });
+  };
+
+  const exportRowsCsv = (subset, keysOverride) => {
+    const keys = keysOverride || headersForCsv;
+    const objRows = buildExportObjects(subset, keysOverride);
     downloadCsvFile(
       `stock-comparison-${comparisonType}${vendorKeys.length ? `-${vendorKeysSig.replace(/[^\w.-]+/g, '_')}` : ''}-${Date.now()}.csv`,
       keys,
@@ -489,9 +425,19 @@ export default function StockComparisonReport() {
     );
   };
 
+  const exportRowsExcel = (subset, keysOverride) => {
+    const slug = `stock-comparison-${comparisonType}${vendorKeys.length ? `-${vendorKeysSig.replace(/[^\w.-]+/g, '_')}` : ''}-${Date.now()}.xlsx`;
+    exportJsonToExcel(buildExportObjects(subset, keysOverride), slug, 'Stock Comparison');
+  };
+
   const exportMismatch = () => {
     const mis = displayRows.filter((r) => (r.comparison_result ?? r.status) === 'Mismatching');
-    exportRows(mis, mismatchExportKeys);
+    exportRowsCsv(mis, mismatchExportKeys);
+  };
+
+  const exportMismatchExcel = () => {
+    const mis = displayRows.filter((r) => (r.comparison_result ?? r.status) === 'Mismatching');
+    exportRowsExcel(mis, mismatchExportKeys);
   };
 
   const printReport = () => {
@@ -542,19 +488,35 @@ export default function StockComparisonReport() {
         <div className="flex flex-wrap gap-1.5">
           <button
             type="button"
-            onClick={exportMismatch}
+            onClick={exportMismatchExcel}
             className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-amber-300 bg-amber-50 text-[11px] font-bold text-amber-900 hover:bg-amber-100"
           >
-            <Download className="w-3.5 h-3.5" />
-            Export mismatch CSV
+            <FileDown className="w-3.5 h-3.5" />
+            Export mismatch Excel
           </button>
           <button
             type="button"
-            onClick={() => exportRows()}
+            onClick={() => exportRowsExcel()}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-primary-300 bg-primary-50 text-[11px] font-bold text-primary-900 hover:bg-primary-100"
+          >
+            <FileDown className="w-3.5 h-3.5" />
+            Export full Excel
+          </button>
+          <button
+            type="button"
+            onClick={exportMismatch}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-gray-300 bg-white text-[11px] font-bold text-gray-700 hover:bg-gray-50"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Mismatch CSV
+          </button>
+          <button
+            type="button"
+            onClick={() => exportRowsCsv()}
             className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-gray-300 bg-white text-[11px] font-bold text-gray-800 hover:bg-gray-50"
           >
             <Download className="w-3.5 h-3.5" />
-            Export full CSV
+            Full CSV
           </button>
           <button
             type="button"
@@ -566,27 +528,6 @@ export default function StockComparisonReport() {
           </button>
         </div>
       </div>
-
-      <p className="text-[11px] text-gray-600 mb-2 max-w-4xl">
-        <strong>Column guide:</strong> Hover any column header for which table/field the value comes from.{' '}
-        <strong>Resize:</strong> drag the right edge of a header (blue highlight) to widen or narrow — widths are saved per report layout in this browser.
-      </p>
-
-      <p className="text-[11px] text-gray-600 mb-2 max-w-4xl">
-        <strong>Main stock</strong> is the source of truth for combined mode: every row is a main-stock item.{' '}
-        {comparisonType === 'main_unified' ? (
-          <>
-            <strong>SAP physical</strong> is the sum of quantities from the latest processed SAP upload for the storage locations you tick below (per-SL columns still show each bucket).{' '}
-            <strong>Rack sum</strong> adds all <code className="text-[10px] bg-gray-100 px-0.5 rounded">stock_by_rack</code>{' '}
-            quantities where part number or SAP part number matches this line.
-          </>
-        ) : null}
-        {comparisonType === 'main_vs_sap' && comparisonBase === 'sap_stock' ? (
-          <>
-            <strong>SAP as base:</strong> one row per SAP material present in the ticked storage locations; main quantity is the sum of matching main-stock available_qty.
-          </>
-        ) : null}
-      </p>
 
       <div className="rounded-lg border border-gray-200 bg-gray-50/80 p-2.5 mb-2 space-y-2.5">
         <div className="text-[10px] font-extrabold uppercase tracking-wide text-gray-500">Comparison filters</div>
@@ -624,7 +565,7 @@ export default function StockComparisonReport() {
               </div>
             ) : (
               <p className="text-[11px] text-gray-600 leading-snug">
-                Rows follow <span className="font-bold">main stock</span> (this report mode is main-led).
+                Rows follow <span className="font-bold">main stock</span>.
               </p>
             )}
           </div>
@@ -722,7 +663,7 @@ export default function StockComparisonReport() {
               })}
             </div>
             <p className="text-[9px] text-gray-500 mt-0.5">
-              SAP physical column = sum of matching materials in checked locations (same batch).
+              <strong>SAP stock</strong> column = sum of ticked SL only (e.g. tick 1004 + 1007 → both added).
             </p>
           </div>
         </div>
@@ -824,7 +765,6 @@ export default function StockComparisonReport() {
           </p>
         )
       ) : null}
-      {meta?.note ? <p className="text-[10px] text-gray-500 mb-1">{meta.note}</p> : null}
       {err ? <div className="text-[11px] font-bold text-red-700 mb-2">{err}</div> : null}
 
       <div ref={printRef} className="border border-gray-200 rounded-lg overflow-auto bg-white max-h-[min(78vh,920px)] shadow-sm">

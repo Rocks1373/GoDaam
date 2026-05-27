@@ -6,6 +6,9 @@ export type InboundBatchRow = {
   vendor_name: string | null;
   upload_date: string | null;
   status: string;
+  lpo?: string | null;
+  sap_po?: string | null;
+  invoice_number?: string | null;
   item_count?: number;
   sum_remaining?: number;
 };
@@ -22,13 +25,15 @@ export type InboundItemRow = {
   status: string;
 };
 
+const inboundScope = { skipWarehouseHeader: true as const };
+
 export async function listInboundBatches(): Promise<InboundBatchRow[]> {
-  const res = await api.get<InboundBatchRow[]>('/mobile/inbound-batches');
+  const res = await api.get<InboundBatchRow[]>('/mobile/inbound-batches', inboundScope);
   return Array.isArray(res.data) ? res.data : [];
 }
 
 export async function getInboundBatchDetail(batchId: number): Promise<{ batch: InboundBatchRow; items: InboundItemRow[] }> {
-  const res = await api.get(`/mobile/inbound-batches/${batchId}`);
+  const res = await api.get(`/mobile/inbound-batches/${batchId}`, inboundScope);
   return res.data as { batch: InboundBatchRow; items: InboundItemRow[] };
 }
 
@@ -41,6 +46,6 @@ export async function uploadPutaway(payload: {
   transaction_date?: string;
   remarks?: string;
 }) {
-  const res = await api.post('/mobile/putaway/upload', payload);
+  const res = await api.post('/mobile/putaway/upload', payload, inboundScope);
   return res.data as { ok: boolean; item?: InboundItemRow };
 }

@@ -7,6 +7,7 @@ export type MainStockSuggestRow = {
   part_number: string;
   sap_part_number?: string | null;
   description?: string | null;
+  uom?: string | null;
 };
 
 export type StockByRackPartSuggestRow = MainStockSuggestRow;

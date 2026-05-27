@@ -22,6 +22,14 @@ Optional:
 | `AUTH_LIMIT_MAX` / `AUTH_LIMIT_WINDOW_MS` | Per-IP login rate limit |
 | `AUTH_USER_LIMIT_MAX` / `AUTH_USER_LIMIT_WINDOW_MS` | Per-username login rate limit |
 | `AUTH_LOCK_MAX_ATTEMPTS` / `AUTH_LOCK_MINUTES` | Account lockout after failed logins |
+| `GOOGLE_WEB_CLIENT_ID` | Google OAuth web client ID (server verifies ID tokens) |
+| `GOOGLE_ANDROID_CLIENT_ID` | Google OAuth Android client ID |
+| `GOOGLE_IOS_CLIENT_ID` | Google OAuth iOS client ID (future) |
+| `JWT_MAX_LIFETIME_DAYS` | Max JWT lifetime (default 7; cap 30) |
+
+Frontend (Vite): `VITE_GOOGLE_WEB_CLIENT_ID` — same value as `GOOGLE_WEB_CLIENT_ID`.
+
+Mobile (Expo): `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`, `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`, optional `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`.
 
 ## Process
 
@@ -29,6 +37,29 @@ Optional:
 2. Place `backend/uploads` on persistent disk; never expose it as a public static URL.
 3. Put Node behind nginx/Caddy with TLS; proxy `/api` to the Node port.
 4. Build the SPA (`frontend/dist`) and serve it from nginx or the same host as the API.
+
+## VPS sync does not replace the database
+
+`bash scripts/sync-to-vps.sh --deploy` (or `deploy/vps/rsync-to-godaam-vps.sh --deploy`) only:
+
+- Copies application **code** to `/opt/godaam` (rsync excludes `.env` and `backend/warehouse.db`)
+- Rebuilds the frontend and **restarts** `godaam-backend`
+- On startup, **`migrateGodamSchema` adds** missing columns/tables only — it does not truncate or drop business data
+
+Production data lives in **PostgreSQL** at `DATABASE_URL` in `/etc/godaam/backend.env` (not in the git repo). That file is **not** overwritten by rsync.
+
+**Never run on the VPS against production `DATABASE_URL`:**
+
+| Command | Risk |
+|---------|------|
+| `npm run fresh-db` / `wipe-db` | Deletes warehouse data |
+| `npm run migrate:sqlite-to-pg` | Can **DROP** tables when copying from SQLite |
+| `npm run pg:bootstrap` | Copies SQLite into PG if PG looks empty |
+| `npm run seed:*` | Inserts test/demo data |
+
+After each deploy, the script prints a **PostgreSQL check** (database name + user count) so you can confirm the API still points at the same DB.
+
+If data “disappeared” after deploy, usual causes are: `DATABASE_URL` changed to a different/empty database, Postgres volume was recreated, or a wipe/migrate/seed script was run on the server — not rsync itself.
 
 ## Local Docker Postgres
 

@@ -2,6 +2,7 @@ const express = require('express');
 const { promisify } = require('util');
 
 const db = require('../db');
+const { loadOutboundPickFootprint } = require('../services/outboundPickFootprint');
 const { assertExplicitWarehouseParamAllowed, resolveReadWarehouseScope } = require('../services/warehouseContext');
 
 const router = express.Router();
@@ -326,6 +327,97 @@ router.get('/range-summary', async (req, res) => {
   }
 });
 
+/** GET /api/dashboard/live-activity — orders under pick with line progress + recent picker scans. */
+router.get('/live-activity', async (req, res) => {
+  try {
+    const scope = await readScopeOrError(req, res);
+    if (!scope) return;
+    const wh = whOutbound(scope);
+
+    const orders = await dbAll(
+      `SELECT o.id, o.outbound_number, o.status, o.customer_name, o.vendor_name, o.sold_to,
+              o.sales_order_number, o.updated_at, o.created_at,
+              o.warehouse_id, w.warehouse_code, w.warehouse_name
+       FROM outbound_orders o
+       LEFT JOIN warehouses w ON w.id = o.warehouse_id
+       WHERE COALESCE(o.status,'') IN ('Sent For Pick','Picking') ${wh.sql.replace(/warehouse_id/g, 'o.warehouse_id')}
+       ORDER BY datetime(COALESCE(o.updated_at, o.created_at)) DESC
+       LIMIT 30`,
+      [...wh.params]
+    );
+
+    if (!orders.length) {
+      return res.json({ orders: [], recent_picks: [] });
+    }
+
+    const ids = orders.map((o) => Number(o.id)).filter(Boolean);
+    const placeholders = ids.map(() => '?').join(',');
+
+    const seenRows = await dbAll(
+      `SELECT s.outbound_order_id, s.seen_at, COALESCE(u.full_name, u.username, '') AS user_name
+       FROM outbound_order_seen s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.outbound_order_id IN (${placeholders})
+       ORDER BY s.seen_at DESC`,
+      ids
+    ).catch(() => []);
+
+    const seenByOrder = new Map();
+    for (const s of seenRows || []) {
+      const oid = Number(s.outbound_order_id);
+      if (!seenByOrder.has(oid)) seenByOrder.set(oid, []);
+      const list = seenByOrder.get(oid);
+      if (list.length < 5) list.push({ user_name: s.user_name, seen_at: s.seen_at });
+    }
+
+    const recent_picks = await dbAll(
+      `SELECT t.id, t.outbound_order_id, o.outbound_number,
+              t.user_name, t.material, t.sap_part_number, t.rack_location, t.picked_qty, t.picked_at, t.picked_method
+       FROM picked_transactions t
+       JOIN outbound_orders o ON o.id = t.outbound_order_id
+       WHERE t.outbound_order_id IN (${placeholders})
+         AND COALESCE(o.status,'') IN ('Sent For Pick','Picking') ${wh.sql.replace(/warehouse_id/g, 'o.warehouse_id')}
+       ORDER BY datetime(t.picked_at) DESC, t.id DESC
+       LIMIT 40`,
+      [...ids, ...wh.params]
+    ).catch(() => []);
+
+    const enriched = [];
+    for (const o of orders) {
+      const { pick_progress, picked_transactions, picked_order } = await loadOutboundPickFootprint({
+        dbGet,
+        dbAll,
+        orderId: o.id,
+      });
+      enriched.push({
+        id: o.id,
+        outbound_number: o.outbound_number,
+        status: o.status,
+        customer_name: o.customer_name,
+        vendor_name: o.vendor_name || o.sold_to,
+        sales_order_number: o.sales_order_number,
+        warehouse_id: o.warehouse_id,
+        warehouse_code: o.warehouse_code,
+        warehouse_name: o.warehouse_name,
+        updated_at: o.updated_at || o.created_at,
+        pick_progress,
+        picked_order: picked_order
+          ? {
+              confirmed_by_user_name: picked_order.confirmed_by_user_name,
+              confirmed_at: picked_order.confirmed_at,
+            }
+          : null,
+        viewers: seenByOrder.get(Number(o.id)) || [],
+        recent_picks: (picked_transactions || []).slice(-5).reverse(),
+      });
+    }
+
+    res.json({ orders: enriched, recent_picks: recent_picks || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 /** Recent outbound rows + inbound putaway count for dashboard pipeline view. */
 router.get('/order-pipeline', async (req, res) => {
   try {
@@ -344,10 +436,11 @@ router.get('/order-pipeline', async (req, res) => {
       [...bh.params]
     );
     const outbound_orders = await dbAll(
-      `SELECT *
-       FROM outbound_orders
-       WHERE 1=1 ${wh.sql}
-       ORDER BY datetime(COALESCE(updated_at, created_at)) DESC
+      `SELECT o.*, w.warehouse_code, w.warehouse_name
+       FROM outbound_orders o
+       LEFT JOIN warehouses w ON w.id = o.warehouse_id
+       WHERE 1=1 ${wh.sql.replace(/warehouse_id/g, 'o.warehouse_id')}
+       ORDER BY datetime(COALESCE(o.updated_at, o.created_at)) DESC
        LIMIT 80`,
       [...wh.params]
     );

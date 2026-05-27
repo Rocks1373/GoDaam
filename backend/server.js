@@ -16,19 +16,12 @@ const crypto = require('crypto');
 const path = require('path');
 const cookieParser = require('cookie-parser');
 
-const huaweiStreamlit = require('./huaweiStreamlitAutostart');
-huaweiStreamlit.registerLifecycleHooks();
-
-const {
-  streamlitProxyGate,
-  createHuaweiGodamStreamlitProxy,
-  attachStreamlitUpgrade,
-} = require('./huaweiGodamStreamlitProxy');
-const huaweiStreamlitProxyBundle = createHuaweiGodamStreamlitProxy();
-const HUAWEI_GODAM_STREAMLIT_BASE = huaweiStreamlitProxyBundle.base;
+const HUAWEI_STREAMLIT_ENABLED = false;
+const HUAWEI_GODAM_STREAMLIT_BASE = 'huawei-godam-app';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
+const HOST = String(process.env.HOST || '0.0.0.0');
 const NODE_ENV = String(process.env.NODE_ENV || 'development').toLowerCase();
 const IS_PROD = NODE_ENV === 'production';
 
@@ -38,7 +31,6 @@ app.set('trust proxy', 1);
 
 // Initialize DBs (creates tables if missing).
 require('./db');             // Postgres only — see backend/db.js
-require('./huaweiGodamDb');  // Huawei plugin store (separate, still SQLite by design — internal-only)
 
 /**
  * CORS configuration.
@@ -49,6 +41,10 @@ require('./huaweiGodamDb');  // Huawei plugin store (separate, still SQLite by d
 const DEFAULT_CORS_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
+  'http://localhost:5174',
+  'http://127.0.0.1:5174',
+  'http://localhost:5175',
+  'http://127.0.0.1:5175',
   'http://localhost:8081',
   'http://127.0.0.1:8081',
   'http://localhost:19006',
@@ -132,30 +128,52 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Huawei Streamlit reverse proxy — auth-gated via cookie.
-app.use(
-  `/${HUAWEI_GODAM_STREAMLIT_BASE}`,
-  streamlitProxyGate,
-  huaweiStreamlitProxyBundle.proxy
-);
+// Huawei GoDam Streamlit proxy integration has been deleted.
+const webAdminOrigin = String(process.env.WEB_ADMIN_ORIGIN || 'http://127.0.0.1:5173').replace(/\/$/, '');
+app.get([`/${HUAWEI_GODAM_STREAMLIT_BASE}`, `/${HUAWEI_GODAM_STREAMLIT_BASE}/*`], (_req, res) => {
+  res.redirect(302, `${webAdminOrigin}/huawei`);
+});
+
+const db = require('./db');
+
+// Per-request transaction scope — prevents Postgres pool exhaustion from leaked BEGINs.
+if (typeof db.requestTxMiddleware === 'function') {
+  app.use(db.requestTxMiddleware());
+}
 
 // --- Public routes ---
-app.get('/api/health', (_req, res) => {
-  res.json({
+app.get('/api/health', async (_req, res) => {
+  const base = {
     status: 'ok',
     message: 'GoDam API running',
     env: IS_PROD ? 'production' : NODE_ENV,
-  });
+  };
+  try {
+    const row = await new Promise((resolve, reject) => {
+      db.get('SELECT 1 AS ok', [], (err, r) => (err ? reject(err) : resolve(r)));
+    });
+    res.json({ ...base, database: row?.ok === 1 ? 'connected' : 'unknown' });
+  } catch (e) {
+    res.status(503).json({
+      status: 'degraded',
+      message: 'GoDam API running but database unreachable',
+      env: IS_PROD ? 'production' : NODE_ENV,
+      database_error: IS_PROD ? 'connection failed' : String(e.message || e),
+    });
+  }
 });
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/v1/huawei', require('./huawei-module/routes/huaweiRoutes'));
 app.use('/api/mobile-app', require('./routes/mobile-app-public'));
+const { handleGoogleOAuthCallback } = require('./routes/google-oauth');
+app.get('/api/google/oauth/callback', handleGoogleOAuthCallback);
+app.get('/api/storage/google-oauth/callback', handleGoogleOAuthCallback);
 
 // --- Protected routes (login required) ---
 const {
   markOutboundDelivered,
   reverseOutboundDelivered,
 } = require('./services/markOutboundDelivered');
-const db = require('./db');
 const { mountApiRoutes } = require('./mountApiRoutes');
 
 mountApiRoutes(app, { db, markOutboundDelivered, reverseOutboundDelivered });
@@ -192,32 +210,55 @@ app.use((err, req, res, _next) => {
 module.exports = app;
 
 if (require.main === module) {
-  const server = app.listen(PORT, '0.0.0.0', () => {
-     
-    console.log(`Backend listening on 0.0.0.0:${PORT}  (env=${IS_PROD ? 'production' : NODE_ENV})`);
-    attachStreamlitUpgrade(server, huaweiStreamlitProxyBundle.proxy, HUAWEI_GODAM_STREAMLIT_BASE);
-    huaweiStreamlit.startHuaweiStreamlitIfEnabled();
+  const { purgeHuaweiStagingData } = require('./services/purgeHuaweiStagingData');
+  const { purgeRejectedHuaweiOrdersOlderThan } = require('./services/clearHuaweiStagingWorkflow');
+  const rejectedRetentionDays = Math.max(
+    1,
+    Number(process.env.HUAWEI_REJECTED_RETENTION_DAYS || 7) || 7
+  );
+  const runHuaweiStagingPurge = () => {
+    purgeHuaweiStagingData()
+      .then((r) => {
+        if (r.dn_lines || r.order_items || r.matching_results) {
+          console.log('[huawei-purge] staging cleanup', r);
+        }
+      })
+      .catch((err) => console.error('[huawei-purge]', err.message));
+    purgeRejectedHuaweiOrdersOlderThan({ retentionDays: rejectedRetentionDays })
+      .then((r) => {
+        if (r.orders_deleted > 0) {
+          console.log('[huawei-purge] rejected orders removed', r);
+        }
+      })
+      .catch((err) => console.error('[huawei-purge] rejected', err.message));
+  };
+  setTimeout(runHuaweiStagingPurge, 120_000);
+  setInterval(runHuaweiStagingPurge, 24 * 60 * 60 * 1000).unref();
+
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Backend listening on ${HOST}:${PORT}  (env=${IS_PROD ? 'production' : NODE_ENV})`);
+    console.log('[huawei] Streamlit disabled — DN matching: open web app /huawei');
   });
+  const { attachRealtimeHub } = require('./services/realtimeHub');
+  const { startFollowupReminderScheduler } = require('./services/followupReminderService');
+  attachRealtimeHub(server, { cors: buildCorsOptions() });
+  startFollowupReminderScheduler();
 
   server.on('error', (err) => {
     if (err && err.code === 'EADDRINUSE') {
-       
       console.error(`Port ${PORT} is already in use. Stop the other process or run with PORT=<n>.`);
       process.exit(1);
     }
-     
     console.error(err);
     process.exit(1);
   });
 
   function shutdown(signal) {
-     
     console.log(`Received ${signal}, shutting down...`);
     server.close(() => {
       process.exit(0);
     });
     setTimeout(() => {
-       
       console.error('Forced shutdown after timeout.');
       process.exit(1);
     }, 10_000).unref();

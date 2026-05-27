@@ -47,6 +47,7 @@ export default function Customers() {
   const [search, setSearch] = useState('');
 
   const [showAddModal, setShowAddModal] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [addForm, setAddForm] = useState({
     customer_number: '',
     company_name: '',
@@ -144,6 +145,7 @@ export default function Customers() {
   };
 
   const resetAddForm = () => {
+    setEditingId(null);
     setAddForm({
       customer_number: '',
       company_name: '',
@@ -163,32 +165,75 @@ export default function Customers() {
     });
   };
 
-  const createCustomerRow = async () => {
+  const rowToForm = (r) => ({
+    customer_number: r.customer_number || '',
+    company_name: r.company_name || '',
+    city_name: r.city_name || '',
+    address: r.address || '',
+    gps: r.gps || '',
+    contact_person: r.contact_person || '',
+    contact_person_number_1: r.contact_person_number_1 || r.contact_person_number || '',
+    email_1: r.email_1 || '',
+    designation_job: r.designation_job || '',
+    second_name: r.second_name || '',
+    second_number: r.second_number || '',
+    second_email: r.second_email || '',
+    designation_job_title_2: r.designation_job_title_2 || r.designation_job_2 || '',
+    remarks: r.remarks || '',
+    address_type: r.address_type || 'permanent',
+  });
+
+  const openAddModal = () => {
+    resetAddForm();
+    setShowAddModal(true);
+  };
+
+  const openEditModal = (row) => {
+    setEditingId(row.id);
+    setAddForm(rowToForm(row));
+    setShowAddModal(true);
+  };
+
+  const buildCustomerPayload = () => ({
+    customer_number: addForm.customer_number,
+    company_name: addForm.company_name,
+    city_name: addForm.city_name,
+    address: addForm.address,
+    gps: addForm.gps,
+    contact_person: addForm.contact_person,
+    contact_person_number_1: addForm.contact_person_number_1,
+    contact_person_number: addForm.contact_person_number_1,
+    email_1: addForm.email_1,
+    designation_job: addForm.designation_job,
+    second_name: addForm.second_name,
+    second_number: addForm.second_number,
+    second_email: addForm.second_email,
+    designation_job_title_2: addForm.designation_job_title_2,
+    designation_job_2: addForm.designation_job_title_2,
+    remarks: addForm.remarks,
+    address_type: addForm.address_type,
+  });
+
+  const saveCustomerRow = async () => {
     try {
       if (!String(addForm.customer_number || '').trim()) return alert('Customer Number is required');
       if (!String(addForm.company_name || '').trim()) return alert('Company Name is required');
 
-      await customersApi.create({
-        customer_number: addForm.customer_number,
-        company_name: addForm.company_name,
-        city_name: addForm.city_name,
-        address: addForm.address,
-        gps: addForm.gps,
-        contact_person: addForm.contact_person,
-        contact_person_number_1: addForm.contact_person_number_1,
-        contact_person_number: addForm.contact_person_number_1,
-        email_1: addForm.email_1,
-        designation_job: addForm.designation_job,
-        second_name: addForm.second_name,
-        second_number: addForm.second_number,
-        second_email: addForm.second_email,
-        designation_job_title_2: addForm.designation_job_title_2,
-        designation_job_2: addForm.designation_job_title_2,
-        remarks: addForm.remarks,
-        address_type: addForm.address_type,
-      });
+      const payload = buildCustomerPayload();
+      if (editingId) await customersApi.update(editingId, payload);
+      else await customersApi.create(payload);
       setShowAddModal(false);
       resetAddForm();
+      fetchRows(search);
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    }
+  };
+
+  const deleteCustomerRow = async (row) => {
+    if (!window.confirm(`Delete customer ${row.company_name || row.customer_number}?`)) return;
+    try {
+      await customersApi.remove(row.id);
       fetchRows(search);
     } catch (e) {
       alert(e?.response?.data?.error || e.message);
@@ -232,14 +277,7 @@ export default function Customers() {
           </p>
         </div>
         <div className="flex gap-1.5 flex-wrap justify-end">
-          <button
-            type="button"
-            className="btn-primary flex items-center gap-1"
-            onClick={() => {
-              resetAddForm();
-              setShowAddModal(true);
-            }}
-          >
+          <button type="button" className="btn-primary flex items-center gap-1" onClick={openAddModal}>
             <Plus size={14} />
             Add Customer
           </button>
@@ -329,10 +367,10 @@ export default function Customers() {
                 <td className="tbl-td-nowrap">{r.remarks || ''}</td>
                 <td className="tbl-td-nowrap">
                   <div className="flex gap-1">
-                    <button type="button" className="text-primary-600 hover:text-primary-800 p-0.5" title="Edit (todo)">
+                    <button type="button" className="text-primary-600 hover:text-primary-800 p-0.5" title="Edit" onClick={() => openEditModal(r)}>
                       <Edit3 size={14} />
                     </button>
-                    <button type="button" className="text-red-600 hover:text-red-800 p-0.5" title="Delete (todo)">
+                    <button type="button" className="text-red-600 hover:text-red-800 p-0.5" title="Delete" onClick={() => deleteCustomerRow(r)}>
                       <Trash2 size={14} />
                     </button>
                   </div>
@@ -406,12 +444,12 @@ export default function Customers() {
           <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[86vh] overflow-y-auto">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <h3 className="text-xl font-bold">Add Customer Address</h3>
+                <h3 className="text-xl font-bold">{editingId ? 'Edit Customer Address' : 'Add Customer Address'}</h3>
                 <p className="text-xs text-gray-600 mt-1">
                   Only Customer Number and Company Name are required. Contact, GPS, address, and other fields are optional.
                 </p>
               </div>
-              <button type="button" className="btn-secondary" onClick={() => setShowAddModal(false)}>
+              <button type="button" className="btn-secondary" onClick={() => { setShowAddModal(false); resetAddForm(); }}>
                 Close
               </button>
             </div>
@@ -495,11 +533,11 @@ export default function Customers() {
             </div>
 
             <div className="flex flex-wrap gap-2 justify-end mt-5">
-              <button type="button" className="btn-secondary" onClick={() => setShowAddModal(false)}>
+              <button type="button" className="btn-secondary" onClick={() => { setShowAddModal(false); resetAddForm(); }}>
                 Cancel
               </button>
-              <button type="button" className="btn-primary" onClick={createCustomerRow}>
-                Save
+              <button type="button" className="btn-primary" onClick={saveCustomerRow}>
+                {editingId ? 'Save Changes' : 'Save'}
               </button>
             </div>
           </div>

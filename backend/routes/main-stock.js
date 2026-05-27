@@ -292,12 +292,14 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET /api/main-stock/search?q=
+// GET /api/main-stock/search?q=&part_prefix=1  (part_prefix → part_number starts with q)
 router.get('/search', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
     if (!q) return res.json([]);
-    const like = `%${q}%`;
+    const partPrefix =
+      ['1', 'true', 'yes'].includes(String(req.query.part_prefix || '').toLowerCase()) ||
+      String(req.query.match || '').toLowerCase() === 'prefix';
     const isAdminAll =
       String(req.user.role || '').toLowerCase() === 'admin' &&
       String(req.query.warehouse_id || '').toLowerCase() === 'all';
@@ -310,6 +312,21 @@ router.get('/search', async (req, res) => {
         });
     const whClause =
       warehouseId != null && Number(warehouseId) > 0 ? ' AND warehouse_id = ? ' : '';
+    if (partPrefix) {
+      const likePrefix = `${q}%`;
+      const params =
+        warehouseId != null && Number(warehouseId) > 0 ? [likePrefix, warehouseId] : [likePrefix];
+      const rows = await dbAll(
+        `SELECT id, part_number, sap_part_number, description, uom, vendor_id, vendor_number, vendor_name
+         FROM main_stock
+         WHERE TRIM(part_number) LIKE ? ${whClause}
+         ORDER BY part_number ASC
+         LIMIT 40`,
+        params
+      );
+      return res.json(rows);
+    }
+    const like = `%${q}%`;
     const params =
       warehouseId != null && Number(warehouseId) > 0 ? [like, like, like, like, warehouseId] : [like, like, like, like];
     const rows = await dbAll(

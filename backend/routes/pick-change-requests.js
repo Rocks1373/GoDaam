@@ -3,6 +3,7 @@ const { promisify } = require('util');
 const { z } = require('zod');
 
 const db = require('../db');
+const { fifoDateOrderExpr, normalizeDateValue } = require('../lib/safeDateSql');
 const { requireAuth, requireAdmin, requireWebAccess } = require('../middleware/auth');
 const { zodValidate } = require('../middleware/zodValidate');
 const { logAudit } = require('../services/auditLogger');
@@ -98,7 +99,7 @@ router.post(
                  AND (part_number IN (${keys.map(() => '?').join(',')}) OR COALESCE(sap_part_number,'') IN (${keys
                 .map(() => '?')
                 .join(',')}))
-               ORDER BY date(COALESCE(first_entry_date, '1970-01-01')) ASC, id ASC
+               ORDER BY ${fifoDateOrderExpr('first_entry_date', db)} ASC, id ASC
                LIMIT 1`,
               [row.requested_rack_location, ...keys, ...keys]
             );
@@ -115,7 +116,7 @@ router.post(
                 [
                   rack.id,
                   rack.rack_location,
-                  rack.first_entry_date || null,
+                  normalizeDateValue(rack.first_entry_date),
                   rack.available_qty,
                   req.user.sub,
                   fifoId,

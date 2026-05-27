@@ -88,7 +88,7 @@ async function applyStockOut(db, row, { updateExisting = false } = {}) {
   // Check available stock (do not allow negative)
   const summary = await new Promise((resolve, reject) => {
     db.get(
-      `SELECT id, total_in_qty, total_out_qty, available_qty
+      `SELECT id, warehouse_id, total_in_qty, total_out_qty, available_qty
        FROM stock_by_rack
        WHERE part_number = ? AND rack_location = ?`,
       [r.part_number, r.rack_location],
@@ -97,6 +97,11 @@ async function applyStockOut(db, row, { updateExisting = false } = {}) {
   });
 
   if (!summary) throw new Error('Not enough stock in this rack.');
+
+  const warehouseId = Number(r.warehouse_id) || Number(summary.warehouse_id);
+  if (!Number.isFinite(warehouseId) || warehouseId <= 0) {
+    throw new Error('warehouse_id is required for stock_out (set on rack or request)');
+  }
 
   const availableNow = toNumber(summary.available_qty);
   const availableForDelta = availableNow + (existing ? toNumber(existing.qty_out) : 0);
@@ -129,9 +134,10 @@ async function applyStockOut(db, row, { updateExisting = false } = {}) {
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO stock_out
-          (transaction_date, part_number, sap_part_number, description, rack_location, qty_out, outbound_number, reference_no, remarks)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (warehouse_id, transaction_date, part_number, sap_part_number, description, rack_location, qty_out, outbound_number, reference_no, remarks)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
+          warehouseId,
           r.transaction_date,
           r.part_number,
           r.sap_part_number,

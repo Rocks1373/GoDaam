@@ -76,6 +76,42 @@ class WarehousePostgresDb {
     return store?.client && !store.released ? store.client : this.pool;
   }
 
+  _releaseTxClient(store) {
+    if (!store?.client || store.released) return;
+    store.released = true;
+    try {
+      store.client.release();
+    } catch {
+      /* ignore */
+    }
+    store.client = null;
+  }
+
+  /** Roll back and release a leaked transaction client (per HTTP request). */
+  _cleanupRequestTx() {
+    const store = this.txStore.getStore();
+    if (!store?.client || store.released) return;
+    store.client
+      .query('ROLLBACK')
+      .catch(() => {})
+      .finally(() => this._releaseTxClient(store));
+  }
+
+  /**
+   * One AsyncLocalStorage scope per request so BEGIN/COMMIT pairs do not leak pool
+   * connections across concurrent traffic (enterWith alone caused idle-in-transaction exhaustion).
+   */
+  requestTxMiddleware() {
+    return (req, res, next) => {
+      this.txStore.run({ client: null, released: true }, () => {
+        const onDone = () => this._cleanupRequestTx();
+        res.on('finish', onDone);
+        res.on('close', onDone);
+        next();
+      });
+    };
+  }
+
   _isBegin(text) {
     return /^\s*BEGIN\b/i.test(String(text));
   }
@@ -203,21 +239,32 @@ class WarehousePostgresDb {
       return callback.call(ctx, e);
     }
     if (this._isBegin(text)) {
+      const store = this.txStore.getStore();
       this.pool
         .connect()
         .then((client) => {
-          this.txStore.enterWith({ client, released: false });
-          return client.query(text, values).then((res) => ({ client, res }));
+          if (store) {
+            if (store.client && !store.released) {
+              this._releaseTxClient(store);
+            }
+            store.client = client;
+            store.released = false;
+          } else {
+            this.txStore.enterWith({ client, released: false });
+          }
+          return client.query(text, values);
         })
-        .then(({ res }) => {
+        .then((res) => {
           ctx.changes = res.rowCount != null ? res.rowCount : 0;
           callback.call(ctx, null);
         })
         .catch((err) => {
-          const store = this.txStore.getStore();
-          if (store?.client && !store.released) {
-            store.released = true;
-            store.client.release();
+          const st = this.txStore.getStore();
+          if (st?.client && !st.released) {
+            st.client
+              .query('ROLLBACK')
+              .catch(() => {})
+              .finally(() => this._releaseTxClient(st));
           }
           callback.call(ctx, err);
         });
@@ -238,9 +285,7 @@ class WarehousePostgresDb {
         const id = res.rows && res.rows[0] && res.rows[0].id != null ? Number(res.rows[0].id) : 0;
         ctx.lastID = id;
         if (finishTransaction && store?.client && !store.released) {
-          store.released = true;
-          store.client.release();
-          store.client = null;
+          this._releaseTxClient(store);
         }
         callback.call(ctx, null);
       })
@@ -252,9 +297,7 @@ class WarehousePostgresDb {
               ctx.changes = res2.rowCount != null ? res2.rowCount : 0;
               ctx.lastID = 0;
               if (finishTransaction && store?.client && !store.released) {
-                store.released = true;
-                store.client.release();
-                store.client = null;
+                this._releaseTxClient(store);
               }
               callback.call(ctx, null);
             })
@@ -262,9 +305,7 @@ class WarehousePostgresDb {
           return;
         }
         if (finishTransaction && store?.client && !store.released) {
-          store.released = true;
-          store.client.release();
-          store.client = null;
+          this._releaseTxClient(store);
         }
         callback.call(ctx, err);
       });
@@ -288,16 +329,32 @@ console.log('🗄️ Warehouse database: PostgreSQL (DATABASE_URL)');
 
 const { migrateGodamSchema } = require('./schema-migrate');
 
-db.run('SELECT 1', async (err) => {
-  if (err) {
-    console.error('❌ PostgreSQL ping failed:', err.message);
-    return;
+let schemaReadyPromise = null;
+
+function whenSchemaReady() {
+  if (!schemaReadyPromise) {
+    schemaReadyPromise = new Promise((resolve, reject) => {
+      db.run('SELECT 1', async (err) => {
+        if (err) {
+          console.error('❌ PostgreSQL ping failed:', err.message);
+          reject(err);
+          return;
+        }
+        try {
+          await migrateGodamSchema(db);
+          console.log('✅ Schema migrate (postgres) complete');
+        } catch (e) {
+          // Do not block API startup — missing columns are added lazily on workflow/upload paths.
+          console.error('❌ Schema migrate (postgres):', e.message);
+        }
+        resolve();
+      });
+    });
   }
-  try {
-    await migrateGodamSchema(db);
-  } catch (e) {
-    console.error('❌ Schema migrate (postgres):', e.message);
-  }
-});
+  return schemaReadyPromise;
+}
+
+whenSchemaReady().catch(() => {});
 
 module.exports = db;
+module.exports.whenSchemaReady = whenSchemaReady;

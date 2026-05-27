@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 function getPythonOcrBaseUrl() {
-  const u = process.env.OCR_PYTHON_SERVICE_URL || '';
+  const u = process.env.OCR_PYTHON_SERVICE_URL || 'http://127.0.0.1:8090';
   return String(u).trim().replace(/\/$/, '');
 }
 
@@ -32,6 +32,58 @@ async function uploadAndExtract(absPath) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 180000);
 
+  let res;
+  try {
+    res = await fetch(`${base}/api/ocr/upload`, { method: 'POST', body: fd, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`OCR Python upload failed (${res.status}): ${t.slice(0, 500)}`);
+  }
+
+  const up = await res.json();
+  const fileId = up.file_id || up.fileId;
+  if (!fileId) throw new Error('OCR Python upload response missing file_id');
+
+  const ctrl2 = new AbortController();
+  const timer2 = setTimeout(() => ctrl2.abort(), 180000);
+  try {
+    res = await fetch(`${base}/api/ocr/extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: fileId }),
+      signal: ctrl2.signal,
+    });
+  } finally {
+    clearTimeout(timer2);
+  }
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`OCR Python extract failed (${res.status}): ${t.slice(0, 500)}`);
+  }
+
+  return res.json();
+}
+
+async function uploadBufferAndExtract(buffer, filename = 'upload.bin') {
+  const base = getPythonOcrBaseUrl();
+  if (!base) {
+    const err = new Error(
+      'OCR_PYTHON_SERVICE_URL is not set. Run your OCR HTTP service and point the backend at it, e.g. http://127.0.0.1:8090'
+    );
+    err.code = 'OCR_PYTHON_UNCONFIGURED';
+    throw err;
+  }
+
+  const fd = new FormData();
+  fd.append('file', new Blob([buffer]), filename || 'upload.bin');
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 180000);
   let res;
   try {
     res = await fetch(`${base}/api/ocr/upload`, { method: 'POST', body: fd, signal: ctrl.signal });
@@ -102,8 +154,50 @@ async function imageLines(buffer, filename = 'capture.jpg') {
   return res.json();
 }
 
+/**
+ * POST multipart — stamp/signature heuristics on delivery note PDF.
+ */
+async function validateDeliveryNoteFromPath(absPath) {
+  const base = getPythonOcrBaseUrl();
+  if (!base) {
+    const err = new Error(
+      'OCR_PYTHON_SERVICE_URL is not set. Run the OCR service for delivery note validation.'
+    );
+    err.code = 'OCR_PYTHON_UNCONFIGURED';
+    throw err;
+  }
+
+  const buf = fs.readFileSync(absPath);
+  const name = path.basename(absPath) || 'delivery-note.pdf';
+
+  const fd = new FormData();
+  fd.append('file', new Blob([buf]), name);
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 180000);
+  let res;
+  try {
+    res = await fetch(`${base}/api/ocr/validate-delivery-note`, {
+      method: 'POST',
+      body: fd,
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`OCR validate-delivery-note failed (${res.status}): ${t.slice(0, 500)}`);
+  }
+
+  return res.json();
+}
+
 module.exports = {
   getPythonOcrBaseUrl,
   uploadAndExtract,
+  uploadBufferAndExtract,
   imageLines,
+  validateDeliveryNoteFromPath,
 };

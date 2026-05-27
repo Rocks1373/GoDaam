@@ -242,9 +242,14 @@ export default function RoutePlannerScreen({ navigation }: Props) {
                   placeholderTextColor="#94a3b8"
                 />
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.ob}>{item.outbound_number || '—'}</Text>
+                  <Text style={styles.customer} numberOfLines={2}>
+                    {item.customer_name || '—'}
+                  </Text>
+                  <Text style={styles.ob} numberOfLines={1}>
+                    Outbound: {item.outbound_number || '—'}
+                  </Text>
                   <Text style={styles.sub} numberOfLines={1}>
-                    {item.customer_name || '—'} {item.city_name ? `· ${item.city_name}` : ''}
+                    {item.city_name || ''}
                   </Text>
                 </View>
                 <View style={styles.badge}>
@@ -312,7 +317,8 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0f172a',
   },
-  ob: { fontSize: 16, fontWeight: '900', color: '#0f172a' },
+  customer: { fontSize: 15, fontWeight: '800', color: '#0f172a', lineHeight: 20 },
+  ob: { fontSize: 12, fontWeight: '700', color: '#334155', marginTop: 3 },
   sub: { fontSize: 12, color: '#64748b', marginTop: 2 },
   badge: { backgroundColor: '#eff6ff', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
   badgeText: { fontSize: 11, fontWeight: '800', color: '#1d4ed8' },

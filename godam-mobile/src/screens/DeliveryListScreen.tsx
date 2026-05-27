@@ -7,11 +7,13 @@ import {
   StyleSheet,
   RefreshControl,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
 import { listDeliveries, type DriverDeliveryTask } from '../api/deliveriesApi';
 import { listActiveDriverDeliveries } from '../api/driverRoutesApi';
+import { fetchDeliveryPickProofAlerts } from '../api/pickProofApi';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DeliveryList'>;
 
@@ -31,8 +33,35 @@ export default function DeliveryListScreen({ navigation }: Props) {
         listDeliveries(),
         listActiveDriverDeliveries().catch(() => []),
       ]);
-      setRows(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      setRows(list);
       setActiveCount(Array.isArray(active) ? active.length : 0);
+      const obNums = list
+        .map((t) => String(t.outbound_number || '').trim())
+        .filter(Boolean);
+      if (obNums.length) {
+        try {
+          const alert = await fetchDeliveryPickProofAlerts(obNums);
+          if (alert.alert_due && alert.orders?.length) {
+            const lines = alert.orders
+              .slice(0, 8)
+              .map(
+                (o) =>
+                  `• ${o.outbound_number || o.sales_order_number || o.outbound_order_id}: ${o.items_with_photo}/${o.total_items} items photographed`
+              )
+              .join('\n');
+            const more =
+              alert.orders.length > 8 ? `\n…and ${alert.orders.length - 8} more` : '';
+            Alert.alert(
+              `Pick proof reminder (after ${alert.after_hour}:00)`,
+              `Some picked orders on your delivery list have no item photos yet:\n\n${lines}${more}\n\nAdd photos from picking, or skip this reminder and continue.`,
+              [{ text: 'Skip', style: 'cancel' }]
+            );
+          }
+        } catch {
+          // non-blocking
+        }
+      }
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { error?: string } }; message?: string })?.response?.data?.error;
       setErr(msg || (e as Error).message || 'Failed to load');
@@ -78,9 +107,11 @@ export default function DeliveryListScreen({ navigation }: Props) {
               style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }]}
               onPress={() => navigation.navigate('DeliveryDetail', { taskId: item.id })}
             >
-              <Text style={styles.ob}>{item.outbound_number || '—'}</Text>
-              <Text style={styles.sub} numberOfLines={1}>
+              <Text style={styles.customer} numberOfLines={2}>
                 {item.customer_name || '—'}
+              </Text>
+              <Text style={styles.ob} numberOfLines={1}>
+                Outbound: {item.outbound_number || '—'}
               </Text>
               <Text style={styles.city} numberOfLines={1}>
                 {item.city_name || ''}
@@ -118,7 +149,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
-  ob: { fontSize: 17, fontWeight: '800', color: '#0f172a' },
+  customer: { fontSize: 16, fontWeight: '800', color: '#0f172a', lineHeight: 21 },
+  ob: { fontSize: 13, fontWeight: '700', color: '#334155', marginTop: 4 },
   sub: { fontSize: 14, color: '#334155', marginTop: 4 },
   city: { fontSize: 12, color: '#64748b', marginTop: 2 },
   badge: {

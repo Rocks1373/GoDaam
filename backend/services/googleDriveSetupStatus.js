@@ -1,7 +1,9 @@
 const { promisify } = require('util');
 const db = require('../db');
-const { getConfiguredRootFolderId, getActiveStorageProviderName } = require('./cloudStorage/cloudStorageProvider');
+const { getConfiguredRootFolderIdAsync, getActiveStorageProviderName } = require('./cloudStorage/cloudStorageProvider');
 const { GoogleDriveStorage } = require('./cloudStorage/googleDriveStorage');
+const { getGoogleDriveAuthMode } = require('./googleDriveOAuthConfig');
+const { getGoogleDriveOAuthStatus } = require('./googleDriveConnectionStore');
 
 const dbGet = promisify(db.get.bind(db));
 
@@ -11,17 +13,23 @@ function driveFolderUrl(folderId) {
 }
 
 /**
- * Live check: env, service account, root share, warehouse folder on Drive.
+ * Live check: OAuth connection, root folder access, warehouse folder on Drive.
  */
 async function getGoogleDriveSetupStatus(warehouseId) {
   const provider = getActiveStorageProviderName();
-  const rootFolderId = getConfiguredRootFolderId();
+  const authMode = getGoogleDriveAuthMode();
+  const rootFolderId = await getConfiguredRootFolderIdAsync();
+  const connection = await getGoogleDriveOAuthStatus();
   const out = {
     provider,
+    auth_mode: authMode,
     configured: provider === 'GOOGLE_DRIVE' && !!rootFolderId,
     root_folder_id: rootFolderId || null,
     root_accessible: false,
     root_error: null,
+    oauth_connected: connection.connected,
+    google_user_email: connection.google_email || connection.google_user_email,
+    token_expiry: connection.token_expiry,
     service_account_email: null,
     warehouse_id: Number(warehouseId) || null,
     warehouse_code: null,
@@ -37,14 +45,40 @@ async function getGoogleDriveSetupStatus(warehouseId) {
     return out;
   }
   if (!rootFolderId) {
-    out.root_error = 'GOOGLE_DRIVE_ROOT_FOLDER_ID is not set in backend/.env';
+    out.root_error = 'Google Drive root folder is not configured.';
+    out.share_instructions = 'Click Repair root folder to create/use a GoDaam folder in the connected Google Drive account.';
     return out;
+  }
+
+  if (authMode === 'oauth' && !connection.connected) {
+    out.root_error =
+      'Google Drive is not connected. Admin: open Settings → Google Drive → Connect Google Drive.';
+    out.share_instructions =
+      'Create an OAuth Web client in Google Cloud, add the redirect URI from this page, set client id/secret in .env, then Connect.';
+    return out;
+  }
+
+  if (authMode === 'oauth' && connection.connected) {
+    try {
+      const { getDriveTokenScopeInfo } = require('./googleDriveOAuthClient');
+      const scopeInfo = await getDriveTokenScopeInfo();
+      if (scopeInfo.scope_stale) {
+        out.root_error =
+          'Google Drive permission is outdated (token still has drive.file only). Click Reconnect on Settings → Google Drive so Google can grant full Drive access to your GAPP folder.';
+        out.share_instructions = `Granted: ${scopeInfo.granted_scope || '—'} → Required: ${scopeInfo.required_scope}`;
+        return out;
+      }
+    } catch {
+      /* continue to folder check */
+    }
   }
 
   let drive;
   try {
     drive = new GoogleDriveStorage();
-    out.service_account_email = drive.getServiceAccountEmail();
+    if (authMode === 'service_account') {
+      out.service_account_email = drive.getServiceAccountEmail();
+    }
   } catch (e) {
     out.root_error = e.message;
     return out;
@@ -55,14 +89,19 @@ async function getGoogleDriveSetupStatus(warehouseId) {
     out.root_accessible = true;
   } catch (e) {
     out.root_error = e.message;
-    out.share_instructions = `In Google Drive, open your root folder → Share → add ${out.service_account_email} as Editor. Then restart the backend.`;
+    if (authMode === 'oauth') {
+      out.share_instructions =
+        'Click Repair root folder to create/use a GoDaam folder in the connected Google Drive account, then Test upload.';
+    } else {
+      out.share_instructions = `Share the root folder with ${out.service_account_email} as Editor.`;
+    }
   }
 
   const wid = Number(warehouseId);
   if (!wid) {
     out.where_folders_go = out.root_accessible
-      ? 'Select a warehouse, then Load a sales order — folders appear under WHx/SO_… inside the shared root.'
-      : 'Fix root folder sharing first (see share_instructions).';
+      ? 'Select a warehouse, then Load a sales order — folders appear under WHx/SO_… inside the root folder.'
+      : 'Connect Google Drive and fix root folder access first.';
     return out;
   }
 
@@ -78,7 +117,7 @@ async function getGoogleDriveSetupStatus(warehouseId) {
   out.warehouse_drive_folder_id = String(wh.google_drive_folder_id || '').trim() || null;
   out.warehouse_drive_url = driveFolderUrl(out.warehouse_drive_folder_id);
 
-  if (out.warehouse_drive_folder_id) {
+  if (out.warehouse_drive_folder_id && out.root_accessible) {
     try {
       await drive.assertFolderAccessible(out.warehouse_drive_folder_id, 'warehouse folder');
       out.warehouse_drive_accessible = true;
@@ -89,15 +128,11 @@ async function getGoogleDriveSetupStatus(warehouseId) {
 
   if (out.root_accessible && out.warehouse_drive_folder_id && !out.warehouse_drive_accessible) {
     out.where_folders_go =
-      `Root is OK, but warehouse folder in the database is from an OLD service account and is not visible anymore. The app will recreate ${out.warehouse_code || 'WHx'} under the shared root on the next Load/upload (or run: UPDATE warehouses SET google_drive_folder_id = NULL WHERE id = ${wid};).`;
+      `Warehouse folder in DB is not visible to the connected account. Clear google_drive_folder_id for warehouse ${wid} or upload again — WH folder will be recreated under root.`;
   } else if (out.root_accessible) {
-    out.where_folders_go = `New warehouse folders are created under your shared root → ${out.warehouse_code || 'WHx'}/SO_<number>/`;
-  } else if (out.warehouse_drive_accessible) {
-    out.where_folders_go =
-      `Your new root folder is NOT shared with the service account yet, but this warehouse already has a Drive folder from an earlier setup. Open the WH folder link below — SO folders (SO_123456, etc.) are inside it, NOT inside the new root you configured in .env.`;
+    out.where_folders_go = `Folders: root → ${out.warehouse_code || 'WHx'}/SO_<number>/ (same structure as before)`;
   } else {
-    out.where_folders_go =
-      'Neither the configured root nor the warehouse Drive folder is accessible. Share the root folder with the service account (see share_instructions) and restart the backend.';
+    out.where_folders_go = 'Fix Google Drive connection and root folder first.';
   }
 
   return out;

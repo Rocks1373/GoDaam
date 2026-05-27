@@ -30,24 +30,39 @@ def _require_secret(x_ai_plugin_secret: Optional[str]) -> None:
 
 
 class UserInfo(BaseModel):
-    id: int = None  # type: ignore[assignment]
-    username: str = None  # type: ignore[assignment]
-    role: str = None  # type: ignore[assignment]
+    id: Optional[int] = None
+    username: Optional[str] = None
+    role: Optional[str] = None
+
+    @classmethod
+    def _coerce_id(cls, v: Any) -> Optional[int]:
+        if v is None or v == "":
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> "UserInfo":
+        if isinstance(obj, dict) and "id" in obj:
+            obj = {**obj, "id": cls._coerce_id(obj.get("id"))}
+        return super().model_validate(obj, **kwargs)
 
 
 class ChatRequest(BaseModel):
     command: str
     context: dict[str, Any] = {}
-    confirm_token: str = None  # type: ignore[assignment]
-    user: UserInfo = None  # type: ignore[assignment]
+    confirm_token: Optional[str] = None
+    user: Optional[UserInfo] = None
     request_meta: dict[str, Any] = {}
 
 
 class RunToolRequest(BaseModel):
     tool_name: str
     tool_args: dict[str, Any] = {}
-    confirm_token: str = None  # type: ignore[assignment]
-    user: UserInfo = None  # type: ignore[assignment]
+    confirm_token: Optional[str] = None
+    user: Optional[UserInfo] = None
 
 
 class CheckOrdersRequest(BaseModel):
@@ -86,10 +101,25 @@ def chat(req: ChatRequest, x_ai_plugin_secret: str = Header(default=None)) -> di
         raise HTTPException(status_code=400, detail="command is required")
 
     try:
-        decision = decide_tool(settings, command)
+        decision = decide_tool(settings, command, req.context)
     except AgentError as e:
         _log(req.user, command, None, None, {"error": str(e)}, "error", str(e))
         raise HTTPException(status_code=400, detail=str(e))
+
+    if decision.tool_name == "answer_from_memory":
+        answer = str(decision.tool_args.get("answer") or decision.summary).strip()
+        out = {
+            "ok": True,
+            "tool_name": decision.tool_name,
+            "tool_args": decision.tool_args,
+            "summary": answer,
+            "result": {
+                "answer": answer,
+                "topics": decision.tool_args.get("topics") or [],
+            },
+        }
+        _log(req.user, command, decision.tool_name, decision.tool_args, out, "ok")
+        return out
 
     # Confirmation gate: dangerous tools ALWAYS require confirm_token.
     if decision.tool_name in DANGEROUS_TOOLS and not req.confirm_token:
@@ -186,4 +216,3 @@ def logs(limit: int = 200, x_ai_plugin_secret: str = Header(default=None)) -> di
         (lim,),
     )
     return {"ok": True, "rows": rows, "count": len(rows)}
-

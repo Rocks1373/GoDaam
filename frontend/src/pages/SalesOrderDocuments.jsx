@@ -10,9 +10,21 @@ const TABS = [
   { id: 'INVOICE', label: 'Invoices' },
   { id: 'DELIVERY_NOTE', label: 'Delivery Notes' },
   { id: 'POD', label: 'POD' },
+  { id: 'ORDER_IMAGE', label: 'Order Images' },
   { id: 'ACCOUNTING_DOCUMENT', label: 'Accounting' },
+  { id: 'OTHER', label: 'Other' },
   { id: 'ALL', label: 'All Documents' },
   { id: 'CHECKLIST', label: 'Checklist' },
+];
+
+const DOWNLOAD_SCOPES = [
+  { id: 'outbound', label: 'Current outbound documents' },
+  { id: 'full_so', label: 'Full sales order package' },
+  { id: 'invoice', label: 'Invoice documents' },
+  { id: 'delivery_notes', label: 'Delivery notes' },
+  { id: 'pod', label: 'PODs' },
+  { id: 'accounting', label: 'Accounting documents' },
+  { id: 'other', label: 'Other' },
 ];
 
 function tabMatches(doc, tabId) {
@@ -58,6 +70,12 @@ export default function SalesOrderDocuments() {
   const [exportBusy, setExportBusy] = useState(null);
   const [parallelBundle, setParallelBundle] = useState(null);
   const [driveSetup, setDriveSetup] = useState(null);
+  const [searchOutbound, setSearchOutbound] = useState('');
+  const [searchInvoice, setSearchInvoice] = useState('');
+  const [downloadOpen, setDownloadOpen] = useState(false);
+  const [downloadScope, setDownloadScope] = useState('full_so');
+  const [downloadOb, setDownloadOb] = useState('');
+  const [downloadFiles, setDownloadFiles] = useState([]);
 
   const whOk = isAdmin || (!isAllWarehouses && selectedWarehouseId);
 
@@ -124,6 +142,68 @@ export default function SalesOrderDocuments() {
     setSearchParams({ so: s });
   };
 
+  const lookupByOutbound = async () => {
+    const ob = String(searchOutbound || '').trim();
+    if (!ob || !whOk) return;
+    setLoading(true);
+    try {
+      const data = await salesOrderDocumentsApi.byOutbound(ob, {
+        warehouse_id: selectedWarehouseId,
+      });
+      if (data.sales_order_number) {
+        setSoInput(data.sales_order_number);
+        setActiveSo(data.sales_order_number);
+        setSearchParams({ so: data.sales_order_number, ob });
+        toast.success(`Loaded SO ${data.sales_order_number} for outbound ${ob}`);
+      } else {
+        toast.error('No sales order found for this outbound');
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.error || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const lookupByInvoice = async () => {
+    const inv = String(searchInvoice || '').trim();
+    if (!inv || !whOk) return;
+    setLoading(true);
+    try {
+      const data = await salesOrderDocumentsApi.byInvoice(inv, { warehouse_id: selectedWarehouseId });
+      if (data.sales_order_number) {
+        setSoInput(data.sales_order_number);
+        setActiveSo(data.sales_order_number);
+        setSearchParams({ so: data.sales_order_number });
+        toast.success(`Loaded SO ${data.sales_order_number}`);
+      } else if ((data.documents || []).length) {
+        toast.message('Documents found — enter SO from results if needed');
+      } else {
+        toast.error('No documents for this invoice');
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.error || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runDownloadOptions = async () => {
+    const so = String(activeSo || '').trim();
+    if (!so || !whOk) return;
+    try {
+      const manifest = await salesOrderDocumentsApi.downloadOptions({
+        sales_order_number: so,
+        warehouse_id: selectedWarehouseId,
+        scope: downloadScope,
+        outbound_number: downloadOb || uploadRefs.outbound_number || undefined,
+      });
+      setDownloadFiles(manifest.files || []);
+    } catch (e) {
+      toast.error(e.response?.data?.error || e.message);
+    }
+  };
+
   const runUpload = async (form, duplicate_action) => {
     if (!whOk) {
       toast.error('Select a warehouse (not “all”) to upload.');
@@ -175,9 +255,15 @@ export default function SalesOrderDocuments() {
     void runUpload(f, action);
   };
 
-  const onVerify = async (id, status) => {
+  const onVerify = async (id, status, opts = {}) => {
     try {
-      await salesOrderDocumentsApi.verify(id, { status });
+      let remarks = opts.remarks;
+      if (opts.promptRemarks) {
+        const entered = window.prompt('Admin remarks (editable validation report):', opts.defaultRemarks || '');
+        if (entered === null) return;
+        remarks = entered.trim() || null;
+      }
+      await salesOrderDocumentsApi.verify(id, { status, remarks });
       toast.success('Updated');
       await load();
     } catch (e) {
@@ -243,7 +329,7 @@ export default function SalesOrderDocuments() {
   return (
     <div className="max-w-7xl mx-auto px-2 py-3">
       <div className="mb-3">
-        <h2 className="text-base font-bold text-gray-900">Sales Order Documents</h2>
+        <h2 className="text-base font-bold text-gray-900">Sales Order Document Center</h2>
         <p className="text-[11px] text-gray-600 mt-1">
           Enter the Sales Order / GAPP PO (same as Outbound <strong>Sales Doc.</strong>), press <strong>Load</strong>. References
           (customer PO, invoice, outbound / DN) are filled from the outbound and delivery note when available — edit them if needed.
@@ -301,6 +387,17 @@ export default function SalesOrderDocuments() {
         </div>
       ) : null}
 
+      {whOk && activeSo && parallelBundle?.missing?.length ? (
+        <div className="rounded-lg border border-red-300 bg-red-50 text-red-950 text-[11px] p-3 mb-3 space-y-1">
+          <div className="font-bold">Missing documents</div>
+          <ul className="list-disc pl-4 space-y-0.5">
+            {parallelBundle.missing.map((m, i) => (
+              <li key={i}>{m.message}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {whOk && activeSo && parallelBundle && !parallelBundle.parallel_complete ? (
         <div className="rounded-lg border border-amber-300 bg-amber-50/95 text-amber-950 text-[11px] p-3 mb-3 space-y-1.5">
           <div className="font-bold">Parallel documents incomplete (invoice · delivery note · accounting)</div>
@@ -339,6 +436,29 @@ export default function SalesOrderDocuments() {
         <button type="button" className="btn-primary" onClick={openSo} disabled={loading}>
           Load
         </button>
+        <label className="flex flex-col text-[10px] font-bold text-gray-600">
+          Outbound #
+          <input
+            className="input-field mt-0.5 w-36"
+            value={searchOutbound}
+            onChange={(e) => setSearchOutbound(e.target.value)}
+            placeholder="GD-DO-…"
+          />
+        </label>
+        <button type="button" className="btn-secondary text-[11px]" onClick={() => void lookupByOutbound()} disabled={loading}>
+          Find by outbound
+        </button>
+        <label className="flex flex-col text-[10px] font-bold text-gray-600">
+          Invoice #
+          <input
+            className="input-field mt-0.5 w-32"
+            value={searchInvoice}
+            onChange={(e) => setSearchInvoice(e.target.value)}
+          />
+        </label>
+        <button type="button" className="btn-secondary text-[11px]" onClick={() => void lookupByInvoice()} disabled={loading}>
+          Find by invoice
+        </button>
         {folder?.sales_order_folder_id ? (
           <a
             className="btn-secondary text-[11px]"
@@ -352,24 +472,39 @@ export default function SalesOrderDocuments() {
         <Link to="/reports/sales-order-documents" className="btn-secondary text-[11px]">
           Document report
         </Link>
-        {activeSo && whOk && documents.length > 0 ? (
+        {activeSo && whOk ? (
           <>
             <button
               type="button"
               className="btn-secondary text-[11px]"
-              disabled={loading || exportBusy}
-              onClick={() => void runExportCombinedPdf()}
+              onClick={() => {
+                setDownloadOb(String(uploadRefs.outbound_number || searchOutbound || '').trim());
+                setDownloadOpen(true);
+                setDownloadFiles([]);
+              }}
             >
-              {exportBusy === 'pdf' ? 'Preparing…' : 'Download combined PDF'}
+              Download documents
             </button>
-            <button
-              type="button"
-              className="btn-secondary text-[11px]"
-              disabled={loading || exportBusy}
-              onClick={() => void runExportZip()}
-            >
-              {exportBusy === 'zip' ? 'Preparing…' : 'Download individual (ZIP)'}
-            </button>
+            {documents.length > 0 ? (
+              <>
+                <button
+                  type="button"
+                  className="btn-secondary text-[11px]"
+                  disabled={loading || exportBusy}
+                  onClick={() => void runExportCombinedPdf()}
+                >
+                  {exportBusy === 'pdf' ? 'Preparing…' : 'Download combined PDF'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary text-[11px]"
+                  disabled={loading || exportBusy}
+                  onClick={() => void runExportZip()}
+                >
+                  {exportBusy === 'zip' ? 'Preparing…' : 'Download individual (ZIP)'}
+                </button>
+              </>
+            ) : null}
           </>
         ) : null}
       </div>
@@ -426,7 +561,7 @@ export default function SalesOrderDocuments() {
             customerName={uploadRefs.customer_name}
             whOk={whOk}
             onSuccess={() => void load()}
-            title="Scan document (local agent)"
+            title="Upload document"
             className="!bg-white !border-indigo-100"
           />
           <div>
@@ -542,6 +677,17 @@ export default function SalesOrderDocuments() {
                   })
                 }
               />
+              <UploadRow
+                label="Order image (JPEG)"
+                onPick={(file) =>
+                  runUpload({
+                    file,
+                    sales_order_number: activeSo,
+                    document_type: 'ORDER_IMAGE',
+                    ...uploadMeta(),
+                  })
+                }
+              />
               <div className="flex flex-wrap items-end gap-2">
                 <label className="flex flex-col gap-0.5 text-[10px] font-bold text-gray-600 min-w-[10rem]">
                   Accounting doc no.
@@ -623,6 +769,7 @@ export default function SalesOrderDocuments() {
                 <th className="text-left px-2 py-1">Type</th>
                 <th className="text-left px-2 py-1">File</th>
                 <th className="text-left px-2 py-1">Verification</th>
+                <th className="text-left px-2 py-1">Validation report</th>
                 <th className="text-left px-2 py-1">Actions</th>
               </tr>
             </thead>
@@ -632,6 +779,15 @@ export default function SalesOrderDocuments() {
                   <td className="px-2 py-1 whitespace-nowrap">{d.document_type}</td>
                   <td className="px-2 py-1">{d.stored_file_name}</td>
                   <td className="px-2 py-1">{d.verification_status}</td>
+                  <td className="px-2 py-1 max-w-xs">
+                    {d.document_type === 'DELIVERY_NOTE' || d.document_type === 'POD' || d.document_type === 'SIGNED_POD' ? (
+                      <span className="text-gray-800">
+                        {d.remarks || d.dn_validation?.summary_remark || d.dn_validation?.stamp_remark || '—'}
+                      </span>
+                    ) : (
+                      d.remarks || '—'
+                    )}
+                  </td>
                   <td className="px-2 py-1 whitespace-nowrap space-x-1">
                     {d.cloud_web_url ? (
                       <a className="text-primary-700 underline" href={d.cloud_web_url} target="_blank" rel="noreferrer">
@@ -641,6 +797,30 @@ export default function SalesOrderDocuments() {
                     <button type="button" className="text-primary-700 underline" onClick={() => copyLink(d.cloud_web_url)}>
                       Copy
                     </button>
+                    {(d.document_type === 'DELIVERY_NOTE' || d.document_type === 'POD' || d.document_type === 'SIGNED_POD') &&
+                    isAdmin ? (
+                      <>
+                        <button
+                          type="button"
+                          className="text-emerald-700 underline"
+                          onClick={() =>
+                            onVerify(d.id, 'PERFECT', {
+                              promptRemarks: true,
+                              defaultRemarks: d.remarks || 'Delivery note perfect — stamp and signature OK',
+                            })
+                          }
+                        >
+                          Mark perfect
+                        </button>
+                        <button
+                          type="button"
+                          className="text-amber-800 underline"
+                          onClick={() => onVerify(d.id, 'NEEDS_REVIEW', { promptRemarks: true, defaultRemarks: d.remarks || '' })}
+                        >
+                          Edit remarks
+                        </button>
+                      </>
+                    ) : null}
                     {(d.document_type === 'POD' || d.document_type === 'SIGNED_POD') && (
                       <>
                         <button type="button" className="text-emerald-700 underline" onClick={() => onVerify(d.id, 'APPROVED')}>
@@ -656,7 +836,7 @@ export default function SalesOrderDocuments() {
               ))}
               {!filteredDocs.length ? (
                 <tr>
-                  <td colSpan={4} className="px-2 py-2 text-gray-500">
+                  <td colSpan={5} className="px-2 py-2 text-gray-500">
                     No documents in this tab.
                   </td>
                 </tr>
@@ -707,6 +887,55 @@ export default function SalesOrderDocuments() {
           </aside>
         ) : null}
       </div>
+
+      {downloadOpen ? (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-lg max-w-lg w-full p-4 text-sm max-h-[85vh] overflow-y-auto">
+            <div className="font-bold mb-2">Download documents</div>
+            <p className="text-gray-600 text-[11px] mb-3">Choose what to list. Open Drive links below or use combined PDF / ZIP.</p>
+            <div className="space-y-2 mb-3">
+              {DOWNLOAD_SCOPES.map((s) => (
+                <label key={s.id} className="flex items-center gap-2 text-[11px]">
+                  <input type="radio" name="dl-scope" checked={downloadScope === s.id} onChange={() => setDownloadScope(s.id)} />
+                  {s.label}
+                </label>
+              ))}
+              {downloadScope === 'outbound' ? (
+                <input
+                  className="input-field w-full mt-1"
+                  placeholder="Outbound number"
+                  value={downloadOb}
+                  onChange={(e) => setDownloadOb(e.target.value)}
+                />
+              ) : null}
+            </div>
+            <div className="flex gap-2 mb-3">
+              <button type="button" className="btn-primary" onClick={() => void runDownloadOptions()}>
+                List files
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => setDownloadOpen(false)}>
+                Close
+              </button>
+            </div>
+            {downloadFiles.length ? (
+              <ul className="text-[11px] space-y-1 border-t pt-2 max-h-48 overflow-y-auto">
+                {downloadFiles.map((f) => (
+                  <li key={f.id} className="flex justify-between gap-2">
+                    <span className="truncate">
+                      {f.document_type}: {f.stored_file_name}
+                    </span>
+                    {f.cloud_web_url ? (
+                      <a className="text-primary-700 underline shrink-0" href={f.cloud_web_url} target="_blank" rel="noreferrer">
+                        Open
+                      </a>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {dup ? (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">

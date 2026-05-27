@@ -10,6 +10,7 @@ import {
   Linking,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
 import {
@@ -84,6 +85,7 @@ export default function DeliveryDetailScreen({ route, navigation }: Props) {
   const { taskId } = route.params;
   const [task, setTask] = useState<Record<string, unknown> | null>(null);
   const [dn, setDn] = useState<Record<string, unknown> | null>(null);
+  const [outboundOrderId, setOutboundOrderId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -95,6 +97,8 @@ export default function DeliveryDetailScreen({ route, navigation }: Props) {
       const res = await getDeliveryTask(taskId);
       setTask((res.task || null) as Record<string, unknown> | null);
       setDn((res.delivery_note || null) as Record<string, unknown> | null);
+      const oid = Number((res as { outbound_order_id?: number }).outbound_order_id);
+      setOutboundOrderId(Number.isFinite(oid) && oid > 0 ? oid : null);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error;
       setErr(msg || (e as Error).message || 'Load failed');
@@ -284,6 +288,20 @@ export default function DeliveryDetailScreen({ route, navigation }: Props) {
         <Text style={styles.secondaryText}>Open in Maps</Text>
       </Pressable>
 
+      {outboundOrderId ? (
+        <Pressable
+          style={styles.seeImagesBtn}
+          onPress={() => navigation.navigate('OrderImages', { orderId: outboundOrderId })}
+        >
+          <Ionicons name="images-outline" size={20} color="#fff" />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.seeImagesTitle}>See order images</Text>
+            <Text style={styles.seeImagesSub}>Pick proof photos on Google Drive</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color="#fff" />
+        </Pressable>
+      ) : null}
+
       {st === DS_CONFIRMED ? (
         <Pressable
           style={[styles.btn, busy && styles.disabled]}
@@ -355,6 +373,17 @@ const styles = StyleSheet.create({
     backgroundColor: '#e2e8f0',
   },
   secondaryText: { fontWeight: '700', color: '#0f172a' },
+  seeImagesBtn: {
+    marginTop: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#2563eb',
+    borderRadius: 12,
+    padding: 14,
+  },
+  seeImagesTitle: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  seeImagesSub: { color: '#dbeafe', fontSize: 11, marginTop: 2 },
   btn: {
     marginTop: 16,
     backgroundColor: '#2563eb',

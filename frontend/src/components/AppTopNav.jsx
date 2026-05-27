@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
   Package,
@@ -6,7 +6,9 @@ import {
   Truck,
   Users,
   FileText,
+  FileSearch,
   FolderOpen,
+  MessageCircle,
   UploadCloud,
   KeySquare,
   ShieldCheck,
@@ -26,6 +28,10 @@ import {
   ScrollText,
   LogIn,
   LogOut as LogOutIcon,
+  Download,
+  Cloud,
+  MapPin,
+  Bell,
 } from 'lucide-react';
 
 const ICONS = {
@@ -36,8 +42,10 @@ const ICONS = {
   Truck,
   UploadCloud,
   FileText,
+  FileSearch,
   Image,
   FolderOpen,
+  MessageCircle,
   Users,
   Boxes,
   PieChart,
@@ -54,9 +62,13 @@ const ICONS = {
   Smartphone,
   LogIn,
   LogOut: LogOutIcon,
+  Download,
+  Cloud,
+  MapPin,
+  Bell,
 };
 
-function NavDropdownLink({ to, end, icon, label, disabled, title }) {
+function NavDropdownLink({ to, end, icon, label, disabled, title, onClick }) {
   const Icon = icon ? ICONS[icon] : null;
   if (disabled) {
     return (
@@ -68,6 +80,19 @@ function NavDropdownLink({ to, end, icon, label, disabled, title }) {
         {Icon ? <Icon className="w-3.5 h-3.5 flex-shrink-0 opacity-70" aria-hidden /> : null}
         <span className="truncate">{label}</span>
       </span>
+    );
+  }
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="app-topnav-dropdown-link w-full text-left"
+        style={{ background: 'none', border: 'none', cursor: 'pointer' }}
+      >
+        {Icon ? <Icon className="w-3.5 h-3.5 flex-shrink-0" aria-hidden /> : null}
+        <span className="truncate">{label}</span>
+      </button>
     );
   }
   return (
@@ -94,76 +119,86 @@ function NavDropdownSection({ title, children }) {
   );
 }
 
-/** Auto-hide top nav dropdowns after this idle time (ms). */
-const TOPNAV_AUTO_HIDE_MS = 5000;
-
-/** Top navigation: categories in header; sub-links appear when pointer enters the nav zone. */
 export default function AppTopNav({ user }) {
   const location = useLocation();
-  const zoneRef = useRef(null);
-  const [navOpen, setNavOpen] = useState(false);
+  const [openGroupId, setOpenGroupId] = useState(null);
   const [mobileGroup, setMobileGroup] = useState(null);
-  const collapseTimer = useRef(null);
 
   const isAdmin = String(user?.role || '').toLowerCase() === 'admin';
-  const canOutbound =
-    isAdmin || user?.permissions?.can_upload_outbound || user?.permissions?.can_view_picked_table;
+  const role = String(user?.role || '').toLowerCase();
+  const canOutboundUpload =
+    isAdmin ||
+    role === 'manager' ||
+    role === 'checker' ||
+    user?.permissions?.can_upload_outbound ||
+    user?.permissions?.can_confirm_picked;
+  const canOutboundView =
+    canOutboundUpload ||
+    user?.permissions?.can_view_picked_table ||
+    user?.permissions?.can_view_delivery_notes ||
+    user?.permissions?.can_download_documents;
+  const canPodInbox =
+    canOutboundView ||
+    user?.permissions?.can_view_document_center ||
+    user?.permissions?.can_view_orders;
+  const canUseWhatsappMessenger = isAdmin || user?.permissions?.can_use_whatsapp_messenger;
+  const canOrderPickStatus = isAdmin || user?.permissions?.can_view_order_pick_status;
+  const canViewHuawei = isAdmin || user?.permissions?.can_view_huawei || user?.permissions?.can_huawei_view;
+  const canViewDriverGps =
+    isAdmin ||
+    user?.permissions?.can_view_driver_gps ||
+    user?.permissions?.can_view_transportation ||
+    user?.permissions?.can_manage_transportation ||
+    user?.permissions?.can_confirm_picked;
+  const canViewFollowups =
+    isAdmin || user?.permissions?.can_view_followups || user?.permissions?.can_manage_followups;
 
-  const clearCollapseTimer = useCallback(() => {
-    if (collapseTimer.current != null) {
-      window.clearTimeout(collapseTimer.current);
-      collapseTimer.current = null;
-    }
+  const closeGroup = useCallback(() => {
+    setOpenGroupId(null);
   }, []);
 
-  const scheduleCollapse = useCallback(() => {
-    clearCollapseTimer();
-    collapseTimer.current = window.setTimeout(() => {
-      collapseTimer.current = null;
-      if (zoneRef.current?.contains(document.activeElement)) return;
-      setNavOpen(false);
-      setMobileGroup(null);
-    }, TOPNAV_AUTO_HIDE_MS);
-  }, [clearCollapseTimer]);
-
-  useEffect(() => () => clearCollapseTimer(), [clearCollapseTimer]);
+  const openGroup = useCallback((id) => {
+    setOpenGroupId(id);
+  }, []);
 
   useEffect(() => {
-    setNavOpen(false);
+    setOpenGroupId(null);
     setMobileGroup(null);
-    clearCollapseTimer();
-  }, [location.pathname, clearCollapseTimer]);
-
-  const onZoneEnter = useCallback(() => {
-    clearCollapseTimer();
-    setNavOpen(true);
-    scheduleCollapse();
-  }, [clearCollapseTimer, scheduleCollapse]);
-
-  const onZoneLeave = useCallback(() => {
-    scheduleCollapse();
-  }, [scheduleCollapse]);
-
-  const onZoneActivity = useCallback(() => {
-    if (!navOpen) return;
-    scheduleCollapse();
-  }, [navOpen, scheduleCollapse]);
+  }, [location.pathname]);
 
   const isPathActive = (prefixes) =>
     prefixes.some((p) => location.pathname === p || location.pathname.startsWith(`${p}/`));
 
-  const stockActive = isPathActive(['/main-stock', '/stock-by-rack', '/sap-stock']);
+  const stockActive = isPathActive(['/main-stock', '/stock-by-rack']);
+  const followupsActive = isPathActive(['/follow-ups']);
+  const shipmentsActive = isPathActive([
+    '/shipments/create',
+    '/shipments/upcoming',
+    '/shipments/receive',
+    '/shipments/received',
+  ]);
+  const canManageShipments = isAdmin || role === 'manager';
+  const canReceiveShipments =
+    canManageShipments || user?.permissions?.can_receive_stock;
+  const sapActive = isPathActive(['/sap', '/sap-stock']);
+  const deliveryNoteActive = isPathActive(['/delivery-note']);
+  const documentFlowActive = location.pathname.startsWith('/document-flow');
   const deliveryActive = isPathActive([
     '/outbound-pick',
-    '/delivery-note',
+    '/order-pick-status',
     '/pod-inbox',
+    '/pod-page-picker',
     '/sales-order-documents',
+    '/document-query',
+    '/driver-gps',
   ]);
   const masterActive = isPathActive(['/customers', '/transportation-details', '/vendor-master', '/vendor-items']);
   const reportsActive = location.pathname.startsWith('/reports/');
-  const pluginsActive = isPathActive(['/huawei-godam', '/puter-tools', '/godam-plugin']);
+  const huaweiActive = isPathActive(['/huawei']);
+  const matchingActive = isPathActive(['/matching']);
   const adminActive = isPathActive([
     '/users',
+    '/access-requests',
     '/warehouses',
     '/role-permissions',
     '/pick-change-requests',
@@ -177,6 +212,28 @@ export default function AppTopNav({ user }) {
       label: 'Dashboard',
       active: location.pathname === '/dashboard',
       single: { to: '/dashboard', icon: 'LayoutGrid', label: 'Dashboard' },
+    },
+    ...(canViewFollowups
+      ? [
+          {
+            id: 'follow-ups',
+            label: 'Follow-Ups',
+            active: followupsActive,
+            single: { to: '/follow-ups', icon: 'Bell', label: 'Follow-Ups' },
+          },
+        ]
+      : []),
+    {
+      id: 'delivery-note',
+      label: 'Delivery Note',
+      active: deliveryNoteActive,
+      single: { to: '/delivery-note', icon: 'FileText', label: 'Delivery Note' },
+    },
+    {
+      id: 'document-flow',
+      label: 'Document Flow',
+      active: documentFlowActive,
+      single: { to: '/document-flow', icon: 'FolderOpen', label: 'Document Flow' },
     },
     {
       id: 'stock',
@@ -195,9 +252,41 @@ export default function AppTopNav({ user }) {
             { to: '/stock-by-rack/stock-out', icon: 'LogOut', label: 'Stock Out' },
           ],
         },
+      ],
+    },
+    ...(canReceiveShipments || canManageShipments
+      ? [
+          {
+            id: 'shipments',
+            label: 'Shipments',
+            active: shipmentsActive,
+            sections: [
+              {
+                links: [
+                  ...(canManageShipments
+                    ? [{ to: '/shipments/create', icon: 'UploadCloud', label: 'Create Shipment' }]
+                    : []),
+                  { to: '/shipments/upcoming', icon: 'Truck', label: 'Upcoming Shipments' },
+                  ...(canReceiveShipments
+                    ? [{ to: '/shipments/receive', icon: 'LogIn', label: 'Receive Shipment' }]
+                    : []),
+                  { to: '/shipments/received', icon: 'Package', label: 'Received Shipments' },
+                ],
+              },
+            ],
+          },
+        ]
+      : []),
+    {
+      id: 'sap',
+      label: 'SAP',
+      active: sapActive,
+      sections: [
         {
-          title: 'SAP',
-          links: [{ to: '/sap-stock', icon: 'Database', label: 'SAP Stock' }],
+          links: [
+            { to: '/sap/sap-stock', icon: 'Database', label: 'SAP Stock' },
+            { to: '/sap/sap-po', icon: 'FileSpreadsheet', label: 'SAP PO and SO' },
+          ],
         },
       ],
     },
@@ -208,12 +297,24 @@ export default function AppTopNav({ user }) {
       sections: [
         {
           links: [
-            ...(canOutbound
+            ...(canOutboundUpload
               ? [{ to: '/outbound-pick', icon: 'UploadCloud', label: 'Outbound & pick' }]
               : []),
-            { to: '/delivery-note', icon: 'FileText', label: 'Delivery Note' },
-            { to: '/pod-inbox', icon: 'Image', label: 'POD inbox' },
-            { to: '/sales-order-documents', icon: 'FolderOpen', label: 'Sales Order Documents' },
+            ...(canOrderPickStatus
+              ? [{ to: '/order-pick-status', icon: 'ClipboardPenLine', label: 'Order pick status' }]
+              : []),
+            ...(canPodInbox ? [{ to: '/pod-inbox', icon: 'Image', label: 'POD inbox' }] : []),
+            ...(canOutboundUpload || user?.permissions?.can_view_pod_page_picker
+              ? [{ to: '/pod-page-picker', icon: 'FileText', label: 'POD Page Picker' }]
+              : []),
+            ...(canViewDriverGps ? [{ to: '/driver-gps', icon: 'MapPin', label: 'Driver GPS' }] : []),
+            ...(canUseWhatsappMessenger
+              ? [{ to: '/whatsapp-messenger', icon: 'MessageCircle', label: 'WhatsApp Messenger' }]
+              : []),
+            { to: '/document-workflow', icon: 'FolderOpen', label: 'Document Workflow' },
+            { to: '/document-query', icon: 'FileSearch', label: 'Document Query' },
+            { to: '/download-duties', icon: 'Download', label: 'Download Duties' },
+            { to: '/sales-order-documents', icon: 'FolderOpen', label: 'Document Center' },
           ],
         },
       ],
@@ -245,29 +346,36 @@ export default function AppTopNav({ user }) {
             { to: '/reports/delivery', icon: 'FileSpreadsheet', label: 'Delivery Report' },
             { to: '/reports/audit-log', icon: 'ScrollText', label: 'Audit Log' },
             { to: '/reports/sales-order-documents', icon: 'FolderOpen', label: 'SO Documents Report' },
+            { to: '/reports/document-workflow', icon: 'FolderOpen', label: 'Document Workflow Report' },
             { to: '/reports/stock-by-rack-report', icon: 'Layers', label: 'Stock By Rack Report' },
             { to: '/reports/rack-balance-adjustments', icon: 'ClipboardPenLine', label: 'Rack adjustments' },
+            { to: '/reports/rack-update', icon: 'Layers', label: 'Rack Update Report' },
+            { to: '/reports/picking-by-rack', icon: 'ClipboardPenLine', label: 'Picking By Rack' },
+            ...(canOrderPickStatus
+              ? [{ to: '/reports/order-pick-status', icon: 'ClipboardPenLine', label: 'Order Pick Status' }]
+              : []),
             { to: '/reports/main-stock-report', icon: 'Package', label: 'Main Stock Report' },
             { to: '/reports/stock-comparison', icon: 'GitCompare', label: 'Stock Comparison' },
           ],
         },
       ],
     },
-    {
-      id: 'plugins',
-      label: 'Plugins',
-      active: pluginsActive,
-      sections: [
-        {
-          links: [
-            { disabled: true, icon: 'Boxes', label: 'GoDam 1.0' },
-            { disabled: true, icon: 'Image', label: 'OCR — large PDFs' },
-            { to: '/huawei-godam', icon: 'UploadCloud', label: 'Huawei upload' },
-            { to: '/puter-tools', icon: 'Construction', label: 'Puter · AI / OCR' },
-          ],
-        },
-      ],
-    },
+    ...(canViewHuawei
+      ? [
+          {
+            id: 'matching',
+            label: 'Matching',
+            active: matchingActive,
+            single: { to: '/matching', icon: 'GitCompare', label: 'Matching' },
+          },
+          {
+            id: 'huawei',
+            label: 'Huawei Order 2.1',
+            active: huaweiActive,
+            single: { to: '/huawei', icon: 'GitCompare', label: 'Huawei Order 2.1' },
+          },
+        ]
+      : []),
     ...(isAdmin
       ? [
           {
@@ -278,11 +386,13 @@ export default function AppTopNav({ user }) {
               {
                 links: [
                   { to: '/users', icon: 'UserCog', label: 'Users' },
+                  { to: '/access-requests', icon: 'KeySquare', label: 'Access requests' },
                   { to: '/warehouses', icon: 'Warehouse', label: 'Warehouses' },
                   { to: '/role-permissions', icon: 'KeySquare', label: 'Role Permissions' },
                   { to: '/pick-change-requests', icon: 'Truck', label: 'Pick Requests' },
                   { to: '/admin-bom-parts', icon: 'Boxes', label: 'Parent & Child Parts' },
                   { to: '/mobile-apps', icon: 'Smartphone', label: 'Mobile Apps' },
+                  { to: '/settings/google-drive', icon: 'Cloud', label: 'Google Drive' },
                 ],
               },
             ],
@@ -312,76 +422,73 @@ export default function AppTopNav({ user }) {
   };
 
   return (
-    <div
-      ref={zoneRef}
-      className={`app-topnav-zone${navOpen ? ' app-topnav-zone--open' : ''}`}
-      onPointerEnter={onZoneEnter}
-      onPointerLeave={onZoneLeave}
-      onPointerMove={onZoneActivity}
-      onFocusCapture={() => {
-        clearCollapseTimer();
-        setNavOpen(true);
-        scheduleCollapse();
-      }}
-      onBlurCapture={(e) => {
-        const next = e.relatedTarget;
-        if (zoneRef.current && next instanceof Node && zoneRef.current.contains(next)) return;
-        scheduleCollapse();
-      }}
-    >
+    <div className="app-topnav-zone">
       <nav className="app-topnav" aria-label="Main navigation">
         <ul className="app-topnav__list">
-          {groups.map((group) => (
-            <li
-              key={group.id}
-              className={`app-topnav__item${group.active ? ' app-topnav__item--active' : ''}${
-                mobileGroup === group.id ? ' app-topnav__item--mobile-open' : ''
-              }`}
-            >
-              {group.single ? (
-                <NavLink
-                  to={group.single.to}
-                  end
-                  className={({ isActive }) =>
-                    `app-topnav__trigger app-topnav__trigger--solo${isActive ? ' app-topnav__trigger--active' : ''}`
-                  }
-                >
-                  <LayoutGrid className="w-3.5 h-3.5" aria-hidden />
-                  {group.label}
-                </NavLink>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    className={`app-topnav__trigger${group.active ? ' app-topnav__trigger--active' : ''}`}
-                    aria-expanded={navOpen || mobileGroup === group.id}
-                    aria-haspopup="true"
-                    onClick={() =>
-                      setMobileGroup((g) => (g === group.id ? null : group.id))
+          {groups.map((group) => {
+            const isOpen = openGroupId === group.id || mobileGroup === group.id;
+            return (
+              <li
+                key={group.id}
+                className={`app-topnav__item${group.active ? ' app-topnav__item--active' : ''}${
+                  isOpen ? ' app-topnav__item--open' : ''
+                }${mobileGroup === group.id ? ' app-topnav__item--mobile-open' : ''}`}
+                onPointerEnter={() => {
+                  if (!group.single) openGroup(group.id);
+                }}
+                onPointerLeave={() => {
+                  if (!group.single) closeGroup();
+                }}
+              >
+                {group.single ? (
+                  <NavLink
+                    to={group.single.to}
+                    end
+                    className={({ isActive }) =>
+                      `app-topnav__trigger app-topnav__trigger--solo${isActive ? ' app-topnav__trigger--active' : ''}`
                     }
                   >
-                    {group.id === 'stock' ? <Package className="w-3.5 h-3.5" aria-hidden /> : null}
-                    {group.id === 'delivery' ? <Truck className="w-3.5 h-3.5" aria-hidden /> : null}
-                    {group.id === 'master' ? <Warehouse className="w-3.5 h-3.5" aria-hidden /> : null}
-                    {group.id === 'reports' ? <PieChart className="w-3.5 h-3.5" aria-hidden /> : null}
-                    {group.id === 'plugins' ? <Construction className="w-3.5 h-3.5" aria-hidden /> : null}
-                    {group.id === 'admin' ? <ShieldCheck className="w-3.5 h-3.5" aria-hidden /> : null}
-                    <span>{group.label}</span>
-                  </button>
-                  <div className="app-topnav__dropdown" role="menu">
-                    {renderDropdown(group)}
-                  </div>
-                </>
-              )}
-            </li>
-          ))}
+                    {(() => {
+                      const SoloIcon = ICONS[group.single.icon] || LayoutGrid;
+                      return <SoloIcon className="w-3.5 h-3.5" aria-hidden />;
+                    })()}
+                    {group.label}
+                  </NavLink>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className={`app-topnav__trigger${group.active ? ' app-topnav__trigger--active' : ''}`}
+                      aria-expanded={isOpen}
+                      aria-haspopup="true"
+                      onClick={() =>
+                        setMobileGroup((g) => (g === group.id ? null : group.id))
+                      }
+                    >
+                      {group.id === 'stock' ? <Package className="w-3.5 h-3.5" aria-hidden /> : null}
+                      {group.id === 'sap' ? <Database className="w-3.5 h-3.5" aria-hidden /> : null}
+                      {group.id === 'delivery' ? <Truck className="w-3.5 h-3.5" aria-hidden /> : null}
+                      {group.id === 'master' ? <Warehouse className="w-3.5 h-3.5" aria-hidden /> : null}
+                      {group.id === 'reports' ? <PieChart className="w-3.5 h-3.5" aria-hidden /> : null}
+                      {group.id === 'plugins' ? <Construction className="w-3.5 h-3.5" aria-hidden /> : null}
+                      {group.id === 'admin' ? <ShieldCheck className="w-3.5 h-3.5" aria-hidden /> : null}
+                      <span>{group.label}</span>
+                    </button>
+                    <div
+                      className="app-topnav__dropdown"
+                      role="menu"
+                      onPointerEnter={() => openGroup(group.id)}
+                      onPointerLeave={() => closeGroup()}
+                    >
+                      {renderDropdown(group)}
+                    </div>
+                  </>
+                )}
+              </li>
+            );
+          })}
         </ul>
       </nav>
-      {!navOpen ? (
-        <p className="app-topnav-hint hidden lg:block" aria-hidden>
-          Hover for menu · auto-hide 5s
-        </p>
-      ) : null}
     </div>
   );
 }

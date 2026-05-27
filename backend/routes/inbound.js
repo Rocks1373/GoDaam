@@ -16,6 +16,17 @@ const dbGet = promisify(db.get.bind(db));
 const { applyStockIn } = require('./stock-in');
 const { normalizeExcelRows } = require('../utils/excelDates');
 const { notifyInboundPutaway } = require('../services/notificationService');
+const {
+  REJECT_MESSAGE,
+  runInboundUploadValidation,
+  buildMissingPartsWorkbook,
+  newValidationId,
+  saveValidationRecord,
+  loadValidationRecord,
+  assertValidationApproved,
+  revalidateStoredRows,
+  validatedRowsToProcessInput,
+} = require('../services/inboundUploadValidation');
 
 function pick(row, ...names) {
   for (const n of names) {
@@ -32,36 +43,275 @@ function toNum(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Primary inbound upload template (validated against item_master / main_stock). */
+const INBOUND_TEMPLATE_HEADERS = [
+  'vendor_number',
+  'vendor_name',
+  'part_number',
+  'description',
+  'quantity',
+  'uom',
+  'size',
+  'weight',
+  'local_po',
+  'vendor_invoice',
+  'sap_bill',
+];
+
+/** Legacy shipment columns still accepted when present on same sheet. */
+const INBOUND_LEGACY_HEADERS = [
+  'Batch/Vendor Name',
+  'Local PO',
+  'SAP PO',
+  'SAP Invoice Number',
+  'SAP Part Number',
+  'Received Date',
+  'Remarks',
+];
+
 function templateRows() {
   return [
     {
-      'Batch/Vendor Name': 'C779-C788',
-      'Invoice No.': '9010104400',
-      'PO Number': '5500001206',
-      'Part Number': '760241056',
-      'SAP Part Number': '760241056',
-      Description: 'O-012-LN-8W-M12BK/2C',
-      'Inbound Qty': 2046,
-      'Received Date': '2026-05-01',
-      Remarks: 'Receiving upload',
+      vendor_number: 'C779-C788',
+      vendor_name: 'Schneider',
+      part_number: '760241056',
+      description: 'O-012-LN-8W-M12BK/2C',
+      quantity: 2046,
+      uom: 'PC',
+      size: '',
+      weight: '',
+      local_po: 'LPO-2026-001',
+      vendor_invoice: 'VI-2026-4400',
+      sap_bill: '5500001206',
     },
   ];
 }
 
 router.get('/template', (_req, res) => {
-  const ws = XLSX.utils.json_to_sheet(templateRows());
+  const ws = XLSX.utils.json_to_sheet(templateRows(), { header: INBOUND_TEMPLATE_HEADERS });
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Inbound');
+  const note = XLSX.utils.aoa_to_sheet([
+    ['Inbound upload rules'],
+    ['All part numbers must exist in item_master or main_stock before upload.'],
+    ['Required: vendor_number, vendor_name, part_number, description, quantity (>0), uom'],
+    ['Optional: size, weight, local_po, vendor_invoice, sap_bill (stored on inbound batch)'],
+    ['Legacy column names still accepted: Local PO, Vendor Invoice, SAP Bill, SAP PO, SAP Invoice Number, etc.'],
+  ]);
+  XLSX.utils.book_append_sheet(wb, note, 'ReadMe');
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   res.setHeader('Content-Disposition', 'attachment; filename="inbound-template.xlsx"');
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.send(buf);
 });
 
+function readUploadRows(buffer) {
+  const workbook = XLSX.read(buffer, { type: 'buffer' });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, { defval: '' });
+}
+
+async function handleValidateInbound(req, res, rows) {
+    const userId = req.user?.sub ?? null;
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId,
+      role: req.user?.role,
+      explicitWarehouseId: req.body?.warehouse_id ?? req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id could not be resolved' });
+
+    if (!rows.length) return res.status(400).json({ error: 'Empty sheet or paste data' });
+
+    const result = await runInboundUploadValidation(normalizeExcelRows(rows), { warehouseId });
+    const validationId = newValidationId();
+    const status = result.valid ? 'approved' : 'rejected';
+
+    await saveValidationRecord({
+      validationId,
+      warehouseId,
+      userId,
+      filename: req.file?.originalname || req.body?.filename || 'inbound-rows.json',
+      result,
+      status,
+    });
+
+    logAudit({
+      warehouse_id: warehouseId,
+      user: req.user,
+      req,
+      module_name: 'INBOUND',
+      action_type: result.valid ? 'INBOUND_VALIDATE_OK' : 'INBOUND_VALIDATE_REJECTED',
+      reference_type: 'inbound_upload_validation',
+      reference_id: validationId,
+      reference_number: req.file?.originalname || req.body?.filename || validationId,
+      status_after: status,
+      remarks: result.valid
+        ? `Validated ${result.total_rows} row(s)`
+        : `${result.missing_parts_count} missing part(s)`,
+      new_value: {
+        total_rows: result.total_rows,
+        missing_parts_count: result.missing_parts_count,
+        valid: result.valid,
+      },
+    });
+
+    const payload = {
+      valid: result.valid,
+      validation_id: validationId,
+      total_rows: result.total_rows,
+      valid_rows: result.valid_rows,
+      missing_parts_count: result.missing_parts_count,
+      missing_parts: result.missing_parts,
+      duplicate_warnings: result.duplicate_warnings || [],
+      errors: result.errors,
+      reject_message: result.valid ? null : REJECT_MESSAGE,
+      download_url: result.valid ? '' : `/api/inbound/missing-parts-template/${validationId}`,
+    };
+
+    if (!result.valid) return res.status(400).json(payload);
+    return res.json(payload);
+}
+
+router.post('/validate-upload', upload.single('file'), async (req, res) => {
+  try {
+    let rows = [];
+    if (req.file?.buffer) {
+      rows = readUploadRows(req.file.buffer);
+    } else if (Array.isArray(req.body?.rows)) {
+      rows = req.body.rows;
+    } else {
+      return res.status(400).json({ error: 'file or rows[] is required' });
+    }
+    await handleValidateInbound(req, res, rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/missing-parts-template/:validationId', async (req, res) => {
+  try {
+    const validationId = String(req.params.validationId || '').trim();
+    if (!validationId) return res.status(400).json({ error: 'validation_id is required' });
+
+    const rec = await loadValidationRecord(validationId);
+    if (!rec) return res.status(404).json({ error: 'Validation session not found' });
+
+    let missing = [];
+    try {
+      const payload = JSON.parse(rec.payload_json || '{}');
+      missing = payload.missing_parts || [];
+    } catch {
+      missing = [];
+    }
+    if (!missing.length) return res.status(404).json({ error: 'No missing parts for this validation' });
+
+    const buf = buildMissingPartsWorkbook(missing);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="inbound-missing-parts-${validationId.slice(0, 8)}.xlsx"`
+    );
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buf);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function receivingListFilters(query) {
+  const clauses = [];
+  const params = [];
+  const lpo = String(query.lpo || '').trim();
+  const sap_po = String(query.sap_po || '').trim();
+  const invoice = String(query.invoice || query.invoice_number || '').trim();
+  const part_number = String(query.part_number || query.part || '').trim();
+  if (lpo) {
+    clauses.push(`COALESCE(lpo,'') LIKE ?`);
+    params.push(`%${lpo}%`);
+  }
+  if (sap_po) {
+    clauses.push(`(COALESCE(sap_po,'') LIKE ? OR COALESCE(po_number,'') LIKE ?)`);
+    params.push(`%${sap_po}%`, `%${sap_po}%`);
+  }
+  if (invoice) {
+    clauses.push(`COALESCE(invoice_no,'') LIKE ?`);
+    params.push(`%${invoice}%`);
+  }
+  if (part_number) {
+    clauses.push(`part_number LIKE ?`);
+    params.push(`%${part_number}%`);
+  }
+  return { clauses, params };
+}
+
+async function receivingFilterSuggestions(field, q, limit) {
+  const lim = Math.min(50, Math.max(1, limit || 30));
+  const like = q ? `%${q}%` : '%';
+  if (field === 'lpo') {
+    const rows = await dbAll(
+      `SELECT DISTINCT TRIM(lpo) AS v FROM inbound_receiving
+       WHERE TRIM(COALESCE(lpo,'')) != '' AND lpo LIKE ?
+       ORDER BY v LIMIT ?`,
+      [like, lim]
+    );
+    return (rows || []).map((r) => r.v).filter(Boolean);
+  }
+  if (field === 'sap_po') {
+    const rows = await dbAll(
+      `SELECT DISTINCT v FROM (
+         SELECT TRIM(sap_po) AS v FROM inbound_receiving
+         WHERE TRIM(COALESCE(sap_po,'')) != '' AND sap_po LIKE ?
+         UNION
+         SELECT TRIM(po_number) AS v FROM inbound_receiving
+         WHERE TRIM(COALESCE(po_number,'')) != '' AND po_number LIKE ?
+       ) u WHERE TRIM(COALESCE(v,'')) != ''
+       ORDER BY v LIMIT ?`,
+      [like, like, lim]
+    );
+    return (rows || []).map((r) => r.v).filter(Boolean);
+  }
+  if (field === 'invoice') {
+    const rows = await dbAll(
+      `SELECT DISTINCT TRIM(invoice_no) AS v FROM inbound_receiving
+       WHERE TRIM(COALESCE(invoice_no,'')) != '' AND invoice_no LIKE ?
+       ORDER BY v LIMIT ?`,
+      [like, lim]
+    );
+    return (rows || []).map((r) => r.v).filter(Boolean);
+  }
+  if (field === 'part') {
+    const rows = await dbAll(
+      `SELECT DISTINCT TRIM(part_number) AS v FROM inbound_receiving
+       WHERE TRIM(COALESCE(part_number,'')) != '' AND part_number LIKE ?
+       ORDER BY v LIMIT ?`,
+      [like, lim]
+    );
+    return (rows || []).map((r) => r.v).filter(Boolean);
+  }
+  return null;
+}
+
+router.get('/filter-suggestions', async (req, res) => {
+  try {
+    const field = String(req.query.field || '').trim().toLowerCase();
+    const q = String(req.query.q || '').trim();
+    const lim = Math.min(50, Math.max(1, Number(req.query.limit) || 30));
+    const values = await receivingFilterSuggestions(field, q, lim);
+    if (values === null) return res.status(400).json({ error: 'field must be lpo, sap_po, invoice, or part' });
+    res.json(values);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/', async (req, res) => {
   try {
     const limit = Math.min(2000, Math.max(1, Number(req.query.limit) || 500));
-    const rows = await dbAll(`SELECT * FROM inbound_receiving ORDER BY id DESC LIMIT ?`, [limit]);
+    const { clauses, params } = receivingListFilters(req.query);
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = await dbAll(
+      `SELECT * FROM inbound_receiving ${where} ORDER BY id DESC LIMIT ?`,
+      [...params, limit]
+    );
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -83,12 +333,73 @@ function splitBatchVendor(batchVendorRaw) {
   return { batchKey: s, batch_name: s, vendor_name: '' };
 }
 
-async function insertInboundBatchRow({ batch_name, vendor_name, upload_date, created_by, warehouse_id }) {
+function shipmentFromRow(raw) {
+  const lpo = String(
+    pick(raw, 'Local PO', 'local po', 'local_po', 'LPO', 'lpo')
+  ).trim();
+  const sap_po = String(
+    pick(
+      raw,
+      'SAP PO',
+      'SAP PO.',
+      'sap_po',
+      'SAP Bill',
+      'SAP Bill No.',
+      'SAP Bill Number',
+      'sap_bill',
+      'PO Number',
+      'po_number'
+    )
+  ).trim();
+  const invoice_number = String(
+    pick(
+      raw,
+      'Vendor Invoice',
+      'Vendor Invoice Number',
+      'Vendor Invoice No.',
+      'vendor_invoice',
+      'SAP Invoice Number',
+      'SAP Invoice No.',
+      'SAP Invoice No',
+      'Invoice Number',
+      'Invoice No.',
+      'Invoice No',
+      'invoice_no',
+      'invoice_number'
+    )
+  ).trim();
+  return {
+    lpo: lpo || null,
+    sap_po: sap_po || null,
+    invoice_number: invoice_number || null,
+  };
+}
+
+async function insertInboundBatchRow({
+  batch_name,
+  vendor_name,
+  upload_date,
+  created_by,
+  warehouse_id,
+  lpo,
+  sap_po,
+  invoice_number,
+}) {
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT INTO inbound_batches (batch_name, vendor_name, upload_date, status, created_by, warehouse_id, created_at)
-       VALUES (?, ?, ?, 'Pending', ?, ?, CURRENT_TIMESTAMP)`,
-      [batch_name, vendor_name || null, upload_date, created_by || null, warehouse_id || null],
+      `INSERT INTO inbound_batches (
+         batch_name, vendor_name, upload_date, status, created_by, warehouse_id, lpo, sap_po, invoice_number, created_at
+       ) VALUES (?, ?, ?, 'Pending', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      [
+        batch_name,
+        vendor_name || null,
+        upload_date,
+        created_by || null,
+        warehouse_id || null,
+        lpo || null,
+        sap_po || null,
+        invoice_number || null,
+      ],
       function onInsert(err) {
         if (err) reject(err);
         else resolve(this.lastID);
@@ -106,8 +417,9 @@ async function processInboundRows(rows, uploadedBy, warehouseId, req = null) {
   const normalized = [];
   for (const raw of normalizeExcelRows(rows || [])) {
     const batch_vendor_name = String(pick(raw, 'Batch/Vendor Name', 'batch_vendor_name')).trim();
-    const invoice_no = String(pick(raw, 'Invoice No.', 'Invoice No', 'invoice_no')).trim();
-    const po_number = String(pick(raw, 'PO Number', 'po_number')).trim();
+    const ship = shipmentFromRow(raw);
+    const invoice_no = ship.invoice_number || '';
+    const po_number = ship.sap_po || '';
     const part_number = String(pick(raw, 'Part Number', 'part_number')).trim();
     const sap_part_number = String(pick(raw, 'SAP Part Number', 'sap_part_number')).trim();
     const description = String(pick(raw, 'Description', 'description')).trim();
@@ -125,6 +437,8 @@ async function processInboundRows(rows, uploadedBy, warehouseId, req = null) {
     }
     normalized.push({
       batch_vendor_name: batch_vendor_name || '—',
+      lpo: ship.lpo || '',
+      sap_po: ship.sap_po || '',
       invoice_no,
       po_number,
       part_number,
@@ -158,6 +472,8 @@ async function processInboundRows(rows, uploadedBy, warehouseId, req = null) {
           sap_part_number: r.sap_part_number,
           description: r.description,
           inbound_qty: r.inbound_qty,
+          lpo: r.lpo,
+          sap_po: r.sap_po,
           invoice_no: r.invoice_no,
           po_number: r.po_number,
           received_date: r.received_date,
@@ -170,6 +486,13 @@ async function processInboundRows(rows, uploadedBy, warehouseId, req = null) {
       }
     }
 
+    const headRow = groupRows[0] || {};
+    const batchShipment = {
+      lpo: headRow.lpo || null,
+      sap_po: headRow.sap_po || null,
+      invoice_number: headRow.invoice_no || null,
+    };
+
     try {
       await dbRun('BEGIN IMMEDIATE');
       const batchId = await insertInboundBatchRow({
@@ -178,6 +501,7 @@ async function processInboundRows(rows, uploadedBy, warehouseId, req = null) {
         upload_date,
         created_by: uploadedBy,
         warehouse_id: warehouseId,
+        ...batchShipment,
       });
       if (!batchId) throw new Error('Failed to create inbound batch');
 
@@ -195,13 +519,15 @@ async function processInboundRows(rows, uploadedBy, warehouseId, req = null) {
 
         await dbRun(
           `INSERT INTO inbound_receiving
-            (batch_vendor_name, invoice_no, po_number, part_number, sap_part_number, description,
+            (batch_vendor_name, lpo, sap_po, invoice_no, po_number, part_number, sap_part_number, description,
              inbound_qty, received_date, remarks, uploaded_by, warehouse_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             batchKey,
-            agg.invoice_no || null,
-            agg.po_number || null,
+            agg.lpo || batchShipment.lpo || null,
+            agg.sap_po || batchShipment.sap_po || null,
+            agg.invoice_no || batchShipment.invoice_number || null,
+            agg.po_number || batchShipment.sap_po || null,
             agg.part_number,
             sap || null,
             desc || null,
@@ -272,7 +598,14 @@ async function processInboundRows(rows, uploadedBy, warehouseId, req = null) {
 
 router.post('/upload', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file?.buffer) return res.status(400).json({ error: 'file is required' });
+    const validationId = String(req.body?.validation_id || '').trim();
+    if (!validationId) {
+      return res.status(400).json({
+        error: 'validation_id is required. Validate the file first (POST /api/inbound/validate-upload).',
+        reject_message: REJECT_MESSAGE,
+      });
+    }
+
     const userId = req.user?.sub ?? null;
     const warehouseId = await resolveWarehouseIdForRequest({
       userId,
@@ -280,22 +613,50 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       explicitWarehouseId: req.body?.warehouse_id ?? req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
     });
     if (!warehouseId) return res.status(400).json({ error: 'warehouse_id could not be resolved' });
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
-    if (!rows.length) return res.status(400).json({ error: 'Empty sheet' });
+
+    const { payload } = await assertValidationApproved(validationId, { userId, warehouseId });
+    await revalidateStoredRows(payload, warehouseId);
+
+    const rows = validatedRowsToProcessInput(payload.rows);
+    if (!rows.length) return res.status(400).json({ error: 'No rows in validated session' });
+
     const results = await processInboundRows(rows, userId, warehouseId, req);
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length) {
+      return res.status(400).json({
+        error: 'Inbound processing failed for some rows',
+        success: results.filter((r) => r.ok).length,
+        total: results.length,
+        results,
+      });
+    }
+
+    await dbRun(
+      `UPDATE inbound_upload_validations SET status = 'consumed' WHERE validation_id = ?`,
+      [validationId]
+    );
+
     const ok = results.filter((r) => r.ok).length;
-    res.json({ success: ok, total: results.length, results });
+    res.json({ success: ok, total: results.length, results, validation_id: validationId });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    const code = e.statusCode || 500;
+    res.status(code).json({
+      error: e.message,
+      reject_message: e.validation ? REJECT_MESSAGE : undefined,
+      validation: e.validation || undefined,
+    });
   }
 });
 
 router.post('/bulk-paste', async (req, res) => {
   try {
-    const { data } = req.body;
-    if (!Array.isArray(data)) return res.status(400).json({ error: 'data must be an array of rows' });
+    const validationId = String(req.body?.validation_id || '').trim();
+    if (!validationId) {
+      return res.status(400).json({
+        error: 'validation_id is required. Validate paste data first (POST /api/inbound/validate-upload with file or validate client-side).',
+      });
+    }
+
     const userId = req.user?.sub ?? null;
     const warehouseId = await resolveWarehouseIdForRequest({
       userId,
@@ -303,11 +664,23 @@ router.post('/bulk-paste', async (req, res) => {
       explicitWarehouseId: req.body?.warehouse_id ?? req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
     });
     if (!warehouseId) return res.status(400).json({ error: 'warehouse_id could not be resolved' });
-    const results = await processInboundRows(data, userId, warehouseId, req);
+
+    const { payload } = await assertValidationApproved(validationId, { userId, warehouseId });
+    await revalidateStoredRows(payload, warehouseId);
+    const rows = validatedRowsToProcessInput(payload.rows);
+    const results = await processInboundRows(rows, userId, warehouseId, req);
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length) {
+      return res.status(400).json({ error: 'Inbound processing failed', results });
+    }
+    await dbRun(
+      `UPDATE inbound_upload_validations SET status = 'consumed' WHERE validation_id = ?`,
+      [validationId]
+    );
     const ok = results.filter((r) => r.ok).length;
     res.json({ success: ok, total: results.length, results });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.statusCode || 500).json({ error: e.message });
   }
 });
 
@@ -322,6 +695,9 @@ router.get('/putaway-report', async (req, res) => {
         b.vendor_name,
         b.upload_date,
         b.status AS batch_status,
+        b.lpo,
+        b.sap_po,
+        b.invoice_number,
         i.id AS inbound_item_id,
         i.part_number,
         i.sap_part_number,

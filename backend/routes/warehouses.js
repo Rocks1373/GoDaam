@@ -4,6 +4,7 @@ const db = require('../db');
 const { requireAdmin, requireAuth } = require('../middleware/auth');
 const { listWarehousesForUser, userHasWarehouseAccess } = require('../services/warehouseContext');
 const { assignWarehouseManager, listWarehouseStaff } = require('../services/warehouseManager');
+const { assertWarehouseUnique, normCode } = require('../services/warehouseValidation');
 
 const router = express.Router();
 const dbRun = promisify(db.run.bind(db));
@@ -57,18 +58,26 @@ router.get('/:id/staff', requireAuth, requireAdmin, async (req, res) => {
 router.post('/', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { warehouse_code, warehouse_name, warehouse_number, location, manager_name, remarks, is_active } = req.body || {};
-    const code = String(warehouse_code || '').trim();
     const name = String(warehouse_name || '').trim();
     const regNo = warehouse_number != null && String(warehouse_number).trim() !== '' ? String(warehouse_number).trim() : null;
-    if (!code || !name) return res.status(400).json({ error: 'warehouse_code and warehouse_name are required' });
+    const unique = await assertWarehouseUnique({ warehouse_code, warehouse_name: name });
+    if (!unique.ok) return res.status(unique.status).json({ error: unique.error });
+    const code = unique.code;
     await dbRun(
       `INSERT INTO warehouses (warehouse_code, warehouse_name, warehouse_number, location, manager_name, remarks, is_active, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 1), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       [code, name, regNo, location || null, manager_name || null, remarks || null, is_active != null ? (is_active ? 1 : 0) : 1]
     );
-    const row = await dbGet(`${WAREHOUSE_SELECT} WHERE w.warehouse_code = ?`, [code]);
+    const row = await dbGet(
+      `${WAREHOUSE_SELECT} WHERE lower(trim(w.warehouse_code)) = lower(trim(?)) ORDER BY w.id DESC LIMIT 1`,
+      [code]
+    );
     res.status(201).json(row);
   } catch (e) {
+    const msg = String(e.message || '');
+    if (/unique|duplicate/i.test(msg)) {
+      return res.status(409).json({ error: 'Warehouse code or name already exists.' });
+    }
     res.status(400).json({ error: e.message });
   }
 });
@@ -77,7 +86,27 @@ router.patch('/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid id' });
-    const { warehouse_name, warehouse_number, location, manager_name, remarks, is_active } = req.body || {};
+    const { warehouse_code, warehouse_name, warehouse_number, location, manager_name, remarks, is_active } =
+      req.body || {};
+    const existing = await dbGet(`SELECT id, warehouse_code, warehouse_name FROM warehouses WHERE id = ?`, [id]);
+    if (!existing) return res.status(404).json({ error: 'Warehouse not found' });
+
+    const nextCode =
+      warehouse_code != null && String(warehouse_code).trim() !== ''
+        ? normCode(warehouse_code)
+        : normCode(existing.warehouse_code);
+    const nextName =
+      warehouse_name != null && String(warehouse_name).trim() !== ''
+        ? String(warehouse_name).trim()
+        : String(existing.warehouse_name || '').trim();
+
+    const unique = await assertWarehouseUnique({
+      warehouse_code: nextCode,
+      warehouse_name: nextName,
+      excludeId: id,
+    });
+    if (!unique.ok) return res.status(unique.status).json({ error: unique.error });
+
     const regNo =
       warehouse_number === undefined
         ? null
@@ -86,7 +115,8 @@ router.patch('/:id', requireAuth, requireAdmin, async (req, res) => {
           : null;
     await dbRun(
       `UPDATE warehouses SET
-         warehouse_name = COALESCE(?, warehouse_name),
+         warehouse_code = ?,
+         warehouse_name = ?,
          warehouse_number = CASE WHEN ? = 1 THEN ? ELSE warehouse_number END,
          location = COALESCE(?, location),
          manager_name = COALESCE(?, manager_name),
@@ -95,7 +125,8 @@ router.patch('/:id', requireAuth, requireAdmin, async (req, res) => {
          updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
       [
-        warehouse_name != null ? String(warehouse_name) : null,
+        nextCode,
+        nextName,
         warehouse_number !== undefined ? 1 : 0,
         regNo,
         location !== undefined ? location : null,
@@ -108,6 +139,10 @@ router.patch('/:id', requireAuth, requireAdmin, async (req, res) => {
     const row = await dbGet(`${WAREHOUSE_SELECT} WHERE w.id = ?`, [id]);
     res.json(row);
   } catch (e) {
+    const msg = String(e.message || '');
+    if (/unique|duplicate/i.test(msg)) {
+      return res.status(409).json({ error: 'Warehouse code or name already exists.' });
+    }
     res.status(400).json({ error: e.message });
   }
 });

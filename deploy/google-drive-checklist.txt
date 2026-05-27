@@ -1,36 +1,24 @@
-GoDam — Google Drive setup verification checklist
-==================================================
+GoDam — Google Drive setup (OAuth user My Drive)
+================================================
 
-Your root folder ID (for GOOGLE_DRIVE_ROOT_FOLDER_ID):
-  1ImIpPYnwCXmOaMATwLiAng0-TS_18LsW
+Root folder ID (GOOGLE_DRIVE_ROOT_FOLDER_ID) — must be inside the connected user's My Drive:
+  174hT47E4QMfTekmpgTi-5xNVUtD0gOHJ
 
-Check each item. If any fails, Drive uploads / folder ensure will error or do nothing.
+[ ] 1. Google Cloud → Drive API enabled
+[ ] 2. OAuth consent screen configured (add test users if External)
+[ ] 3. OAuth Web client (same project as GOOGLE_DRIVE_OAUTH_CLIENT_ID) — Authorized redirect URIs (add BOTH if unsure):
+      http://localhost:3001/api/google/oauth/callback
+      http://localhost:3001/api/storage/google-oauth/callback
+      (production: https://godam.divadivya.cloud/api/google/oauth/callback)
+      (production alias: https://godam.divadivya.cloud/api/storage/google-oauth/callback)
+[ ] 4. backend/.env:
+      GOOGLE_DRIVE_AUTH_MODE=oauth
+      GOOGLE_DRIVE_OAUTH_CLIENT_ID=...apps.googleusercontent.com
+      GOOGLE_DRIVE_OAUTH_CLIENT_SECRET=...
+      GOOGLE_DRIVE_ROOT_FOLDER_ID=...
+      FRONTEND_URL=http://localhost:5173
+[ ] 5. Restart backend
+[ ] 6. Web → Admin → Google Drive → Connect Google Drive → Test upload
+[ ] 7. Outbound / Sales Order Documents uploads should succeed to Drive
 
-[ ] 1. Google Cloud project (same project as the service account)
-      APIs & Services → Library → "Google Drive API" → ENABLED
-
-[ ] 2. Service account JSON file exists on the machine that runs the backend
-      File must contain: "type": "service_account", "client_email", "private_key"
-      Path must match GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH (use absolute path)
-
-[ ] 3. backend/.env (or systemd env) has BOTH:
-      GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH=...
-      GOOGLE_DRIVE_ROOT_FOLDER_ID=1ImIpPYnwCXmOaMATwLiAng0-TS_18LsW
-
-[ ] 4. Optional: STORAGE_PROVIDER=GOOGLE_DRIVE  (omit = default is GOOGLE_DRIVE)
-
-[ ] 5. Google Drive folder is shared with the service account email
-      Open folder → Share → add the exact client_email from the JSON
-      Role: Editor (or Content manager on a Shared drive)
-
-[ ] 6. Backend process can read the JSON file (permissions, path, no typos)
-
-[ ] 7. Backend restarted after changing .env
-
-[ ] 8. Web app: warehouse selector is one concrete warehouse (not "all") when testing uploads
-
-[ ] 9. Quick test: Sales Order Documents page → enter a sales order → Load
-      Or upload an outbound with Sales Doc. set — folder should appear under WHx/SO_… in Drive
-
-Do NOT use for Drive API:
-  client_secret_*.json (OAuth web client) — wrong credential type for this backend.
+Legacy service account (optional): GOOGLE_DRIVE_AUTH_MODE=service_account + JSON path.

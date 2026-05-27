@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, Download, Eye, Pencil, Plus, Trash2, Upload } from 'lucide-react';
+import { Copy, Download, Eye, FileDown, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { stockOutApi } from '../services/api';
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
 import { reportUploadError, reportUploadResult } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
+import { exportJsonToExcel } from '../utils/exportExcel';
 
 function parseTabSeparated(text) {
   const rawLines = (text || '')
@@ -260,6 +261,30 @@ const StockOut = () => {
           <button type="button" className="btn-secondary flex items-center gap-1" onClick={() => setShowBulkModal(true)}>
             <Copy size={14} />
             Copy-paste bulk entry
+          </button>
+          <button
+            type="button"
+            className="btn-secondary flex items-center gap-1"
+            onClick={() =>
+              exportJsonToExcel(
+                (displayRows || []).map((r) => ({
+                  'Transaction Date': r.transaction_date,
+                  'Part Number': r.part_number,
+                  'SAP Part Number': r.sap_part_number,
+                  Description: r.description,
+                  Rack: r.rack_location,
+                  'Qty Out': r.qty_out,
+                  'Outbound Number': r.outbound_number,
+                  'Reference No': r.reference_no,
+                  Remarks: r.remarks,
+                })),
+                'stock-out-export.xlsx',
+                'Stock Out'
+              )
+            }
+          >
+            <FileDown size={14} />
+            Export Excel
           </button>
         </div>
       </div>

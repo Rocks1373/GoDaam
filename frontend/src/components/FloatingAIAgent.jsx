@@ -1,12 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Copy, FileText, Image, Paperclip, Trash2, X } from 'lucide-react';
+import { Bot, Copy, FileText, Paperclip, Trash2, X } from 'lucide-react';
 import { aiAgentApi } from '../services/aiAgentApi';
-
-const PUTER_SCRIPT_SRC = 'https://js.puter.com/v2/';
-const PUTER_TEXT_MODEL = 'gpt-5.4-nano';
-const PUTER_VISION_MODEL = 'gpt-5.4-nano';
-
-let puterLoadPromise = null;
+import { ocrWithGoDam } from '../services/godamOcr';
 
 function nowIso() {
   try {
@@ -35,45 +30,6 @@ function clampLines(text, max = 18) {
   return `${lines.slice(0, max).join('\n')}\n…`;
 }
 
-function loadPuter() {
-  if (typeof window === 'undefined') return Promise.reject(new Error('Puter is only available in the browser.'));
-  if (window.puter?.ai) return Promise.resolve(window.puter);
-  if (puterLoadPromise) return puterLoadPromise;
-  puterLoadPromise = new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[src="${PUTER_SCRIPT_SRC}"]`);
-    const script = existing || document.createElement('script');
-    const done = () => {
-      if (window.puter?.ai) resolve(window.puter);
-      else reject(new Error('Puter.js loaded, but AI APIs are unavailable.'));
-    };
-    script.addEventListener('load', done, { once: true });
-    script.addEventListener('error', () => reject(new Error('Failed to load Puter.js.')), { once: true });
-    if (!existing) {
-      script.src = PUTER_SCRIPT_SRC;
-      script.async = true;
-      document.head.appendChild(script);
-    } else {
-      setTimeout(done, 0);
-    }
-  });
-  return puterLoadPromise;
-}
-
-function puterResponseText(response) {
-  if (typeof response === 'string') return response;
-  const content = response?.message?.content ?? response?.content ?? response?.text;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => part?.text || part?.content || '')
-      .filter(Boolean)
-      .join('\n')
-      .trim();
-  }
-  if (response == null) return '';
-  return JSON.stringify(response, null, 2);
-}
-
 function isSupportedVisualFile(file) {
   const type = String(file?.type || '').toLowerCase();
   const name = String(file?.name || '').toLowerCase();
@@ -84,33 +40,9 @@ function isSupportedVisualFile(file) {
   );
 }
 
-function readableAiError(e) {
-  const msg = String(e?.message || e || 'AI request failed');
-  if (/mistral/i.test(msg) && /not configured/i.test(msg)) {
-    return 'Puter Mistral OCR is not configured. Trying Puter default OCR should avoid this.';
-  }
-  if (/fetch failed|websocket|socket|500|drivers\/call|failed to load/i.test(msg)) {
-    return 'Puter cloud service is not reachable right now. Check internet access and allow api.puter.com / js.puter.com, then try again.';
-  }
-  return msg;
-}
-
-async function runPuterOcrRequest(puter, file) {
-  try {
-    return await puter.ai.img2txt(file);
-  } catch (firstError) {
-    const firstMessage = String(firstError?.message || firstError || '');
-    if (/mistral/i.test(firstMessage) && /not configured/i.test(firstMessage)) {
-      return puter.ai.img2txt({ source: file, provider: 'aws-textract' });
-    }
-    throw firstError;
-  }
-}
-
 export default function FloatingAIAgent({ user }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [puterBusy, setPuterBusy] = useState(false);
   const [err, setErr] = useState('');
   const [input, setInput] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
@@ -157,105 +89,84 @@ export default function FloatingAIAgent({ user }) {
         role: 'assistant',
         ts: nowIso(),
         text:
-          "Chat cleared. Ask: “What is the correct outbound → FIFO → picking → delivery note process?”",
+          'Chat cleared. Ask: “What is the correct outbound → FIFO → picking → delivery note process?”',
       },
     ]);
   };
 
+  const askAssistant = async (text, { pageContext } = {}) => {
+    const out = await aiAgentApi.chat({
+      message: text,
+      pageContext: pageContext ?? (typeof window !== 'undefined' ? window.location?.pathname || '' : ''),
+      entityId: null,
+      userRole,
+    });
+
+    let answer = String(out?.answer || '').trim();
+    if (!answer && out?.raw) answer = clampLines(JSON.stringify(out.raw, null, 2));
+    if (!answer) answer = 'No response.';
+
+    const toolName = out?.raw?.tool_name ? String(out.raw.tool_name) : '';
+    const toolHint =
+      toolName && canRunDiagnostics
+        ? `\n\n(Selected diagnostic/tool: ${toolName})`
+        : toolName
+          ? `\n\n(Selected tool: ${toolName})`
+          : '';
+
+    return `${answer}${toolHint}`;
+  };
+
   const send = async () => {
     const text = String(input || '').trim();
-    if (!text) return;
+    if (!text && !selectedFile) return;
     if (busy) return;
-    if (text === lastSentRef.current) return;
+    if (!selectedFile && text === lastSentRef.current) return;
 
-    if (selectedFile) {
-      await runPuterImageAnalysis();
-      lastSentRef.current = '';
-      return;
-    }
+    lastSentRef.current = text || selectedFile?.name || '';
 
-    lastSentRef.current = text;
-
-    const msgUser = { id: `u-${Date.now()}`, role: 'user', ts: nowIso(), text };
+    const displayText =
+      text || (selectedFile ? `Please analyze this file: ${selectedFile.name}` : '');
+    const msgUser = { id: `u-${Date.now()}`, role: 'user', ts: nowIso(), text: displayText };
     setMessages((m) => [...m, msgUser]);
     setInput('');
     setErr('');
     setBusy(true);
 
     try {
-      const pageContext = typeof window !== 'undefined' ? window.location?.pathname || '' : '';
-      const out = await aiAgentApi.chat({
-        message: text,
-        pageContext,
-        entityId: null,
-        userRole,
-      });
+      let messageForAi = text;
+      if (selectedFile) {
+        const ocrText = await ocrWithGoDam(selectedFile);
+        const ocrBlock = ocrText
+          ? `\n\n--- OCR from ${selectedFile.name} ---\n${ocrText}`
+          : `\n\n--- OCR from ${selectedFile.name} ---\n(No text detected.)`;
+        messageForAi = `${text || 'Summarize this document and list key warehouse fields (PO/SO/DN, items, quantities).'}${ocrBlock}`;
+      }
 
-      let answer = String(out?.answer || '').trim();
-      if (!answer && out?.raw) answer = clampLines(JSON.stringify(out.raw, null, 2));
-      if (!answer) answer = 'No response.';
-
-      const toolName = out?.raw?.tool_name ? String(out.raw.tool_name) : '';
-      const toolHint =
-        toolName && canRunDiagnostics
-          ? `\n\n(Selected diagnostic/tool: ${toolName})`
-          : toolName
-            ? `\n\n(Selected tool: ${toolName})`
-            : '';
-
+      const answer = await askAssistant(messageForAi);
       setMessages((m) => [
         ...m,
         {
           id: `a-${Date.now()}`,
           role: 'assistant',
           ts: nowIso(),
-          text: `${answer}${toolHint}`,
+          text: answer,
         },
       ]);
+      if (selectedFile) setSelectedFile(null);
     } catch (e) {
-      try {
-        const puter = await loadPuter();
-        const response = await puter.ai.chat(
-          [
-            {
-              role: 'system',
-              content:
-                'You are the GoDam warehouse assistant. Give short, practical answers for warehouse, SAP, logistics, stock, delivery, OCR, and troubleshooting questions. Do not claim you changed backend data.',
-            },
-            {
-              role: 'user',
-              content: text,
-            },
-          ],
-          {
-            model: PUTER_TEXT_MODEL,
-          }
-        );
-        const answer = String(puterResponseText(response) || '').trim() || 'No response.';
-        setMessages((m) => [
-          ...m,
-          {
-            id: `aputer-${Date.now()}`,
-            role: 'assistant',
-            ts: nowIso(),
-            text: `${answer}\n\n(Puter fallback: local AI plugin is not reachable.)`,
-          },
-        ]);
-      } catch (puterError) {
-        const backendMsg = e?.message || 'AI request failed';
-        const puterMsg = puterError?.message || 'Puter fallback failed';
-        setErr(`${backendMsg}. ${puterMsg}`);
-        setMessages((m) => [
-          ...m,
-          {
-            id: `aerr-${Date.now()}`,
-            role: 'assistant',
-            ts: nowIso(),
-            text:
-              'I could not reach the GoDam AI plugin or Puter AI right now. Check the AI plugin service and internet/Puter access.',
-          },
-        ]);
-      }
+      const backendMsg = e?.message || 'AI request failed';
+      setErr(backendMsg);
+      setMessages((m) => [
+        ...m,
+        {
+          id: `aerr-${Date.now()}`,
+          role: 'assistant',
+          ts: nowIso(),
+          text:
+            'I could not reach the GoDam AI service right now. Check that the AI plugin / ai-service is running and try again.',
+        },
+      ]);
     } finally {
       setBusy(false);
       setTimeout(() => {
@@ -273,16 +184,16 @@ export default function FloatingAIAgent({ user }) {
     }
     if (!isSupportedVisualFile(file)) {
       setSelectedFile(null);
-      setErr('Choose an image or PDF file for OCR/image analysis.');
+      setErr('Choose an image or PDF file for OCR.');
       return;
     }
     setSelectedFile(file);
   };
 
-  const runPuterOcr = async () => {
-    if (!selectedFile || puterBusy) return;
+  const runOcr = async () => {
+    if (!selectedFile || busy) return;
     setErr('');
-    setPuterBusy(true);
+    setBusy(true);
     const id = Date.now();
     setMessages((m) => [
       ...m,
@@ -294,9 +205,7 @@ export default function FloatingAIAgent({ user }) {
       },
     ]);
     try {
-      const puter = await loadPuter();
-      const response = await runPuterOcrRequest(puter, selectedFile);
-      const text = String(puterResponseText(response) || '').trim() || 'No text detected.';
+      const text = (await ocrWithGoDam(selectedFile)) || 'No text detected.';
       setMessages((m) => [
         ...m,
         {
@@ -307,7 +216,7 @@ export default function FloatingAIAgent({ user }) {
         },
       ]);
     } catch (e) {
-      const msg = readableAiError(e);
+      const msg = e?.message || 'OCR failed';
       setErr(msg);
       setMessages((m) => [
         ...m,
@@ -315,61 +224,11 @@ export default function FloatingAIAgent({ user }) {
           id: `a-ocrerr-${Date.now()}`,
           role: 'assistant',
           ts: nowIso(),
-          text: `Puter OCR failed: ${msg}`,
+          text: `OCR failed: ${msg}`,
         },
       ]);
     } finally {
-      setPuterBusy(false);
-    }
-  };
-
-  const runPuterImageAnalysis = async () => {
-    if (!selectedFile || puterBusy) return;
-    const prompt =
-      String(input || '').trim() ||
-      'Analyze this warehouse/logistics image. Extract visible text, identify document type, item numbers, quantities, dates, delivery/order references, risks, and suggested next action.';
-    setErr('');
-    setPuterBusy(true);
-    const id = Date.now();
-    setMessages((m) => [
-      ...m,
-      {
-        id: `u-img-${id}`,
-        role: 'user',
-        ts: nowIso(),
-        text: `Analyze image/file: ${selectedFile.name}\n\n${prompt}`,
-      },
-    ]);
-    setInput('');
-    try {
-      const puter = await loadPuter();
-      const response = await puter.ai.chat(prompt, selectedFile, {
-        model: PUTER_VISION_MODEL,
-      });
-      const text = String(puterResponseText(response) || '').trim() || 'No analysis returned.';
-      setMessages((m) => [
-        ...m,
-        {
-          id: `a-img-${Date.now()}`,
-          role: 'assistant',
-          ts: nowIso(),
-          text: `Image analysis\n\n${text}`,
-        },
-      ]);
-    } catch (e) {
-      const msg = readableAiError(e);
-      setErr(msg);
-      setMessages((m) => [
-        ...m,
-        {
-          id: `a-imgerr-${Date.now()}`,
-          role: 'assistant',
-          ts: nowIso(),
-          text: `Puter image analysis failed: ${msg}`,
-        },
-      ]);
-    } finally {
-      setPuterBusy(false);
+      setBusy(false);
     }
   };
 
@@ -468,7 +327,7 @@ export default function FloatingAIAgent({ user }) {
                 className="btn-secondary px-2 py-1 inline-flex items-center gap-1"
                 title="Attach image or PDF"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={busy || puterBusy}
+                disabled={busy}
               >
                 <Paperclip size={13} />
                 Attach
@@ -476,22 +335,12 @@ export default function FloatingAIAgent({ user }) {
               <button
                 type="button"
                 className="btn-secondary px-2 py-1 inline-flex items-center gap-1"
-                title="Extract text with Puter OCR"
-                onClick={runPuterOcr}
-                disabled={busy || puterBusy || !selectedFile}
+                title="Extract text with GoDam OCR"
+                onClick={runOcr}
+                disabled={busy || !selectedFile}
               >
                 <FileText size={13} />
                 OCR
-              </button>
-              <button
-                type="button"
-                className="btn-secondary px-2 py-1 inline-flex items-center gap-1"
-                title="Analyze image with Puter AI"
-                onClick={runPuterImageAnalysis}
-                disabled={busy || puterBusy || !selectedFile}
-              >
-                <Image size={13} />
-                Analyze
               </button>
               {selectedFile ? (
                 <button
@@ -500,7 +349,7 @@ export default function FloatingAIAgent({ user }) {
                   title={selectedFile.name}
                   onClick={() => setSelectedFile(null)}
                 >
-                  {puterBusy ? 'Puter working… ' : ''}
+                  {busy ? 'Working… ' : ''}
                   {selectedFile.name}
                 </button>
               ) : null}
@@ -525,23 +374,15 @@ export default function FloatingAIAgent({ user }) {
               <button
                 type="button"
                 className="btn-primary px-3 py-2"
-                disabled={busy || puterBusy || !String(input || '').trim()}
+                disabled={busy || (!String(input || '').trim() && !selectedFile)}
                 onClick={send}
                 title="Send"
               >
                 {busy ? '…' : 'Send'}
               </button>
             </div>
-            <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-theme-fg-muted">
-              <span>Enter = send · Shift+Enter = new line</span>
-              <a
-                className="font-semibold text-theme-primary hover:underline"
-                href="https://developer.puter.com"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Powered by Puter
-              </a>
+            <div className="mt-1 text-[10px] text-theme-fg-muted">
+              Enter = send · Shift+Enter = new line · Attach + Send runs OCR then asks GoDam AI
             </div>
           </div>
         </div>

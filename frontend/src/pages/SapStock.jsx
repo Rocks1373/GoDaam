@@ -13,7 +13,6 @@ function fmtNum(n) {
 export default function SapStock() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
-  const [batchId, setBatchId] = useState(null);
   const [filterStorageLocation, setFilterStorageLocation] = useState('');
   const [filterMaterialGroup, setFilterMaterialGroup] = useState('');
   const [filterMaterial, setFilterMaterial] = useState('');
@@ -39,7 +38,6 @@ export default function SapStock() {
       });
       setRows(data.rows || []);
       setTotal(data.total ?? 0);
-      setBatchId(data.batch_id ?? null);
     } catch (e) {
       setErr(e.response?.data?.error || e.message || 'Failed to load');
       setRows([]);
@@ -186,14 +184,6 @@ export default function SapStock() {
         </div>
       </div>
 
-      <p className="text-[11px] text-gray-600 mb-2">
-        Latest processed upload (batch #{batchId ?? '—'}). SAP quantities are for comparison only; main stock available qty is unchanged on upload.
-        <span className="block mt-1 text-gray-500">
-          Supports SAP exports like MB52: <strong>Item (SD)</strong>, <strong>Sales document</strong>, and <strong>Batch</strong> are taken from the sheet headers that match those columns (Excel positions are typically A, I, J);{' '}
-          <strong>Material Group</strong> aligns with main-stock vendor scope; <strong>Quantity</strong> is the upload <strong>Unrestricted</strong> column (or Unrestrict-*). Storage locations 1004+1007 are the default comparison buckets; 1002, 1003, 1005, etc. map by SL code.
-        </span>
-      </p>
-
       {err ? <div className="mb-2 text-[11px] font-bold text-red-700">{err}</div> : null}
 
       <div className="flex flex-wrap items-end gap-2 mb-2">
@@ -283,6 +273,16 @@ export default function SapStock() {
               </SortTh>
               <SortTh
                 bare
+                columnKey="accessories"
+                sortKey={sortKey}
+                direction={direction}
+                onSort={requestSort}
+                className="px-2 py-2 text-left text-[10px] font-extrabold text-gray-800 uppercase tracking-wide"
+              >
+                Accessories
+              </SortTh>
+              <SortTh
+                bare
                 columnKey="batch"
                 sortKey={sortKey}
                 direction={direction}
@@ -336,14 +336,14 @@ export default function SapStock() {
           <tbody>
             {loading && !rows.length ? (
               <tr>
-                <td colSpan={10} className="p-4 text-center text-gray-500">
+                <td colSpan={11} className="p-4 text-center text-gray-500">
                   Loading…
                 </td>
               </tr>
             ) : null}
             {!loading && !displayRows.length ? (
               <tr>
-                <td colSpan={10} className="p-4 text-center text-gray-500">
+                <td colSpan={11} className="p-4 text-center text-gray-500">
                   No SAP upload data yet. Upload an Excel file to begin.
                 </td>
               </tr>
@@ -366,6 +366,9 @@ export default function SapStock() {
                 </td>
                 <td className="px-2 py-1 font-mono text-[10px] max-w-[120px] truncate" title={r.sales_document ?? ''}>
                   {r.sales_document ?? '—'}
+                </td>
+                <td className="px-2 py-1 max-w-[120px] truncate" title={r.accessories ?? ''}>
+                  {r.accessories ?? '—'}
                 </td>
                 <td className="px-2 py-1 font-mono text-[10px] max-w-[140px] truncate" title={r.batch ?? ''}>
                   {r.batch ?? '—'}

@@ -171,5 +171,8 @@ module.exports = {
   listExportableDocuments,
   buildCombinedPdfForSalesOrder,
   streamIndividualZipForSalesOrder,
+  mergePdfBuffers,
+  isPdfMime,
+  looksLikePdfBuffer,
   DOCUMENT_TYPE_RANK,
 };

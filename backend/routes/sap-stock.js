@@ -131,6 +131,21 @@ function pickMaterialGroupColumnIndex(headerRow) {
   return -1;
 }
 
+function pickColumn(norm, aliases) {
+  for (const a of aliases) {
+    const i = norm.indexOf(a);
+    if (i >= 0) return i;
+  }
+  for (let i = 0; i < norm.length; i += 1) {
+    const h = norm[i];
+    if (!h) continue;
+    for (const a of aliases) {
+      if (h.includes(a)) return i;
+    }
+  }
+  return -1;
+}
+
 function pickUomColumnIndex(headerRow) {
   const norm = headerNormRow(headerRow);
   const candidates = ['base unit of measure', 'unit of measure', 'base unit', 'uom', 'bun'];
@@ -202,6 +217,7 @@ function buildLayoutFromSapExportHeaders(headerRow) {
   const uom = pickUomColumnIndex(headerRow);
   const itemSd = pickItemSdColumnIndex(headerRow);
   const salesDocument = col('sales document');
+  const accessories = pickColumn(norm, ['accessories', 'accessory', 'accessory kit']);
 
   return {
     itemSd: itemSd >= 0 ? itemSd : -1,
@@ -219,6 +235,7 @@ function buildLayoutFromSapExportHeaders(headerRow) {
     materialDocument: col('material document'),
     valueAmount: col('value unrestricted'),
     vendorNumber: col('vendor number'),
+    accessories: accessories >= 0 ? accessories : -1,
   };
 }
 
@@ -242,6 +259,7 @@ function legacySapLayout() {
     valueAmount: LEGACY_COL.value,
     vendorNumber: LEGACY_COL.vendor,
     plant: -1,
+    accessories: -1,
   };
 }
 
@@ -378,6 +396,7 @@ router.get('/template', async (_req, res) => {
       'Material Group',
       'Material type',
       'Quantities Allocated',
+      'Accessories',
     ];
     const ws = XLSX.utils.aoa_to_sheet([headers]);
     const wb = XLSX.utils.book_new();
@@ -459,6 +478,7 @@ router.get('/', async (req, res) => {
         COALESCE(s.unrestricted_qty, s.stock_qty) AS sap_qty,
         s.base_uom,
         s.material_group,
+        s.accessories,
         s.id
       FROM sap_stock s
       ${where}
@@ -574,6 +594,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         const unrestricted_raw = lineQty(line, L.unrestricted);
         const base_uom = lineText(line, L.uom, { allowDate: false });
         const value_amount = L.valueAmount >= 0 ? lineQty(line, L.valueAmount) : null;
+        const accessories = lineText(line, L.accessories, { allowDate: true });
 
         const unrestricted_qty = unrestricted_raw;
         const eff = effectiveQty(unrestricted_qty, stock_qty ?? 0);
@@ -590,9 +611,9 @@ router.post('/upload', upload.single('file'), async (req, res) => {
           `INSERT INTO sap_stock (
             upload_batch_id, vendor_number, material, sap_part_number, description,
             storage_location, storage_location_description, stock_qty, storage_document, "batch",
-            item_sd, sales_document,
+            item_sd, sales_document, accessories,
             unrestricted_qty, base_uom, value_amount, material_group, uploaded_by
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             batchId,
             vendor_number || null,
@@ -606,6 +627,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
             batchNo || null,
             item_sd || null,
             sales_document || null,
+            accessories || null,
             unrestricted_qty,
             base_uom || null,
             value_amount,
@@ -623,6 +645,12 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       await dbRun('COMMIT');
 
       await refreshMainStockSapQtyFromBatch(db, batchId);
+      try {
+        const { clearSapStockDescriptionCache } = require('../services/huaweiPartDescription');
+        clearSapStockDescriptionCache();
+      } catch {
+        /* optional */
+      }
 
       res.json({
         ok: true,
@@ -654,6 +682,92 @@ router.post('/update-main-stock-sap-qty', async (req, res) => {
     if (!batchId) return res.status(400).json({ error: 'No processed SAP batch' });
     await refreshMainStockSapQtyFromBatch(db, batchId);
     res.json({ ok: true, batch_id: batchId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const SAP_STORAGE_LOCATIONS = ['1001', '1002', '1003', '1004', '1005', '1007'];
+
+router.get('/material-group-insights', async (req, res) => {
+  try {
+    const batchId = Number(req.query.batch_id) || (await getLatestProcessedBatchId());
+    if (!batchId) {
+      return res.json({
+        rows: [],
+        batch_id: null,
+        batch: null,
+        storage_locations: SAP_STORAGE_LOCATIONS,
+        filter_storage_locations: [],
+      });
+    }
+
+    const batch = await dbGet(
+      `SELECT id, file_name, upload_date, total_rows, status FROM sap_stock_upload_batches WHERE id = ?`,
+      [batchId]
+    );
+
+    const locRaw = String(req.query.storage_locations || '').trim();
+    const filterLocs = locRaw
+      ? locRaw
+          .split(',')
+          .map((x) => x.trim())
+          .filter((x) => SAP_STORAGE_LOCATIONS.includes(x))
+      : [];
+
+    const params = [batchId];
+    let slFilter = '';
+    if (filterLocs.length) {
+      slFilter = ` AND TRIM(COALESCE(storage_location,'')) IN (${filterLocs.map(() => '?').join(', ')})`;
+      params.push(...filterLocs);
+    }
+
+    const rows = await dbAll(
+      `
+      SELECT
+        TRIM(COALESCE(NULLIF(material_group,''), '(Unassigned)')) AS material_group,
+        SUM(COALESCE(unrestricted_qty, stock_qty, 0)) AS total_qty,
+        SUM(COALESCE(value_amount, 0)) AS total_value,
+        COUNT(DISTINCT TRIM(material)) AS material_count
+      FROM sap_stock
+      WHERE upload_batch_id = ?${slFilter}
+      GROUP BY TRIM(COALESCE(NULLIF(material_group,''), '(Unassigned)'))
+      ORDER BY total_qty DESC, total_value DESC
+      `,
+      params
+    );
+
+    const cleaned = (rows || [])
+      .map((r) => ({
+        material_group: r.material_group,
+        total_qty: Number(r.total_qty) || 0,
+        total_value: Number(r.total_value) || 0,
+        material_count: Number(r.material_count) || 0,
+      }))
+      .filter((r) => r.total_qty > 0 || r.total_value > 0);
+
+    const sumQty = cleaned.reduce((a, r) => a + r.total_qty, 0);
+    const sumVal = cleaned.reduce((a, r) => a + r.total_value, 0);
+    let maxQty = 0;
+    for (const r of cleaned) {
+      if (r.total_qty > maxQty) maxQty = r.total_qty;
+    }
+
+    const out = cleaned.map((r) => ({
+      ...r,
+      pct_qty: sumQty > 0 ? (r.total_qty / sumQty) * 100 : 0,
+      pct_value: sumVal > 0 ? (r.total_value / sumVal) * 100 : 0,
+      is_highest_qty: maxQty > 0 && r.total_qty >= maxQty - 1e-9,
+    }));
+
+    res.json({
+      rows: out,
+      batch_id: batchId,
+      batch,
+      storage_locations: SAP_STORAGE_LOCATIONS,
+      filter_storage_locations: filterLocs,
+      totals: { quantity: sumQty, value: sumVal, material_groups: out.length },
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

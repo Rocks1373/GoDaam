@@ -1,11 +1,13 @@
 const { GoogleDriveStorage } = require('./googleDriveStorage');
 const { OneDriveStorage } = require('./oneDriveStorage');
+const { getEnvRootFolderId, getEffectiveRootFolderId } = require('../googleDriveRootFolderStore');
 
 const SUBFOLDERS = {
   CUSTOMER_PO: 'Customer_PO',
   INVOICES: 'Invoices',
   DELIVERY_NOTES: 'Delivery_Notes',
   POD: 'POD',
+  ORDER_IMAGES: 'Order_Images',
   ACCOUNTING_DOCUMENTS: 'Accounting_Documents',
   OTHER: 'Other',
 };
@@ -30,7 +32,11 @@ function getCloudDriver() {
 }
 
 function getConfiguredRootFolderId() {
-  return String(process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || '').trim();
+  return getEnvRootFolderId();
+}
+
+async function getConfiguredRootFolderIdAsync() {
+  return getEffectiveRootFolderId();
 }
 
 /**
@@ -39,10 +45,11 @@ function getConfiguredRootFolderId() {
  * @returns {Promise<{ id: string, name: string, webViewLink?: string|null }>}
  */
 async function ensureWarehouseFolder(ctx) {
+  await assertDriveUploadReady();
   const driver = getCloudDriver();
-  const rootId = getConfiguredRootFolderId();
+  const rootId = await getConfiguredRootFolderIdAsync();
   if (!rootId) {
-    throw new Error('GOOGLE_DRIVE_ROOT_FOLDER_ID is not configured');
+    throw new Error('Google Drive root folder is not configured. Open Settings → Google Drive and repair the root folder.');
   }
   if (typeof driver.assertFolderAccessible === 'function') {
     await driver.assertFolderAccessible(rootId, 'root folder (GOOGLE_DRIVE_ROOT_FOLDER_ID)');
@@ -52,8 +59,8 @@ async function ensureWarehouseFolder(ctx) {
 }
 
 /**
- * Ensure sales order + standard subfolders under the warehouse Drive folder.
- * @param {{ warehouseFolderId: string, warehouse_code: string, sales_order_number: string }} ctx
+ * Ensure sales order folder only (no document subfolders at SO root).
+ * Document subfolders are created per outbound under ensureOutboundBranchFolders.
  */
 async function ensureSalesOrderFolder(ctx) {
   const driver = getCloudDriver();
@@ -66,13 +73,6 @@ async function ensureSalesOrderFolder(ctx) {
   const soFolderName = `SO_${so}`;
   const soFolder = await driver.createFolderIfNotExists(whFolderId, soFolderName);
 
-  const customer_po_folder_id = (await driver.createFolderIfNotExists(soFolder.id, SUBFOLDERS.CUSTOMER_PO)).id;
-  const invoices_folder_id = (await driver.createFolderIfNotExists(soFolder.id, SUBFOLDERS.INVOICES)).id;
-  const delivery_notes_folder_id = (await driver.createFolderIfNotExists(soFolder.id, SUBFOLDERS.DELIVERY_NOTES)).id;
-  const pod_folder_id = (await driver.createFolderIfNotExists(soFolder.id, SUBFOLDERS.POD)).id;
-  const accounting_documents_folder_id = (await driver.createFolderIfNotExists(soFolder.id, SUBFOLDERS.ACCOUNTING_DOCUMENTS)).id;
-  const other_folder_id = (await driver.createFolderIfNotExists(soFolder.id, SUBFOLDERS.OTHER)).id;
-
   const relPath = `${whCode}/${soFolderName}`;
   return {
     storage_provider: getActiveStorageProviderName(),
@@ -80,22 +80,83 @@ async function ensureSalesOrderFolder(ctx) {
     sales_order_folder_id: soFolder.id,
     sales_order_folder_name: soFolderName,
     sales_order_folder_path: relPath,
-    customer_po_folder_id,
-    invoices_folder_id,
-    delivery_notes_folder_id,
-    pod_folder_id,
-    accounting_documents_folder_id,
-    other_folder_id,
+    customer_po_folder_id: null,
+    invoices_folder_id: null,
+    delivery_notes_folder_id: null,
+    pod_folder_id: null,
+    order_images_folder_id: null,
+    accounting_documents_folder_id: null,
+    other_folder_id: null,
     cloud_web_url: soFolder.webViewLink || null,
   };
 }
 
+/**
+ * Per-outbound folders under SO: Outbound_{outbound}/Customer_PO|Invoices|…|POD
+ */
+async function ensureOutboundBranchFolders(ctx) {
+  const driver = getCloudDriver();
+  const soFolderId = String(ctx.sales_order_folder_id || '').trim();
+  const outbound = String(ctx.outbound_number || '').trim();
+  if (!soFolderId) throw new Error('sales_order_folder_id required');
+  if (!outbound) throw new Error('outbound_number required');
+
+  const obFolderName = `Outbound_${outbound}`;
+  const obRoot = await driver.createFolderIfNotExists(soFolderId, obFolderName);
+
+  const customer_po_folder_id = (await driver.createFolderIfNotExists(obRoot.id, SUBFOLDERS.CUSTOMER_PO)).id;
+  const invoices_folder_id = (await driver.createFolderIfNotExists(obRoot.id, SUBFOLDERS.INVOICES)).id;
+  const delivery_notes_folder_id = (await driver.createFolderIfNotExists(obRoot.id, SUBFOLDERS.DELIVERY_NOTES)).id;
+  const pod_folder_id = (await driver.createFolderIfNotExists(obRoot.id, SUBFOLDERS.POD)).id;
+  const order_images_folder_id = (await driver.createFolderIfNotExists(obRoot.id, SUBFOLDERS.ORDER_IMAGES)).id;
+  const accounting_folder_id = (await driver.createFolderIfNotExists(obRoot.id, SUBFOLDERS.ACCOUNTING_DOCUMENTS)).id;
+  const other_folder_id = (await driver.createFolderIfNotExists(obRoot.id, SUBFOLDERS.OTHER)).id;
+
+  return {
+    outbound_folder_drive_id: obRoot.id,
+    outbound_folder_name: obFolderName,
+    customer_po_folder_id,
+    invoice_folder_id: invoices_folder_id,
+    invoices_folder_id,
+    accounting_folder_id,
+    raw_delivery_note_folder_id: delivery_notes_folder_id,
+    delivery_notes_folder_id,
+    pod_folder_id,
+    order_images_folder_id,
+    other_folder_id,
+  };
+}
+
+function folderIdForOutboundBranchDocType(branchFolders, documentType) {
+  if (!branchFolders) return null;
+  const t = String(documentType || '').toUpperCase();
+  if (t === 'CUSTOMER_PO') return branchFolders.customer_po_folder_id;
+  if (t === 'INVOICE') return branchFolders.invoice_folder_id || branchFolders.invoices_folder_id;
+  if (t === 'ACCOUNTING_DOCUMENT') return branchFolders.accounting_folder_id;
+  if (t === 'DELIVERY_NOTE') return branchFolders.raw_delivery_note_folder_id || branchFolders.delivery_notes_folder_id;
+  if (t === 'POD' || t === 'SIGNED_POD') return branchFolders.pod_folder_id;
+  if (t === 'ORDER_IMAGE') return branchFolders.order_images_folder_id;
+  if (t === 'OTHER') return branchFolders.other_folder_id;
+  return branchFolders.other_folder_id;
+}
+
+async function assertDriveUploadReady() {
+  if (getActiveStorageProviderName() !== 'GOOGLE_DRIVE') return;
+  const { validateGoogleDriveUploadPermissions } = require('../googleDriveOAuthClient');
+  const { getGoogleDriveAuthMode } = require('../googleDriveOAuthConfig');
+  if (getGoogleDriveAuthMode() === 'oauth') {
+    await validateGoogleDriveUploadPermissions();
+  }
+}
+
 async function uploadDocument({ folderId, filePath, fileName, mimeType }) {
+  await assertDriveUploadReady();
   const driver = getCloudDriver();
   return driver.uploadDocument({ folderId, filePath, fileName, mimeType });
 }
 
 async function replaceDocument({ fileId, filePath, mimeType }) {
+  await assertDriveUploadReady();
   const driver = getCloudDriver();
   return driver.replaceDocument({ fileId, filePath, mimeType });
 }
@@ -134,8 +195,12 @@ module.exports = {
   getActiveStorageProviderName,
   getCloudDriver,
   getConfiguredRootFolderId,
+  getConfiguredRootFolderIdAsync,
   ensureWarehouseFolder,
   ensureSalesOrderFolder,
+  ensureOutboundBranchFolders,
+  folderIdForOutboundBranchDocType,
+  assertDriveUploadReady,
   uploadDocument,
   replaceDocument,
   getWebLink,

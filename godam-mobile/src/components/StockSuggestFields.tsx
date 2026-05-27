@@ -16,6 +16,7 @@ export type PartSuggestRow = {
   part_number: string;
   sap_part_number?: string | null;
   description?: string | null;
+  uom?: string | null;
 };
 
 type PartSuggestInputProps = {
@@ -149,9 +150,9 @@ export function PartSuggestInput({
                     SAP {String(s.sap_part_number)}
                   </Text>
                 ) : null}
-                {s.description ? (
+                {s.description || s.uom ? (
                   <Text style={styles.sugDesc} numberOfLines={2}>
-                    {String(s.description)}
+                    {[s.description, s.uom ? `UOM ${s.uom}` : null].filter(Boolean).join(' · ')}
                   </Text>
                 ) : null}
               </Pressable>

@@ -23,6 +23,7 @@ class Settings:
     openai_api_key: "str | None"
     anthropic_api_key: "str | None"
     gemini_api_key: "str | None"
+    ollama_base_url: str
 
     auto_fix: bool
     scheduler_enabled: bool
@@ -41,9 +42,9 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
         gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
+        ollama_base_url=(os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/"),
         auto_fix=_env_bool("AUTO_FIX", False),
         scheduler_enabled=_env_bool("AI_SCHEDULER_ENABLED", False),
         scheduler_interval_minutes=max(1, int(os.getenv("AI_SCHEDULER_INTERVAL_MINUTES") or "10")),
         shared_secret=(os.getenv("AI_PLUGIN_SHARED_SECRET") or "").strip() or None,
     )
-

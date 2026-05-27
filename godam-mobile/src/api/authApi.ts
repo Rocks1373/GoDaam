@@ -1,5 +1,28 @@
 import { api } from './client';
 
+export type AuthLoginResponse = {
+  success?: boolean;
+  status?: string;
+  message?: string;
+  token?: string;
+  expires_at?: string;
+  user?: {
+    id: number;
+    username: string;
+    role: string;
+    full_name?: string;
+    approval_status?: string;
+    permissions: Record<string, boolean>;
+    warehouses?: { id: number; warehouse_code: string; warehouse_name: string }[];
+    default_warehouse_id?: number | null;
+  };
+};
+
+export async function googleLogin(googleToken: string) {
+  const res = await api.post('/auth/google-login', { googleToken });
+  return res.data as AuthLoginResponse;
+}
+
 export async function login(username: string, password: string) {
   const res = await api.post('/auth/login', { username, password });
   return res.data as {
@@ -19,6 +42,15 @@ export async function login(username: string, password: string) {
 
 export async function changePassword(current_password: string, new_password: string) {
   await api.post('/auth/change-password', { current_password, new_password });
+}
+
+export async function refreshSession() {
+  const res = await api.post('/auth/refresh');
+  return res.data as {
+    token: string;
+    expires_at?: string;
+    user?: { id: number; username: string; permissions: Record<string, boolean> };
+  };
 }
 
 export async function me() {

@@ -7,6 +7,7 @@ import { me } from '../api/authApi';
 import { clearAuth, loadAuth, isExpiredIso } from '../storage/tokenStorage';
 import { getApiBaseUrl, setAuthHeader } from '../api/client';
 import { useTheme } from '../theme/ThemeContext';
+import { stopDriverLocationTracking } from '../services/driverLocationTracking';
 import type { ThemeDefinition, ThemeId } from '../theme/palettes';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Profile'>;
@@ -89,6 +90,7 @@ export default function ProfileScreen({ navigation }: Props) {
   }, [navigation]);
 
   const logout = async () => {
+    await stopDriverLocationTracking();
     await clearAuth();
     setAuthHeader(null);
     navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
@@ -98,6 +100,11 @@ export default function ProfileScreen({ navigation }: Props) {
     <ScrollView style={styles.scroll} contentContainerStyle={styles.wrap}>
       <Text style={styles.h}>Profile</Text>
       <Text style={styles.meta}>{label}</Text>
+      {String(label).toLowerCase().includes('(driver)') ? (
+        <Text style={styles.apiUrlLabel}>
+          Location is shared with dispatch when the app is open and every 15 minutes in the background.
+        </Text>
+      ) : null}
 
       <Text style={styles.section}>Appearance</Text>
       <Text style={styles.apiUrlLabel}>Theme (saved on device)</Text>

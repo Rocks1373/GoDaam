@@ -1,5 +1,6 @@
 const { promisify } = require('util');
 const db = require('../db');
+const { fifoDateOrderExpr, normalizeDateValue } = require('../lib/safeDateSql');
 
 const dbRun = promisify(db.run.bind(db));
 const dbAll = promisify(db.all.bind(db));
@@ -28,7 +29,7 @@ async function loadStockByRackRowsForKeys(material, sapPartNumber, warehouseId) 
     WHERE warehouse_id = ?
       AND available_qty > 0
       AND (part_number IN (${ph}) OR COALESCE(sap_part_number, '') IN (${ph}))
-    ORDER BY date(COALESCE(first_entry_date, '1970-01-01')) ASC, id ASC
+    ORDER BY ${fifoDateOrderExpr('first_entry_date', db)} ASC, id ASC
   `;
   return dbAll(sql, [wh, ...k, ...k]);
 }
@@ -44,7 +45,7 @@ function allocateSuggestions(requiredQty, rows) {
     suggestions.push({
       stock_by_rack_id: row.id,
       rack_location: row.rack_location,
-      entry_date: row.first_entry_date || null,
+      entry_date: normalizeDateValue(row.first_entry_date),
       available_qty: avail,
       suggested_qty: take,
       fifo_sequence: seq++,
@@ -168,10 +169,141 @@ async function listFifoForOrder(outboundOrderId) {
   );
 }
 
+/**
+ * After mobile add-rack during pick, expose the new rack in Legacy FIFO without regenerating the whole order.
+ */
+async function appendFifoSuggestionForAddedRack({
+  outboundOrderId,
+  outboundItemId,
+  warehouseId,
+  stockByRackId,
+  outboundBomRequirementId = null,
+}) {
+  const orderId = Number(outboundOrderId);
+  const itemId = Number(outboundItemId);
+  const rackId = Number(stockByRackId);
+  if (!orderId || !itemId || !rackId) return null;
+
+  const item = await dbGet('SELECT * FROM outbound_items WHERE id = ? AND outbound_id = ?', [itemId, orderId]);
+  if (!item) return null;
+
+  const rackRow = await dbGet('SELECT * FROM stock_by_rack WHERE id = ?', [rackId]);
+  if (!rackRow || Number(rackRow.available_qty) <= QTY_EPS) return null;
+
+  const existing = await dbGet(
+    `SELECT id FROM fifo_suggestions WHERE outbound_order_id = ? AND outbound_item_id = ? AND stock_by_rack_id = ?`,
+    [orderId, itemId, rackId]
+  );
+  if (existing) {
+    return dbGet(
+      `SELECT f.*,
+              (SELECT COALESCE(SUM(picked_qty), 0) FROM picked_transactions WHERE fifo_suggestion_id = f.id) AS fifo_picked_qty
+         FROM fifo_suggestions f WHERE f.id = ?`,
+      [existing.id]
+    );
+  }
+
+  let obrId =
+    outboundBomRequirementId != null && outboundBomRequirementId !== ''
+      ? Number(outboundBomRequirementId)
+      : null;
+  if (obrId) {
+    const br = await dbGet(`SELECT id FROM outbound_bom_requirements WHERE id = ? AND outbound_item_id = ?`, [
+      obrId,
+      itemId,
+    ]);
+    if (!br) obrId = null;
+  }
+  if (!obrId) {
+    const bomCount = await dbGet(
+      `SELECT COUNT(*) AS c FROM outbound_bom_requirements WHERE outbound_item_id = ?`,
+      [itemId]
+    );
+    if (Number(bomCount?.c) > 0) {
+      const pn = String(rackRow.part_number || '').trim();
+      const br = await dbGet(
+        `SELECT * FROM outbound_bom_requirements WHERE outbound_item_id = ? AND child_part_number = ? ORDER BY id LIMIT 1`,
+        [itemId, pn]
+      );
+      if (br) obrId = br.id;
+    }
+  }
+
+  let remaining;
+  let pseudoItem = item;
+  let meta = {};
+
+  if (obrId) {
+    const br = await dbGet(`SELECT * FROM outbound_bom_requirements WHERE id = ?`, [obrId]);
+    const sumRow = await dbGet(
+      `SELECT COALESCE(SUM(picked_qty), 0) AS s FROM picked_transactions WHERE outbound_bom_requirement_id = ?`,
+      [obrId]
+    );
+    const pickedChild = Number(sumRow?.s) || 0;
+    remaining = Math.max(0, Number(br.required_child_qty) - pickedChild);
+    pseudoItem = {
+      id: item.id,
+      material: br.child_part_number,
+      part_number: br.child_part_number,
+      sap_part_number: br.child_sap_part_number || '',
+      description: br.child_description || '',
+    };
+    meta = {
+      outboundBomRequirementId: obrId,
+      parentPartNumber: br.parent_part_number,
+      isBomExpansion: 1,
+    };
+  } else {
+    const sumNonBom = await dbGet(
+      `SELECT COALESCE(SUM(picked_qty), 0) AS s FROM picked_transactions
+       WHERE outbound_item_id = ? AND COALESCE(is_bom_pick, 0) = 0`,
+      [itemId]
+    );
+    const picked = Math.max(Number(item.picked_qty) || 0, Number(sumNonBom?.s) || 0);
+    remaining = Math.max(0, Number(item.required_qty) - picked);
+  }
+
+  if (remaining <= QTY_EPS) return null;
+
+  const maxSeqRow = await dbGet(
+    `SELECT COALESCE(MAX(fifo_sequence), 0) AS m FROM fifo_suggestions WHERE outbound_order_id = ? AND outbound_item_id = ?`,
+    [orderId, itemId]
+  );
+  const seq = Number(maxSeqRow?.m) + 1;
+  const take = Math.min(Number(rackRow.available_qty), remaining);
+
+  await insertFifoRows(
+    orderId,
+    pseudoItem,
+    [
+      {
+        stock_by_rack_id: rackRow.id,
+        rack_location: rackRow.rack_location,
+        entry_date: normalizeDateValue(rackRow.first_entry_date),
+        available_qty: Number(rackRow.available_qty),
+        suggested_qty: take,
+        fifo_sequence: seq,
+      },
+    ],
+    meta,
+    warehouseId
+  );
+
+  return dbGet(
+    `SELECT f.*,
+            (SELECT COALESCE(SUM(picked_qty), 0) FROM picked_transactions WHERE fifo_suggestion_id = f.id) AS fifo_picked_qty
+       FROM fifo_suggestions f
+      WHERE f.outbound_order_id = ? AND f.outbound_item_id = ? AND f.stock_by_rack_id = ?
+      ORDER BY f.id DESC LIMIT 1`,
+    [orderId, itemId, rackId]
+  );
+}
+
 module.exports = {
   clearFifoForOrder,
   generateFifoForOutboundOrder,
   listFifoForOrder,
   loadStockByRackRowsForKeys,
   allocateSuggestions,
+  appendFifoSuggestionForAddedRack,
 };

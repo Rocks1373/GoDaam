@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../db');
 const { markOutboundDelivered } = require('../services/markOutboundDelivered');
 const { logAudit } = require('../services/auditLogger');
+const { enrichDnItemsFromMasterData } = require('../services/dnMasterDataLookup');
 
 function asNumber(v) {
   const n = Number(v);
@@ -70,11 +71,21 @@ router.get('/:outbound_number', async (req, res) => {
     const gps = customer?.gps || '';
     const contact_person = order.contact_person || customer?.contact_person || '';
 
-    const mappedItems = items.map((it) => ({
+    const mappedItemsRaw = items.map((it) => ({
       part_number: it.part_number,
+      sap_part_number: it.sap_part_number,
       description: it.description,
       qty: asNumber(it.required_qty),
-      uom: it.uom || '', // optional; keep blank if not present
+      uom: it.uom || '',
+      serial_no: it.serial_no || '-',
+      condition: it.condition || 'New',
+    }));
+    const warehouseId = order.warehouse_id != null ? Number(order.warehouse_id) : null;
+    const mappedItems = (await enrichDnItemsFromMasterData(mappedItemsRaw, warehouseId)).map((it) => ({
+      part_number: it.part_number,
+      description: it.description,
+      qty: it.qty,
+      uom: it.uom || '',
       serial_no: it.serial_no || '-',
       condition: it.condition || 'New',
     }));

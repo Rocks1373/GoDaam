@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
+import { FileDown } from 'lucide-react';
 import { reportsApi } from '../services/api';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
+import { exportJsonToExcel } from '../utils/exportExcel';
 
 export default function OutboundReport() {
   const [rows, setRows] = useState([]);
@@ -51,9 +53,38 @@ export default function OutboundReport() {
 
   return (
     <div className="max-w-[1600px]">
-      <div className="mb-3">
-        <h2 className="text-base font-bold text-gray-900 leading-tight">Outbound Report</h2>
-        <p className="text-[11px] text-gray-600 mt-0.5">Pick transactions from mobile / FIFO workflow</p>
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-3 mb-3">
+        <div>
+          <h2 className="text-base font-bold text-gray-900 leading-tight">Outbound Report</h2>
+          <p className="text-[11px] text-gray-600 mt-0.5">Pick transactions from mobile / FIFO workflow</p>
+        </div>
+        <button
+          type="button"
+          className="btn-secondary flex items-center gap-1 text-[11px]"
+          disabled={!displayRows.length}
+          onClick={() =>
+            exportJsonToExcel(
+              displayRows.map((r) => ({
+                'Outbound #': r.outbound_number,
+                Delivery: r.delivery,
+                Customer: r.customer,
+                'Part Number': r.part_number,
+                'SAP Part Number': r.sap_part_number,
+                Description: r.description,
+                'Picked Qty': r.picked_qty,
+                'Picked By': r.picked_by,
+                'Picked At': r.picked_at,
+                Status: r.item_status ?? r.order_status,
+                Rack: r.rack_location,
+              })),
+              'outbound-report.xlsx',
+              'Outbound Report'
+            )
+          }
+        >
+          <FileDown size={12} />
+          Export Excel
+        </button>
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white p-3 mb-3">

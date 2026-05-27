@@ -53,6 +53,16 @@ async function canMutateTask(req, task, dn) {
   return Boolean(phoneNorm && taskPhone && phoneNorm === taskPhone);
 }
 
+async function resolveOutboundOrderIdFromDn(dn) {
+  const ob = String(dn?.outbound_number || dn?.delivery || '').trim();
+  if (!ob) return null;
+  const row = await dbGet(
+    `SELECT id FROM outbound_orders WHERE outbound_number = ? OR delivery = ? LIMIT 1`,
+    [ob, ob]
+  );
+  return row?.id ? Number(row.id) : null;
+}
+
 function pickupForbiddenMessage(req, task, dn) {
   const assignedId = Number(task.driver_user_id) || null;
   const assignedName = trimStr(task.driver_name || dn?.driver_name) || 'assigned driver';
@@ -113,9 +123,11 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
+    const outbound_order_id = await resolveOutboundOrderIdFromDn(dn);
     res.json({
       task,
       delivery_note: dn,
+      outbound_order_id,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });

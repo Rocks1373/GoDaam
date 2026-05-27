@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { dashboardApi, outboundGodamApi } from '../services/api';
+import { dashboardApi, notesApi, outboundGodamApi } from '../services/api';
 import { downloadUploadErrorWorkbook, uploadSummary } from '../utils/uploadErrorReport';
 import {
   UploadCloud,
@@ -15,6 +15,14 @@ import {
   FileText,
   CalendarRange,
 } from 'lucide-react';
+import DashboardLiveActivity from '../components/DashboardLiveActivity';
+import AdminWarehouseControl from '../components/AdminWarehouseControl';
+import DashboardSapMaterialInsights from '../components/DashboardSapMaterialInsights';
+import {
+  OUTBOUND_HUB_TABS,
+  filterOutboundByHubTab,
+  outboundOrderHubTab,
+} from '../utils/outboundHubTabs';
 
 function isoToday() {
   return new Date().toISOString().slice(0, 10);
@@ -108,6 +116,7 @@ export default function Dashboard({ currentUser }) {
   const [summary, setSummary] = useState(null);
   const [activity, setActivity] = useState(null);
   const [dn, setDn] = useState(null);
+  const [followupStats, setFollowupStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [dashUploadBusy, setDashUploadBusy] = useState(false);
   const [dashDropActive, setDashDropActive] = useState(false);
@@ -117,20 +126,42 @@ export default function Dashboard({ currentUser }) {
   const [rangeData, setRangeData] = useState(null);
   const [rangeLoading, setRangeLoading] = useState(false);
   const [pipeline, setPipeline] = useState(null);
+  const [pipelineTab, setPipelineTab] = useState(OUTBOUND_HUB_TABS.SEND_FOR_PICK);
+
+  const pipelineOrders = useMemo(
+    () => filterOutboundByHubTab(pipeline?.outbound_orders, pipelineTab),
+    [pipeline?.outbound_orders, pipelineTab]
+  );
+
+  const pipelineTabCounts = useMemo(() => {
+    const rows = pipeline?.outbound_orders || [];
+    return {
+      [OUTBOUND_HUB_TABS.SEND_FOR_PICK]: filterOutboundByHubTab(rows, OUTBOUND_HUB_TABS.SEND_FOR_PICK).length,
+      [OUTBOUND_HUB_TABS.PICKED]: filterOutboundByHubTab(rows, OUTBOUND_HUB_TABS.PICKED).length,
+      [OUTBOUND_HUB_TABS.DELIVERED]: filterOutboundByHubTab(rows, OUTBOUND_HUB_TABS.DELIVERED).length,
+    };
+  }, [pipeline?.outbound_orders]);
 
   const loadCore = async () => {
     setLoading(true);
     try {
-      const [s, a, n, pl] = await Promise.all([
+      const [sRes, aRes, nRes, plRes, fuRes] = await Promise.allSettled([
         dashboardApi.summary(),
         dashboardApi.recentActivity(),
         dashboardApi.notifications(),
-        dashboardApi.orderPipeline().catch(() => null),
+        dashboardApi.orderPipeline(),
+        notesApi.stats(),
       ]);
-      setSummary(s);
-      setActivity(a);
-      setDn(n);
-      setPipeline(pl);
+      if (sRes.status === 'fulfilled') setSummary(sRes.value);
+      else console.error('dashboard summary', sRes.reason);
+      if (aRes.status === 'fulfilled') setActivity(aRes.value);
+      else console.error('dashboard activity', aRes.reason);
+      if (nRes.status === 'fulfilled') setDn(nRes.value);
+      else console.error('dashboard notifications', nRes.reason);
+      if (plRes.status === 'fulfilled') setPipeline(plRes.value);
+      else console.error('dashboard pipeline', plRes.reason);
+      if (fuRes.status === 'fulfilled') setFollowupStats(fuRes.value);
+      else console.error('dashboard followups', fuRes.reason);
     } catch (e) {
       console.error(e);
     } finally {
@@ -153,6 +184,12 @@ export default function Dashboard({ currentUser }) {
 
   useEffect(() => {
     loadCore();
+  }, []);
+
+  useEffect(() => {
+    const onWh = () => loadCore();
+    window.addEventListener('godam-warehouse-changed', onWh);
+    return () => window.removeEventListener('godam-warehouse-changed', onWh);
   }, []);
 
   useEffect(() => {
@@ -186,12 +223,19 @@ export default function Dashboard({ currentUser }) {
         : success
           ? `Imported ${success} outbound order(s).`
           : 'Upload completed.';
+      const imported = (res.orders || []).filter((o) => o && o.id);
+      const firstId = imported.length ? Number(imported[0].id) : null;
       toast[failed.length ? 'warning' : 'success'](message, {
         action: {
-          label: 'Review on upload page',
-          onClick: () => navigate('/outbound-pick'),
+          label: firstId ? 'Review order' : 'Open upload page',
+          onClick: () =>
+            navigate(firstId ? `/outbound-pick?open=${firstId}` : '/outbound-pick'),
         },
       });
+      if (firstId && !failed.length) {
+        navigate(`/outbound-pick?open=${firstId}`);
+        return;
+      }
       await refreshAfterUpload();
     } catch (e) {
       const failed = downloadUploadErrorWorkbook({ data: e.response?.data, filenamePrefix: 'outbound-upload' });
@@ -237,7 +281,8 @@ export default function Dashboard({ currentUser }) {
   const s = summary || {};
 
   return (
-    <div className="max-w-[1400px]">
+    <div className="dashboard-page-layout">
+      <div className="dashboard-page-layout__main">
       <header className="app-page-header">
         <div>
           <h2 className="app-page-header__title">Dashboard</h2>
@@ -333,6 +378,8 @@ export default function Dashboard({ currentUser }) {
         </div>
       )}
 
+      <DashboardSapMaterialInsights />
+
       <div className="display-card app-panel mb-3">
         <h3 className="dc-head font-bold text-theme-fg flex items-center gap-2 flex-wrap">
           <CalendarRange className="dc-ic flex-shrink-0" />
@@ -389,6 +436,9 @@ export default function Dashboard({ currentUser }) {
         <StatCard title="Orders Cancelled" value={s.orders_cancelled ?? '—'} icon={AlertCircle} tone="red" />
         <StatCard title="Today Uploaded" value={s.today_uploaded_orders ?? '—'} icon={UploadCloud} tone="slate" />
         <StatCard title="Today Delivered" value={s.today_delivered_orders ?? '—'} icon={CheckCircle2} tone="green" />
+        <StatCard title="Overdue Follow-Ups" value={followupStats?.overdue ?? '—'} icon={Bell} tone="red" />
+        <StatCard title="Today Follow-Up" value={followupStats?.today_followups ?? '—'} icon={CalendarRange} tone="amber" />
+        <StatCard title="Completed Today" value={followupStats?.completed_today ?? '—'} icon={CheckCircle2} tone="green" />
       </div>
 
       <div className="display-card app-panel mb-3">
@@ -396,10 +446,45 @@ export default function Dashboard({ currentUser }) {
           <Package className="dc-ic flex-shrink-0" />
           Outbound &amp; inbound pipeline
           <span className="text-[10px] font-semibold text-gray-500 normal-case tracking-normal">
-            Latest outbound rows · color by status (amber = sent for pick / picking, sky = picked, emerald = delivered)
+            Separate tabs: send for pick, picked, delivered
           </span>
         </h3>
         <div className="dc-body space-y-3">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold ${
+                pipelineTab === OUTBOUND_HUB_TABS.SEND_FOR_PICK
+                  ? 'border-amber-500 bg-amber-50 text-amber-950'
+                  : 'border-gray-200 bg-white text-gray-700'
+              }`}
+              onClick={() => setPipelineTab(OUTBOUND_HUB_TABS.SEND_FOR_PICK)}
+            >
+              Send for pick ({pipelineTabCounts[OUTBOUND_HUB_TABS.SEND_FOR_PICK]})
+            </button>
+            <button
+              type="button"
+              className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold ${
+                pipelineTab === OUTBOUND_HUB_TABS.PICKED
+                  ? 'border-sky-600 bg-sky-50 text-sky-950'
+                  : 'border-gray-200 bg-white text-gray-700'
+              }`}
+              onClick={() => setPipelineTab(OUTBOUND_HUB_TABS.PICKED)}
+            >
+              Picked ({pipelineTabCounts[OUTBOUND_HUB_TABS.PICKED]})
+            </button>
+            <button
+              type="button"
+              className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold ${
+                pipelineTab === OUTBOUND_HUB_TABS.DELIVERED
+                  ? 'border-emerald-600 bg-emerald-50 text-emerald-900'
+                  : 'border-gray-200 bg-white text-gray-700'
+              }`}
+              onClick={() => setPipelineTab(OUTBOUND_HUB_TABS.DELIVERED)}
+            >
+              Delivered ({pipelineTabCounts[OUTBOUND_HUB_TABS.DELIVERED]})
+            </button>
+          </div>
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-violet-50/80 border border-violet-100 px-3 py-2 text-[11px]">
             <span className="font-bold text-violet-950">Inbound putaway pending</span>
             <span className="font-extrabold text-violet-900 tabular-nums">
@@ -414,6 +499,7 @@ export default function Dashboard({ currentUser }) {
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-100">
                   <th className="text-left p-2 font-bold">Outbound #</th>
+                  <th className="text-left p-2 font-bold">Warehouse</th>
                   <th className="text-left p-2 font-bold">Vendor / sold-to</th>
                   <th className="text-left p-2 font-bold">SO / ref</th>
                   <th className="text-left p-2 font-bold">Customer</th>
@@ -423,8 +509,8 @@ export default function Dashboard({ currentUser }) {
                 </tr>
               </thead>
               <tbody>
-                {(pipeline?.outbound_orders || []).length ? (
-                  (pipeline.outbound_orders || []).map((r) => {
+                {pipelineOrders.length ? (
+                  pipelineOrders.map((r) => {
                     const pick = outboundStatusVisual(r.status);
                     const ob = String(r.outbound_number || '').trim();
                     const vendor = String(r.vendor_name || r.sold_to || '—').trim() || '—';
@@ -433,12 +519,22 @@ export default function Dashboard({ currentUser }) {
                     ).trim() || '—';
                     const cust = String(r.customer_name || r.name_1 || '—').trim() || '—';
                     const st = String(r.status || '').trim() || '—';
-                    const stLower = st.toLowerCase();
-                    const hrefHub = stLower === 'delivered' ? '/outbound-pick?tab=delivered' : '/outbound-pick';
+                    const hubTab = outboundOrderHubTab(st);
+                    const hrefHub = `/outbound-pick?tab=${encodeURIComponent(hubTab)}`;
                     const hrefDn = ob ? `/delivery-note?outbound=${encodeURIComponent(ob)}` : '/delivery-note';
                     return (
                       <tr key={r.id} className={`border-b border-gray-100 ${pick.row}`}>
                         <td className="p-2 font-mono font-bold">{ob || '—'}</td>
+                        <td className="p-2 max-w-[200px]">
+                          <AdminWarehouseControl
+                            compact
+                            outboundOrderId={r.id}
+                            warehouseId={r.warehouse_id}
+                            warehouseCode={r.warehouse_code}
+                            warehouseName={r.warehouse_name}
+                            onChanged={loadCore}
+                          />
+                        </td>
                         <td className="p-2 max-w-[160px] truncate" title={vendor}>
                           {vendor}
                         </td>
@@ -465,8 +561,8 @@ export default function Dashboard({ currentUser }) {
                   })
                 ) : (
                   <tr>
-                    <td className="p-3 text-gray-500" colSpan={7}>
-                      No outbound orders loaded.
+                    <td className="p-3 text-gray-500" colSpan={8}>
+                      No orders in this tab.
                     </td>
                   </tr>
                 )}
@@ -529,6 +625,8 @@ export default function Dashboard({ currentUser }) {
           Refresh snapshot
         </button>
       </div>
+      </div>
+      <DashboardLiveActivity />
     </div>
   );
 }

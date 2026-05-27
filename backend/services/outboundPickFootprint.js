@@ -40,6 +40,14 @@ async function loadOutboundPickFootprint({ dbGet, dbAll, orderId }) {
     dbAll(`SELECT id, required_qty, picked_qty FROM outbound_items WHERE outbound_id = ?`, [oid]).catch(() => []),
   ]);
 
+  const pickedByItem = new Map();
+  for (const tx of txs || []) {
+    if (tx.outbound_bom_requirement_id) continue;
+    const iid = Number(tx.outbound_item_id);
+    if (!iid) continue;
+    pickedByItem.set(iid, (pickedByItem.get(iid) || 0) + (Number(tx.picked_qty) || 0));
+  }
+
   let totalRequired = 0;
   let totalPicked = 0;
   let linesTotal = 0;
@@ -48,7 +56,9 @@ async function loadOutboundPickFootprint({ dbGet, dbAll, orderId }) {
     const rq = Number(it.required_qty) || 0;
     if (rq <= EPS) continue;
     linesTotal += 1;
-    const pq = Number(it.picked_qty) || 0;
+    const fromTx = pickedByItem.has(it.id) ? pickedByItem.get(it.id) : null;
+    const pq =
+      fromTx != null && fromTx > EPS ? fromTx : Number(it.picked_qty) || 0;
     totalRequired += rq;
     totalPicked += pq;
     if (pq + EPS >= rq) linesComplete += 1;

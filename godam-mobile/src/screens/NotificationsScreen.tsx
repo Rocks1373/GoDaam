@@ -17,6 +17,7 @@ import {
   markAllNotificationsRead,
   type NotificationRow,
 } from '../api/notificationsApi';
+import { formatApiError } from '../api/client';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Notifications'>;
 
@@ -33,13 +34,15 @@ export default function NotificationsScreen({ navigation }: Props) {
   const [rows, setRows] = useState<NotificationRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const data = await listNotifications(false);
       setRows(Array.isArray(data) ? data : []);
-    } catch {
-      setRows([]);
+      setLoadErr(null);
+    } catch (e) {
+      setLoadErr(formatApiError(e));
     } finally {
       setLoading(false);
     }

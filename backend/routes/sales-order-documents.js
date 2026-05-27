@@ -12,8 +12,14 @@ const {
   uploadDocumentFlow,
   verifyDocument,
   getStatusPayload,
+  saveDeliveryNotePdfToDrive,
+  listDocumentsByOutbound,
+  listDocumentsByInvoice,
+  buildDownloadOptions,
+  exportManifest,
   DOC_TYPES,
 } = require('../services/salesOrderDocumentsService');
+const { mapDocumentWithValidation } = require('../services/salesOrderDocumentValidation');
 const { handleSalesOrderDocumentUpload } = require('../lib/salesOrderDocumentUploadHandler');
 const {
   buildCombinedPdfForSalesOrder,
@@ -152,6 +158,112 @@ router.get(
     }
   }
 );
+
+router.post('/save-dn-pdf', requireAnyPermission(['can_upload_delivery_note', 'can_upload_outbound', 'can_confirm_picked']), async (req, res) => {
+  try {
+    const delivery_note_id = Number(req.body.delivery_note_id);
+    if (!Number.isFinite(delivery_note_id)) return res.status(400).json({ error: 'delivery_note_id is required' });
+    const duplicate_action = String(req.body.duplicate_action || '').trim().toLowerCase() || null;
+    const result = await saveDeliveryNotePdfToDrive({
+      deliveryNoteId: delivery_note_id,
+      userId: Number(req.user.sub),
+      duplicate_action: duplicate_action || null,
+    });
+    if (result.conflict) return res.status(409).json({ conflict: true, existing: result.existing });
+    if (result.cancelled) return res.json({ cancelled: true });
+    res.json({ ok: true, document: result.document });
+  } catch (e) {
+    const code = /not configured|GOOGLE_DRIVE|credentials/i.test(String(e.message)) ? 503 : 400;
+    res.status(code).json({ error: e.message });
+  }
+});
+
+router.get('/by-outbound/:outbound_number', async (req, res) => {
+  try {
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId: req.user.sub,
+      role: req.user.role,
+      explicitWarehouseId: req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id required' });
+    const ok = await userHasWarehouseAccess(Number(req.user.sub), req.user.role, warehouseId);
+    if (String(req.user.role || '').toLowerCase() !== 'admin' && !ok) {
+      return res.status(403).json({ error: 'Forbidden for this warehouse' });
+    }
+    const ob = decodeSoParam(req.params.outbound_number);
+    const payload = await listDocumentsByOutbound(warehouseId, ob);
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/by-invoice/:invoice_number', async (req, res) => {
+  try {
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId: req.user.sub,
+      role: req.user.role,
+      explicitWarehouseId: req.query?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id required' });
+    const ok = await userHasWarehouseAccess(Number(req.user.sub), req.user.role, warehouseId);
+    if (String(req.user.role || '').toLowerCase() !== 'admin' && !ok) {
+      return res.status(403).json({ error: 'Forbidden for this warehouse' });
+    }
+    const inv = decodeSoParam(req.params.invoice_number);
+    const payload = await listDocumentsByInvoice(warehouseId, inv);
+    res.json(payload);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/download-options', async (req, res) => {
+  try {
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId: req.user.sub,
+      role: req.user.role,
+      explicitWarehouseId: req.body?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id required' });
+    const ok = await userHasWarehouseAccess(Number(req.user.sub), req.user.role, warehouseId);
+    if (String(req.user.role || '').toLowerCase() !== 'admin' && !ok) {
+      return res.status(403).json({ error: 'Forbidden for this warehouse' });
+    }
+    const sales_order_number = String(req.body.sales_order_number || '').trim();
+    if (!sales_order_number) return res.status(400).json({ error: 'sales_order_number is required' });
+    const manifest = await buildDownloadOptions({
+      warehouseId,
+      salesOrderNumber: sales_order_number,
+      outboundNumber: req.body.outbound_number || null,
+      scope: req.body.scope || 'full_so',
+    });
+    res.json(manifest);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/export-package-manifest', async (req, res) => {
+  try {
+    const warehouseId = await resolveWarehouseIdForRequest({
+      userId: req.user.sub,
+      role: req.user.role,
+      explicitWarehouseId: req.body?.warehouse_id ?? req.get('X-Warehouse-Id'),
+    });
+    if (!warehouseId) return res.status(400).json({ error: 'warehouse_id required' });
+    const ok = await userHasWarehouseAccess(Number(req.user.sub), req.user.role, warehouseId);
+    if (String(req.user.role || '').toLowerCase() !== 'admin' && !ok) {
+      return res.status(403).json({ error: 'Forbidden for this warehouse' });
+    }
+    const sales_order_number = String(req.body.sales_order_number || '').trim();
+    if (!sales_order_number) return res.status(400).json({ error: 'sales_order_number is required' });
+    const manifest = await exportManifest(warehouseId, sales_order_number);
+    res.json(manifest);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 router.get('/:salesOrderNumber/export-combined.pdf', async (req, res) => {
   try {
@@ -332,7 +444,7 @@ router.get('/:salesOrderNumber', async (req, res) => {
        ORDER BY d.uploaded_at DESC, d.id DESC`,
       [warehouseId, so]
     );
-    res.json({ folder, documents: documents || [] });
+    res.json({ folder, documents: (documents || []).map(mapDocumentWithValidation) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

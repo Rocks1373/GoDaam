@@ -48,6 +48,20 @@ function sqliteTypeToPg(decl, isPk) {
   return 'TEXT';
 }
 
+async function pgHasExistingData(client) {
+  try {
+    const r = await client.query(
+      `SELECT COUNT(*)::int AS c FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'users'`
+    );
+    if (Number(r.rows[0]?.c) === 0) return false;
+    const u = await client.query('SELECT COUNT(*)::int AS c FROM users');
+    return Number(u.rows[0]?.c) > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   const sqlite = new sqlite3.Database(SQLITE_PATH, sqlite3.OPEN_READONLY);
   const sAll = promisify(sqlite.all.bind(sqlite));
@@ -55,6 +69,19 @@ async function main() {
 
   const pg = new Client({ connectionString: DATABASE_URL });
   await pg.connect();
+
+  const hasData = await pgHasExistingData(pg);
+  if (hasData && !WIPE) {
+    console.error(
+      'REFUSED: Target PostgreSQL already has user data. This script DROPs tables per table and would destroy production data.\n' +
+        '  • Normal VPS deploy (rsync --deploy) does NOT run this script.\n' +
+        '  • To copy SQLite into an empty PG only, point DATABASE_URL at an empty database.\n' +
+        '  • To replace an existing PG database entirely, pass --wipe-pg (destructive).'
+    );
+    await pg.end();
+    await sClose();
+    process.exit(1);
+  }
 
   if (WIPE) {
     await pg.query('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;');
@@ -78,7 +105,9 @@ async function main() {
 
     const createSql = `CREATE TABLE IF NOT EXISTS "${name}" (${colDefs.join(', ')})`;
     try {
-      await pg.query(`DROP TABLE IF EXISTS "${name}" CASCADE`);
+      if (WIPE) {
+        await pg.query(`DROP TABLE IF EXISTS "${name}" CASCADE`);
+      }
       await pg.query(createSql);
     } catch (e) {
       console.warn(`[skip create] ${name}:`, e.message);

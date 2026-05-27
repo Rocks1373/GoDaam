@@ -4,8 +4,9 @@ const XLSX = require('xlsx');
 const { promisify } = require('util');
 
 const db = require('../db');
-
+const { runDb } = require('../utils/dbRun');
 const { normalizeExcelRows } = require('../utils/excelDates');
+const { ensureItemMasterFromPart } = require('../services/itemMasterSync');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -127,7 +128,17 @@ async function upsertItemOnDb(payload) {
        WHERE id = ?`,
       [vid, vnum, vname, p.sap_part_number, p.description, p.uom, p.remarks, p.is_active, existing.id]
     );
-    return await dbGet(`SELECT * FROM vendor_items WHERE id = ?`, [existing.id]);
+    const row = await dbGet(`SELECT * FROM vendor_items WHERE id = ?`, [existing.id]);
+    if (p.is_active) {
+      await ensureItemMasterFromPart({
+        vendor_number: vnum,
+        vendor_name: vname,
+        part_number: p.part_number,
+        description: p.description,
+        uom: p.uom,
+      }).catch(() => {});
+    }
+    return row;
   }
 
   await dbRun(
@@ -136,12 +147,22 @@ async function upsertItemOnDb(payload) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
     [vid, vnum, vname, p.sap_part_number, p.part_number, p.description, p.uom, p.remarks, p.is_active]
   );
-  return await dbGet(
+  const row = await dbGet(
     `SELECT * FROM vendor_items
      WHERE COALESCE(vendor_id, -1) = COALESCE(?, -1) AND TRIM(part_number) = TRIM(?)
      ORDER BY id DESC LIMIT 1`,
     [vid, p.part_number]
   );
+  if (p.is_active && vnum && vname) {
+    await ensureItemMasterFromPart({
+      vendor_number: vnum,
+      vendor_name: vname,
+      part_number: p.part_number,
+      description: p.description,
+      uom: p.uom,
+    }).catch(() => {});
+  }
+  return row;
 }
 
 // GET /api/vendor-items?search=&vendor_id=
@@ -217,6 +238,16 @@ router.post('/', async (req, res) => {
   }
 });
 
+const VENDOR_ITEM_UPDATE_SET = `vendor_id = ?,
+        vendor_number = ?,
+        vendor_name = ?,
+        sap_part_number = ?,
+        description = ?,
+        uom = ?,
+        remarks = ?,
+        is_active = ?,
+        updated_at = CURRENT_TIMESTAMP`;
+
 // PUT /api/vendor-items/:id — part_number cannot be changed (immutable spare part number).
 router.put('/:id', async (req, res) => {
   try {
@@ -231,22 +262,34 @@ router.put('/:id', async (req, res) => {
     const vnum = vendor?.vendor_number ?? p.vendor_number ?? null;
     const vname = vendor?.vendor_name ?? p.vendor_name ?? null;
 
-    const r = await dbRun(
-      `UPDATE vendor_items SET
-        vendor_id = ?,
-        vendor_number = ?,
-        vendor_name = ?,
-        sap_part_number = ?,
-        part_number = ?,
-        description = ?,
-        uom = ?,
-        remarks = ?,
-        is_active = ?,
-        updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [vid, vnum, vname, p.sap_part_number, p.part_number, p.description, p.uom, p.remarks, p.is_active, id]
+    const updateParams = [vid, vnum, vname, p.sap_part_number, p.description, p.uom, p.remarks, p.is_active];
+
+    /** Unique index idx_vendor_items_vendor_part: one row per (vendor_id, trim(part_number)). */
+    const conflict = await dbGet(
+      `SELECT id FROM vendor_items
+       WHERE id != ?
+         AND COALESCE(vendor_id, -1) = COALESCE(?, -1)
+         AND TRIM(part_number) = TRIM(?)
+       LIMIT 1`,
+      [id, vid, p.part_number]
     );
-    if (!r.changes) return res.status(404).json({ error: 'Vendor item not found' });
+
+    if (conflict?.id) {
+      const merged = await db.withTransaction(async (tx) => {
+        await tx.run(`UPDATE vendor_items SET ${VENDOR_ITEM_UPDATE_SET} WHERE id = ?`, [...updateParams, conflict.id]);
+        await tx.run(`UPDATE vendor_items SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [id]);
+        return tx.get(`SELECT * FROM vendor_items WHERE id = ?`, [conflict.id]);
+      });
+      if (!merged) return res.status(500).json({ error: 'Merge failed after duplicate vendor+part conflict' });
+      return res.json(merged);
+    }
+
+    const { changes } = await runDb(
+      db,
+      `UPDATE vendor_items SET ${VENDOR_ITEM_UPDATE_SET} WHERE id = ?`,
+      [...updateParams, id]
+    );
+    if (!changes) return res.status(404).json({ error: 'Vendor item not found' });
     res.json(await dbGet(`SELECT * FROM vendor_items WHERE id = ?`, [id]));
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -258,8 +301,12 @@ router.delete('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
-    const r = await dbRun(`UPDATE vendor_items SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [id]);
-    res.json({ ok: true, changes: r.changes || 0 });
+    const { changes } = await runDb(
+      db,
+      `UPDATE vendor_items SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [id]
+    );
+    res.json({ ok: true, changes: changes || 0 });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -28,6 +28,36 @@ import {
 
 type ViewMode = 'batches' | 'items' | 'putaway';
 
+function ShipmentDetails({ batch }: { batch: { lpo?: string | null; sap_po?: string | null; invoice_number?: string | null } }) {
+  const lpo = String(batch.lpo || '').trim();
+  const sapPo = String(batch.sap_po || '').trim();
+  const inv = String(batch.invoice_number || '').trim();
+  if (!lpo && !sapPo && !inv) return null;
+  return (
+    <View style={styles.shipBox}>
+      <Text style={styles.shipTitle}>Shipment</Text>
+      {lpo ? (
+        <Text style={styles.shipLine}>
+          <Text style={styles.shipK}>LPO </Text>
+          {lpo}
+        </Text>
+      ) : null}
+      {sapPo ? (
+        <Text style={styles.shipLine}>
+          <Text style={styles.shipK}>SAP PO </Text>
+          {sapPo}
+        </Text>
+      ) : null}
+      {inv ? (
+        <Text style={styles.shipLine}>
+          <Text style={styles.shipK}>Invoice </Text>
+          {inv}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 export default function ReceivingScreen() {
   const [mode, setMode] = useState<ViewMode>('batches');
   const [loading, setLoading] = useState(false);
@@ -57,8 +87,8 @@ export default function ReceivingScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      void loadBatches();
-    }, [loadBatches])
+      if (mode === 'batches') void loadBatches();
+    }, [loadBatches, mode])
   );
 
   const openBatch = async (id: number) => {
@@ -178,6 +208,7 @@ export default function ReceivingScreen() {
         <Text style={styles.meta}>
           {batchDetail.batch.batch_name} {batchDetail.batch.vendor_name ? `| ${batchDetail.batch.vendor_name}` : ''}
         </Text>
+        <ShipmentDetails batch={batchDetail.batch} />
         <Text style={styles.part}>{selectedItem.part_number}</Text>
         <Text style={styles.desc}>{selectedItem.description || '—'}</Text>
         <View style={styles.row}>
@@ -223,6 +254,7 @@ export default function ReceivingScreen() {
         </Pressable>
         <Text style={styles.h}>{batchDetail.batch.batch_name}</Text>
         <Text style={styles.meta}>{batchDetail.batch.vendor_name || ''}</Text>
+        <ShipmentDetails batch={batchDetail.batch} />
         <Text style={styles.searchLabel}>Search by part # (or text in description)</Text>
         <TextInput
           style={styles.searchInput}
@@ -309,6 +341,13 @@ export default function ReceivingScreen() {
             <Text style={styles.small}>
               {item.upload_date || '—'} · {item.status} · {item.item_count ?? '?'} parts · Rem Σ {item.sum_remaining ?? '—'}
             </Text>
+            {item.lpo || item.sap_po || item.invoice_number ? (
+              <Text style={styles.shipSmall} numberOfLines={2}>
+                {[item.lpo ? `LPO ${item.lpo}` : null, item.sap_po ? `SAP ${item.sap_po}` : null, item.invoice_number ? `Inv ${item.invoice_number}` : null]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </Text>
+            ) : null}
           </Pressable>
         )}
       />
@@ -322,6 +361,18 @@ const styles = StyleSheet.create({
   h: { fontSize: 22, fontWeight: '800', color: '#0f172a' },
   sub: { fontSize: 12, color: '#64748b', marginBottom: 10 },
   meta: { fontSize: 13, color: '#475569', marginBottom: 8 },
+  shipBox: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+  },
+  shipTitle: { fontSize: 11, fontWeight: '800', color: '#1d4ed8', marginBottom: 4, textTransform: 'uppercase' },
+  shipLine: { fontSize: 13, color: '#0f172a', marginTop: 2 },
+  shipK: { fontWeight: '700', color: '#334155' },
+  shipSmall: { fontSize: 11, color: '#2563eb', marginTop: 4, fontWeight: '600' },
   back: { marginBottom: 8 },
   backText: { fontSize: 14, fontWeight: '700', color: '#2563eb' },
   batchTitle: { fontSize: 16, fontWeight: '800', color: '#0f172a' },

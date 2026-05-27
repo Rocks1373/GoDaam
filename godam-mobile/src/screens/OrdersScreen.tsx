@@ -4,6 +4,8 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useFocusEffect } from '@react-navigation/native';
 import type { RootStackParamList } from './LoginScreen';
 import { listOrders } from '../api/ordersApi';
+import { formatApiError } from '../api/client';
+import { OrderIdentityLabels } from '../components/OrderIdentityLabels';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Orders'>;
 
@@ -16,6 +18,7 @@ function isUnseen(row: Record<string, unknown>): boolean {
 export default function OrdersScreen({ navigation }: Props) {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const unseenCount = useMemo(() => rows.filter((r) => isUnseen(r)).length, [rows]);
 
@@ -23,8 +26,9 @@ export default function OrdersScreen({ navigation }: Props) {
     try {
       const data = await listOrders();
       setRows(data);
-    } catch {
-      setRows([]);
+      setLoadErr(null);
+    } catch (e) {
+      setLoadErr(formatApiError(e));
     }
   };
 
@@ -42,6 +46,14 @@ export default function OrdersScreen({ navigation }: Props) {
 
   return (
     <View style={styles.wrap}>
+      {loadErr ? (
+        <View style={styles.errBanner}>
+          <Text style={styles.errText}>{loadErr}</Text>
+          <Pressable onPress={() => void load()}>
+            <Text style={styles.errRetry}>Retry</Text>
+          </Pressable>
+        </View>
+      ) : null}
       <FlatList
         data={rows}
         keyExtractor={(item) => String(item.id)}
@@ -55,23 +67,24 @@ export default function OrdersScreen({ navigation }: Props) {
             style={styles.card}
             onPress={() => navigation.navigate('OrderDetail', { orderId: Number(item.id) })}
           >
-            <View style={styles.cardTitleRow}>
-              <Text style={styles.cardTitle}>{String(item.delivery || item.outbound_number)}</Text>
-              {isUnseen(item) ? (
-                <View style={styles.newPill}>
-                  <Text style={styles.newPillText}>NEW</Text>
-                </View>
-              ) : null}
-            </View>
-            <Text style={styles.cardSub}>
-              {String(item.sales_doc || item.sales_order_number || '')} · {String(item.status)}
-            </Text>
-            <Text style={styles.cardSub}>
-              Progress {String(item.total_picked ?? 0)} / {String(item.total_required ?? 0)}
-            </Text>
+            <OrderIdentityLabels
+              item={item}
+              meta={`${String(item.sales_doc || item.sales_order_number || '—')} · ${String(item.status)} · Pick ${String(item.total_picked ?? 0)} / ${String(item.total_required ?? 0)}`}
+              titleRight={
+                isUnseen(item) ? (
+                  <View style={styles.newPill}>
+                    <Text style={styles.newPillText}>NEW</Text>
+                  </View>
+                ) : null
+              }
+            />
           </Pressable>
         )}
-        ListEmptyComponent={<Text style={styles.empty}>No open pick orders.</Text>}
+        ListEmptyComponent={
+          <Text style={styles.empty}>
+            {loadErr ? 'Could not load orders. Tap Retry above or pull to refresh.' : 'No open pick orders.'}
+          </Text>
+        }
       />
     </View>
   );
@@ -79,7 +92,20 @@ export default function OrdersScreen({ navigation }: Props) {
 
 const styles = StyleSheet.create({
   wrap: { flex: 1, backgroundColor: '#f8fafc', paddingTop: 12, paddingHorizontal: 16 },
-  cardTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  errBanner: {
+    backgroundColor: '#fef2f2',
+    borderColor: '#fecaca',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  errText: { flex: 1, fontSize: 11, color: '#991b1b' },
+  errRetry: { fontSize: 12, fontWeight: '700', color: '#2563eb' },
   newPill: {
     backgroundColor: '#dc2626',
     paddingHorizontal: 8,
@@ -95,7 +121,5 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
-  cardTitle: { fontSize: 15, fontWeight: '700', color: '#0f172a' },
-  cardSub: { fontSize: 12, color: '#64748b', marginTop: 4 },
   empty: { color: '#94a3b8', marginTop: 24 },
 });

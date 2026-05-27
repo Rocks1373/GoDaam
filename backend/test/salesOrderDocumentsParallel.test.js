@@ -31,6 +31,15 @@ describe('computeParallelBundleStatus', () => {
     expect(s.reminders.length).toBeGreaterThan(0);
     expect(s.counts.invoice).toBe(2);
     expect(s.counts.delivery_note).toBe(1);
+    expect(s.missing.some((m) => m.document_type === 'DELIVERY_NOTE' && m.severity === 'MISSING')).toBe(true);
+  });
+
+  it('marks MISSING delivery note when invoice uploaded alone', () => {
+    const s = computeParallelBundleStatus([
+      { upload_status: 'UPLOADED', document_type: 'INVOICE' },
+    ]);
+    expect(s.missing).toHaveLength(2);
+    expect(s.missing[0].message).toMatch(/MISSING.*delivery note/i);
   });
 
   it('reminds about customer PO when trio exists but no PO', () => {

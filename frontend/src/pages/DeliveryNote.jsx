@@ -1,16 +1,37 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Search, Printer, CheckCircle2, FileSpreadsheet } from 'lucide-react';
-import { buildDeliveryNoteFilenameBase, downloadDeliveryNoteExcel } from '../utils/deliveryNoteExport';
-import { authApi, carriersApi, customersApi, deliveryNotesApi } from '../services/api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Search, Printer, CheckCircle2, FileSpreadsheet, MessageCircle, ClipboardPaste, Upload, Pencil } from 'lucide-react';
+import { buildDeliveryNoteFilenameBase, buildDeliveryNoteFilename, downloadDeliveryNoteExcel } from '../utils/deliveryNoteExport';
+import WhatsAppDnDialog from '../components/WhatsAppDnDialog';
+import { authApi, carriersApi, customersApi, deliveryNotesApi, documentWorkflowApi, documentFlowApi } from '../services/api';
+import { toast } from 'sonner';
 import { useLocation, Link } from 'react-router-dom';
 import { useWarehouse } from '../context/WarehouseContext';
-import ScanDocumentPanel from '../components/ScanDocumentPanel';
+import DnPodUploadModal, { DnPodDropZone } from '../components/DnPodUploadModal';
+import DnDateCalendarPicker from '../components/DnDateCalendarPicker';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
+import { canEditWarehouseData, canDownloadDeliveryNotes, canUploadPod, isViewerRole } from '../utils/userPermissions';
+import { formatDateDDMMYYYY } from '../utils/dateDisplay';
+
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function normalizeDnDateInput(v) {
+  const s = String(v ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return todayIsoDate();
+}
 
 function pickQtyDn(n) {
   const x = Number(n);
   return Number.isFinite(x) ? x : 0;
+}
+
+function isIgnorePackageType(v) {
+  return String(v ?? '').trim().toLowerCase() === 'ignore';
 }
 
 const DN_PRINT_LS_KEY = 'gapp_dn_print_setup';
@@ -35,7 +56,7 @@ function readInitialDnPrintSetup() {
 }
 
 export default function DeliveryNote() {
-  const { selectedWarehouseId, isAllWarehouses, isAdmin: isAdminWh } = useWarehouse();
+  const { selectedWarehouseId, isAllWarehouses } = useWarehouse();
   const location = useLocation();
   const [outboundNumber, setOutboundNumber] = useState('');
   const [loading, setLoading] = useState(false);
@@ -46,11 +67,34 @@ export default function DeliveryNote() {
   const [cp2DraftName, setCp2DraftName] = useState('');
   const [cp2DraftPhone, setCp2DraftPhone] = useState('');
   const [showInvoicePrompt, setShowInvoicePrompt] = useState(false);
+  /** general = print/load; deliver = before Mark Delivered */
+  const [invoicePromptPurpose, setInvoicePromptPurpose] = useState('general');
+  const [showPackageEditOnly, setShowPackageEditOnly] = useState(false);
+  const [packageEditBusy, setPackageEditBusy] = useState(false);
+  const [showInvoiceEditOnly, setShowInvoiceEditOnly] = useState(false);
+  const [invoiceEditBusy, setInvoiceEditBusy] = useState(false);
   const [invoiceDraft, setInvoiceDraft] = useState('');
   const [packageTypeDraft, setPackageTypeDraft] = useState('Ignore');
   const [packageQtyDraft, setPackageQtyDraft] = useState('');
   const [grossWeightDraft, setGrossWeightDraft] = useState('');
   const [volumeDraft, setVolumeDraft] = useState('');
+  const [downloadActionOpen, setDownloadActionOpen] = useState(false);
+  const [exportDocFlowOpen, setExportDocFlowOpen] = useState(false);
+  const [exportDocFlowHasFollowUp, setExportDocFlowHasFollowUp] = useState(false);
+  const [exportInvoiceNumber, setExportInvoiceNumber] = useState('');
+  const [exportAccountingNumber, setExportAccountingNumber] = useState('');
+  const [exportInvoiceFile, setExportInvoiceFile] = useState(null);
+  const [exportAccountingFile, setExportAccountingFile] = useState(null);
+  const [exportAccPasteReady, setExportAccPasteReady] = useState(false);
+  const exportAccPasteBlobRef = useRef(null);
+  const exportDocFlowOnCompleteRef = useRef(null);
+  const invoicePromptAfterRef = useRef(null);
+  const [podInitialFile, setPodInitialFile] = useState(null);
+  const [exportDocFlowBusy, setExportDocFlowBusy] = useState(false);
+  const [exportDocDup, setExportDocDup] = useState(null);
+  const [downloadActionMode, setDownloadActionMode] = useState('both'); // default: Drive + download
+  const [saveDriveBusy, setSaveDriveBusy] = useState(false);
+  const [saveDriveDup, setSaveDriveDup] = useState(null);
 
   const [showTransportPrompt, setShowTransportPrompt] = useState(false);
   const [carriers, setCarriers] = useState([]);
@@ -71,6 +115,8 @@ export default function DeliveryNote() {
   const [holdRows, setHoldRows] = useState([]);
   const [outboundOptions, setOutboundOptions] = useState([]);
   const [outboundTyped, setOutboundTyped] = useState('');
+  const [isHuaweiDnSource, setIsHuaweiDnSource] = useState(false);
+  const autoHuaweiPoLoad = useRef(false);
   /** Filter outbound dropdown by combined Sales Doc / SO / GAPP PO (from outbound upload / picked list). */
   const [salesDocFilter, setSalesDocFilter] = useState('');
   const [deliveryToOpen, setDeliveryToOpen] = useState(false);
@@ -87,6 +133,13 @@ export default function DeliveryNote() {
   const [printPageMarginMm, setPrintPageMarginMm] = useState(() => readInitialDnPrintSetup().marginMm);
   const [printZoomPercent, setPrintZoomPercent] = useState(() => readInitialDnPrintSetup().zoomPct);
   const [printCompactTable, setPrintCompactTable] = useState(() => readInitialDnPrintSetup().compact);
+  const [whatsappDialogOpen, setWhatsappDialogOpen] = useState(false);
+  const [podUploadOpen, setPodUploadOpen] = useState(false);
+  /** Mobile / narrow: switch between control panel and live preview */
+  const [mobilePanel, setMobilePanel] = useState('controls');
+  /** Delivery note date (YYYY-MM-DD); defaults to today, synced from loaded DN */
+  const [dnDateDraft, setDnDateDraft] = useState(todayIsoDate);
+  const [dnDateSaving, setDnDateSaving] = useState(false);
 
   const [addAddrForm, setAddAddrForm] = useState({
     city_name: '',
@@ -105,6 +158,11 @@ export default function DeliveryNote() {
   });
 
   const trim = (v) => String(v ?? '').trim();
+
+  const checkedByDisplayName = useMemo(() => {
+    const n = trim(me?.full_name) || trim(me?.username);
+    return n || '—';
+  }, [me]);
 
   useEffect(() => {
     (async () => {
@@ -175,6 +233,7 @@ export default function DeliveryNote() {
     if (has2) setShowContact2(true);
     setCp2DraftName(trim(dn.contact_person_2));
     setCp2DraftPhone(trim(dn.contact_number_2));
+    setDnDateDraft(normalizeDnDateInput(dn.dn_date));
   }, [dn]);
 
   const filteredDeliveryAddresses = useMemo(() => {
@@ -207,13 +266,19 @@ export default function DeliveryNote() {
 
   const isGapp = String(dn?.transportation_type || '').trim().toLowerCase() === 'gapp';
   const isAdmin = String(me?.role || '').toLowerCase() === 'admin';
-  const scanWhOk = isAdminWh || (!isAllWarehouses && selectedWarehouseId);
+  const role = String(me?.role || '').toLowerCase();
   const canUploadOutbound =
+    isAdmin ||
+    role === 'manager' ||
+    role === 'checker' ||
     Boolean(me?.permissions?.can_upload_outbound) ||
-    Boolean(me?.permissions?.can_confirm_picked) ||
-    isAdmin;
-  const dnLocked =
-    Number(dn?.is_closed) === 1 || String(dn?.delivery_status || '').toLowerCase() === 'closed';
+    Boolean(me?.permissions?.can_confirm_picked);
+  const canEditDn = canEditWarehouseData(me);
+  const canUploadPodDn = canUploadPod(me);
+  const canDownloadDn = canDownloadDeliveryNotes(me);
+  const readOnlyViewer = isViewerRole(me) || (canDownloadDn && !canEditDn);
+  const dnLocked = String(dn?.status || '').toLowerCase() === 'delivered';
+  const canChangeDnDate = !readOnlyViewer && !dnLocked;
 
   const packageValidForConfirm = useMemo(() => {
     if (!dn) return false;
@@ -221,9 +286,11 @@ export default function DeliveryNote() {
     const pt = String(dn.package_type || '').trim().toLowerCase();
     if (!pt) return false;
     if (pt === 'ignore') return true;
-    if (pt === 'pallet') return (Number(dn.pallet_qty) || 0) > 0;
-    if (pt === 'box') return (Number(dn.box_qty) || 0) > 0;
-    return false;
+    if (pt === 'pallet' && !(Number(dn.pallet_qty) > 0)) return false;
+    if (pt === 'box' && !(Number(dn.box_qty) > 0)) return false;
+    if (!(Number(dn.gross_weight_kg) > 0)) return false;
+    if (!(Number(dn.volume_cbm) > 0)) return false;
+    return true;
   }, [dn]);
 
   const gappTransportComplete = useMemo(() => {
@@ -244,44 +311,130 @@ export default function DeliveryNote() {
   const gappMissingConfirmReasons = useMemo(() => {
     if (!dn || !isGapp) return [];
     const reasons = [];
-    if (dnLocked) reasons.push('Delivery note is closed');
+    if (dnLocked) reasons.push('Delivery note is already delivered');
     if (dn.confirmed_at) reasons.push('Already confirmed');
     if (!String(dn.delivery_address || '').trim()) reasons.push('Delivery To / delivery address is missing');
-    if (!packageValidForConfirm) reasons.push('Invoice + package info is incomplete');
+    if (!packageValidForConfirm) reasons.push('Invoice number is required (package qty/weight/volume only for Pallet/Box)');
     if (!gappTransportComplete) reasons.push('GAPP driver / phone / vehicle is incomplete');
     return reasons;
   }, [dn, isGapp, dnLocked, packageValidForConfirm, gappTransportComplete]);
 
-  const gappMarkDeliveredBlocked = useMemo(() => {
-    if (!dn || !isGapp) return false;
-    if (!dn.confirmed_at) return true;
-    if (!Number(dn.is_closed)) return true;
+  const dnNeedsPackagePrompt = useCallback((row) => {
+    if (!row) return false;
+    if (String(row.status || '').toLowerCase() === 'delivered') return false;
+    const inv = trim(row.invoice_number) || trim(row.outbound_invoice_number);
+    if (!inv) return true;
+    const pt = String(row.package_type || '').trim().toLowerCase();
+    if (pt === 'ignore') return false;
+    if (!pt) return true;
+    if (pt === 'pallet' && !(Number(row.pallet_qty) > 0)) return true;
+    if (pt === 'box' && !(Number(row.box_qty) > 0)) return true;
+    if (!(Number(row.gross_weight_kg) > 0)) return true;
+    if (!(Number(row.volume_cbm) > 0)) return true;
     return false;
-  }, [dn, isGapp]);
+  }, []);
 
-  const load = async () => {
+  const populatePackageDraftsFromDn = useCallback((row) => {
+    const inv = trim(row?.invoice_number) || trim(row?.outbound_invoice_number);
+    setInvoiceDraft(inv);
+    const pt = String(row?.package_type || '').trim();
+    const ptLower = pt.toLowerCase();
+    setPackageTypeDraft(pt || 'Pallet');
+    const qty = ptLower === 'pallet' ? row?.pallet_qty : ptLower === 'box' ? row?.box_qty : '';
+    setPackageQtyDraft(qty != null && qty !== '' && Number(qty) > 0 ? String(qty) : '');
+    setGrossWeightDraft(
+      ptLower === 'ignore'
+        ? ''
+        : row?.gross_weight_kg != null && row?.gross_weight_kg !== '' && Number(row.gross_weight_kg) > 0
+          ? String(row.gross_weight_kg)
+          : ''
+    );
+    setVolumeDraft(
+      ptLower === 'ignore'
+        ? ''
+        : row?.volume_cbm != null && row?.volume_cbm !== '' && Number(row.volume_cbm) > 0
+          ? String(row.volume_cbm)
+          : ''
+    );
+  }, []);
+
+  const openPackagePrompt = useCallback(
+    (after, purpose = 'general') => {
+      if (dn) populatePackageDraftsFromDn(dn);
+      invoicePromptAfterRef.current = typeof after === 'function' ? after : null;
+      setInvoicePromptPurpose(purpose);
+      setShowInvoicePrompt(true);
+    },
+    [dn, populatePackageDraftsFromDn]
+  );
+
+  const openPackageEditOnly = useCallback(() => {
+    if (!dn) return;
+    populatePackageDraftsFromDn(dn);
+    setShowPackageEditOnly(true);
+  }, [dn, populatePackageDraftsFromDn]);
+
+  const validatePackageDraftFields = () => {
+    if (!isIgnorePackageType(packageTypeDraft) && !(Number(packageQtyDraft) > 0)) {
+      return 'Package quantity is required for Pallet or Box.';
+    }
+    if (!isIgnorePackageType(packageTypeDraft) && !(Number(grossWeightDraft) > 0)) {
+      return 'Gross weight (kg) is required.';
+    }
+    if (!isIgnorePackageType(packageTypeDraft) && !(Number(volumeDraft) > 0)) {
+      return 'Volume (CBM) is required.';
+    }
+    return null;
+  };
+
+  const buildPackageSavePayload = (invoiceNumber) => {
+    const isIgnore = isIgnorePackageType(packageTypeDraft);
+    const payload = {
+      invoice_number: invoiceNumber,
+      package_type: isIgnore ? 'Ignore' : packageTypeDraft,
+      package_qty: isIgnore ? 0 : packageQtyDraft === '' ? 0 : Number(packageQtyDraft),
+    };
+    if (!isIgnore) {
+      payload.gross_weight_kg = grossWeightDraft === '' ? 0 : Number(grossWeightDraft);
+      payload.volume_cbm = volumeDraft === '' ? 0 : Number(volumeDraft);
+    }
+    return payload;
+  };
+
+  const load = async (obOverride) => {
+    const ob =
+      typeof obOverride === 'string'
+        ? obOverride.trim()
+        : String(outboundNumber || outboundTyped || '').trim();
+    if (!ob) {
+      setError(isHuaweiDnSource ? 'Enter Huawei SAP PO first.' : 'Enter or select an outbound number first.');
+      return;
+    }
+    if (ob !== outboundNumber) setOutboundNumber(ob);
+    if (ob !== outboundTyped) setOutboundTyped(ob);
     setError('');
     setLoading(true);
     try {
-      const created = await deliveryNotesApi.createFromOutbound(outboundNumber.trim());
+      const commonPayload = {
+        dn_date: dnDateDraft,
+        ...(selectedWarehouseId != null && selectedWarehouseId !== ''
+          ? { warehouse_id: selectedWarehouseId }
+          : {}),
+      };
+      const created = isHuaweiDnSource
+        ? await deliveryNotesApi.createFromHuaweiPo(ob, { ...commonPayload, rebuild: true })
+        : await deliveryNotesApi.createFromOutbound(ob, commonPayload);
       const id = created?.id;
       setDnId(id);
-      const full = await deliveryNotesApi.get(id);
+      let full = await deliveryNotesApi.get(id);
+      if (
+        canChangeDnDate &&
+        normalizeDnDateInput(full?.dn_date) !== normalizeDnDateInput(dnDateDraft)
+      ) {
+        full = await deliveryNotesApi.saveDnDate(id, { dn_date: dnDateDraft });
+      }
       setDn(full);
       await refreshTimeline(id);
-
-      const invOk = trim(full?.invoice_number) || trim(full?.outbound_invoice_number);
-      if (!invOk || !String(full?.package_type || '').trim()) {
-        setInvoiceDraft(trim(full?.invoice_number) || trim(full?.outbound_invoice_number));
-        setPackageTypeDraft(String(full?.package_type || 'Ignore'));
-        const qty = String(full?.package_type || '').toLowerCase() === 'pallet' ? full?.pallet_qty : full?.box_qty;
-        setPackageQtyDraft(qty ? String(qty) : '');
-        setGrossWeightDraft(full?.gross_weight_kg != null ? String(full.gross_weight_kg) : '');
-        setVolumeDraft(full?.volume_cbm != null ? String(full.volume_cbm) : '');
-        setShowInvoicePrompt(true);
-      } else {
-        setShowInvoicePrompt(false);
-      }
 
       if (!String(full?.transportation_type || '').trim()) {
         setShowTransportPrompt(false);
@@ -297,94 +450,157 @@ export default function DeliveryNote() {
 
   const saveInvoiceFromModal = async () => {
     if (!dnId) return;
-    if (dn && Number(dn.is_closed) === 1) {
-      alert('Delivery note is closed — no further edits.');
+    if (dn && String(dn.status || '').toLowerCase() === 'delivered') {
+      alert('This delivery note is already delivered — no further edits.');
+      return;
+    }
+    if (!invoiceDraft.trim()) {
+      alert('Invoice number is required.');
+      return;
+    }
+    const pkgErr = validatePackageDraftFields();
+    if (pkgErr) {
+      alert(pkgErr);
       return;
     }
     try {
-      await deliveryNotesApi.savePackageInfo(dnId, {
-        invoice_number: invoiceDraft.trim(),
-        package_type: packageTypeDraft,
-        package_qty: packageQtyDraft === '' ? 0 : Number(packageQtyDraft),
-        gross_weight_kg: grossWeightDraft === '' ? 0 : Number(grossWeightDraft),
-        volume_cbm: volumeDraft === '' ? 0 : Number(volumeDraft),
-      });
+      await deliveryNotesApi.savePackageInfo(dnId, buildPackageSavePayload(invoiceDraft.trim()));
       setShowInvoicePrompt(false);
+      setInvoicePromptPurpose('general');
       const data = await deliveryNotesApi.get(dnId);
       setDn(data);
+      const after = invoicePromptAfterRef.current;
+      invoicePromptAfterRef.current = null;
+      if (after) {
+        try {
+          await after();
+        } catch (e) {
+          toast.error(formatMarkDeliveredError(e));
+        }
+      }
     } catch (e) {
       alert(e?.response?.data?.error || e.message);
     }
   };
 
+  const openInvoiceEditOnly = useCallback(() => {
+    if (!dn) return;
+    setInvoiceDraft(trim(dn.invoice_number) || trim(dn.outbound_invoice_number));
+    setShowInvoiceEditOnly(true);
+  }, [dn]);
+
+  const saveInvoiceOnly = async () => {
+    if (!dnId) return;
+    if (dn && String(dn.status || '').toLowerCase() === 'delivered') {
+      alert('This delivery note is already delivered — no further edits.');
+      return;
+    }
+    if (!invoiceDraft.trim()) {
+      alert('Invoice number is required.');
+      return;
+    }
+    setInvoiceEditBusy(true);
+    try {
+      const data = await deliveryNotesApi.saveInvoice(dnId, invoiceDraft.trim());
+      setDn(data);
+      setShowInvoiceEditOnly(false);
+      toast.success('Invoice number updated');
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    } finally {
+      setInvoiceEditBusy(false);
+    }
+  };
+
+  const savePackageEditOnly = async () => {
+    if (!dnId) return;
+    if (dn && String(dn.status || '').toLowerCase() === 'delivered') {
+      alert('This delivery note is already delivered — no further edits.');
+      return;
+    }
+    const inv = invoiceDraft.trim() || effectiveInvoice;
+    if (!inv) {
+      alert('Invoice number is required. Use Edit invoice number first.');
+      return;
+    }
+    const pkgErr = validatePackageDraftFields();
+    if (pkgErr) {
+      alert(pkgErr);
+      return;
+    }
+    setPackageEditBusy(true);
+    try {
+      await deliveryNotesApi.savePackageInfo(dnId, buildPackageSavePayload(inv));
+      const data = await deliveryNotesApi.get(dnId);
+      setDn(data);
+      setShowPackageEditOnly(false);
+      toast.success('Packaging updated');
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    } finally {
+      setPackageEditBusy(false);
+    }
+  };
+
+  const formatMarkDeliveredError = (e) => {
+    const data = e?.response?.data;
+    const shortages = data?.shortages;
+    let msg = data?.error || e.message || 'Mark Delivered failed.';
+    if (Array.isArray(shortages) && shortages.length) {
+      const lines = shortages.map(
+        (s) =>
+          `${s.part_number}: need ${s.required_qty}, available ${s.available_qty} (short ${s.shortage_qty})`
+      );
+      msg = `${msg}\n\n${lines.join('\n')}`;
+    }
+    if (data?.code === 'MAIN_STOCK_PART_MISSING' && data?.part_number) {
+      msg = `${msg}\n\nAdd or align part ${data.part_number} in Main Stock before retrying.`;
+    }
+    return msg;
+  };
+
+  const runMarkDelivered = async () => {
+    const result = await deliveryNotesApi.markDelivered(dnId);
+    try {
+      await refreshDnOnly(dnId, { silent: true });
+    } catch {
+      try {
+        const data = await deliveryNotesApi.get(dnId);
+        setDn(data);
+        await refreshTimeline(dnId);
+      } catch {
+        /* ignore — mark-delivered already succeeded */
+      }
+    }
+    toast.success(
+      result?.outbound_stock_already_finalized
+        ? 'Order processed. Stock was already finalized for this outbound.'
+        : 'Order processed successfully.'
+    );
+  };
+
   const deliver = async () => {
     try {
       if (!dnId || !dn) {
-        alert('Load a delivery note first.');
+        toast.error('Load a delivery note first.');
         return;
       }
       if (dnLocked && String(dn?.status || '').toLowerCase() === 'delivered') {
-        alert('This delivery note is already marked as Delivered.');
+        toast.error('This delivery note is already marked as Delivered.');
         return;
       }
       if (!hasTransportation) {
-        alert('Transportation Method must be saved before Delivered.');
+        toast.error('Transportation Method must be saved before Delivered.');
         setShowTransportPrompt(true);
         return;
       }
-      if (!hasInvoice) {
-        alert('Invoice Number is required before marking delivered.');
-        setShowInvoicePrompt(true);
+      if (dnNeedsPackagePrompt(dn)) {
+        openPackagePrompt(() => runMarkDelivered(), 'deliver');
         return;
       }
-      if (!hasPackageType) {
-        alert('Package Type is required before marking delivered.');
-        setShowInvoicePrompt(true);
-        return;
-      }
-      if (isGapp && !dn.confirmed_at) {
-        alert('GAPP: Click "Confirm for Delivery" first to notify the driver, then complete the driver flow before Mark Delivered.');
-        return;
-      }
-      if (isGapp && !Number(dn.is_closed)) {
-        alert(
-          'GAPP: Driver has not closed this delivery yet.\n' +
-            'Wait for the driver to upload POD and close, or use "Close Order (Admin)" before Mark Delivered.'
-        );
-        return;
-      }
-      const result = await deliveryNotesApi.markDelivered(dnId);
-      try {
-        await refreshDnOnly(dnId, { silent: true });
-      } catch {
-        try {
-          const data = await deliveryNotesApi.get(dnId);
-          setDn(data);
-          await refreshTimeline(dnId);
-        } catch {
-          /* ignore — mark-delivered already succeeded */
-        }
-      }
-      alert(
-        result?.outbound_stock_already_finalized
-          ? 'Delivery note marked as Delivered. Stock for this outbound was already finalized earlier (no second deduction).'
-          : 'Marked as Delivered. Stock deducted from main stock (guarded against duplicate deduction).'
-      );
+      await runMarkDelivered();
     } catch (e) {
-      const data = e?.response?.data;
-      const shortages = data?.shortages;
-      let msg = data?.error || e.message || 'Mark Delivered failed.';
-      if (Array.isArray(shortages) && shortages.length) {
-        const lines = shortages.map(
-          (s) =>
-            `${s.part_number}: need ${s.required_qty}, available ${s.available_qty} (short ${s.shortage_qty})`
-        );
-        msg = `${msg}\n\n${lines.join('\n')}`;
-      }
-      if (data?.code === 'MAIN_STOCK_PART_MISSING' && data?.part_number) {
-        msg = `${msg}\n\nAdd or align part ${data.part_number} in Main Stock before retrying.`;
-      }
-      alert(msg);
+      toast.error(formatMarkDeliveredError(e));
     }
   };
 
@@ -487,6 +703,22 @@ export default function DeliveryNote() {
     refreshOutboundOptions();
   }, []);
 
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const po = params.get('po')?.trim();
+    const huawei =
+      params.get('huawei') === '1' ||
+      String(params.get('source') || '').toLowerCase() === 'huawei';
+    if (!po) return;
+    if (huawei) setIsHuaweiDnSource(true);
+    setOutboundTyped(po);
+    setOutboundNumber(po);
+    if (huawei && !autoHuaweiPoLoad.current) {
+      autoHuaweiPoLoad.current = true;
+      void load(po);
+    }
+  }, [location.search]);
+
   // Auto-load when navigated from Picked Orders "Create DN"
   useEffect(() => {
     const sp = new URLSearchParams(location.search || '');
@@ -495,7 +727,7 @@ export default function DeliveryNote() {
     setSalesDocFilter('');
     setOutboundNumber(ob);
     setOutboundTyped(ob);
-    setTimeout(() => load(), 0);
+    void load(ob);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
 
@@ -683,9 +915,27 @@ export default function DeliveryNote() {
     return [];
   }, [dn]);
 
+  const applyDnDate = async (ymd) => {
+    if (!ymd) return;
+    setDnDateDraft(ymd);
+    if (!dnId || !canChangeDnDate) return;
+    setDnDateSaving(true);
+    try {
+      const data = await deliveryNotesApi.saveDnDate(dnId, { dn_date: ymd });
+      setDn(data);
+    } catch (err) {
+      toast.error(err?.response?.data?.error || err.message || 'Could not save delivery note date');
+      setDnDateDraft(normalizeDnDateInput(dn?.dn_date));
+    } finally {
+      setDnDateSaving(false);
+    }
+  };
+
   // Sample fallback (so layout comparison works even before loading)
-  const view = dn || {
-    dn_date: '2026-04-28',
+  const view = useMemo(() => {
+    if (dn) return { ...dn, dn_date: dnDateDraft };
+    return {
+    dn_date: dnDateDraft,
     gapp_po: '15011096',
     customer_po: 'PO-000451-1',
     outbound_number: '80019214',
@@ -710,9 +960,32 @@ export default function DeliveryNote() {
     box_qty: 0,
     gross_weight_kg: 0,
     volume_cbm: 0,
-  };
+    };
+  }, [dn, dnDateDraft]);
+
+  const openCustomerWhatsAppDialog = useCallback(() => {
+    if (!dnId || !dn) {
+      toast.error('Load a delivery note first.');
+      return;
+    }
+    const phoneRaw = trim(dn.contact_number);
+    if (!phoneRaw || phoneRaw.replace(/\D/g, '').length < 8) {
+      toast.error(
+        'Contact person 1 mobile is missing or too short. Set it on the DN (Delivery To / contact line), with country code (e.g. 9665… or 91…).'
+      );
+      return;
+    }
+    setWhatsappDialogOpen(true);
+  }, [dnId, dn]);
 
   const invoiceForPrint = trim(view?.invoice_number) || trim(view?.outbound_invoice_number) || '';
+
+  const isHuaweiDn = useMemo(() => {
+    if (Number(dn?.is_huawei_source) === 1) return true;
+    if (isHuaweiDnSource && dn) return true;
+    const ref = trim(dn?.dn_number || '');
+    return ref.toUpperCase().startsWith('HW-PO-');
+  }, [dn, isHuaweiDnSource]);
 
   /** Only real line items (no blank filler rows); footer total = sum of qty. */
   const lineItems = useMemo(() => (view?.items || []).filter((it) => it != null), [view?.items]);
@@ -723,6 +996,7 @@ export default function DeliveryNote() {
     if (k === 'description') return String(it?.description || '');
     if (k === 'uom') return String(it?.uom || '');
     if (k === 'serial_no') return String(it?.serial_no || '');
+    if (k === 'box_name') return String(it?.box_name || '');
     if (k === 'condition') return String(it?.condition_text || it?.condition || '');
     return it?.[k];
   }, []);
@@ -738,6 +1012,7 @@ export default function DeliveryNote() {
 
   const packageText = useMemo(() => {
     const pt = String(view?.package_type || '').toLowerCase();
+    if (pt === 'ignore') return '';
     if (pt === 'pallet') {
       const q = Number(view?.pallet_qty) || 0;
       return q > 0 ? `${q} PALLETS` : '';
@@ -748,6 +1023,18 @@ export default function DeliveryNote() {
     }
     return '';
   }, [view?.package_type, view?.pallet_qty, view?.box_qty]);
+
+  const packageWeightDisplay = useMemo(() => {
+    if (String(view?.package_type || '').toLowerCase() === 'ignore') return '—';
+    const w = Number(view?.gross_weight_kg);
+    return Number.isFinite(w) && w > 0 ? w.toFixed(2) : '—';
+  }, [view?.package_type, view?.gross_weight_kg]);
+
+  const packageVolumeDisplay = useMemo(() => {
+    if (String(view?.package_type || '').toLowerCase() === 'ignore') return '—';
+    const v = Number(view?.volume_cbm);
+    return Number.isFinite(v) && v > 0 ? v.toFixed(2) : '—';
+  }, [view?.package_type, view?.volume_cbm]);
 
   const dnPrintDynamicCss = useMemo(() => {
     const m = Math.min(22, Math.max(4, Number(printPageMarginMm) || 10));
@@ -766,24 +1053,87 @@ export default function DeliveryNote() {
     return `
 @page { size: A4; margin: ${m}mm; }
 @media print {
-  .dn-page { ${zoomLine} }
+  .dn-page-scaled { ${zoomLine} }
+  .dn-page-counter {
+    display: block;
+    position: fixed;
+    bottom: 4mm;
+    right: ${m}mm;
+    font-size: 9px;
+    font-weight: 600;
+    color: #000;
+    z-index: 9999;
+    pointer-events: none;
+  }
+  .dn-page-counter::after {
+    content: counter(page) " of " counter(pages);
+  }
   ${compactBlock}
 }
 `;
   }, [printPageMarginMm, printZoomPercent, printCompactTable]);
 
-  const handlePrintA4 = () => {
+  const resetDnPrintSheetLayout = useCallback(() => {
+    const scaled = document.querySelector('.dn-wrap .dn-page-scaled');
+    if (scaled) scaled.style.minHeight = '';
+  }, []);
+
+  const layoutDnPrintSheet = useCallback(() => {
+    const main = document.querySelector('.dn-wrap .dn-page-main');
+    const counter = document.querySelector('.dn-wrap .dn-page-counter');
+    if (!main || !counter) return;
+    const m = Math.min(22, Math.max(4, Number(printPageMarginMm) || 10));
+    const z = Math.min(1, Math.max(0.72, (Number(printZoomPercent) || 100) / 100));
+    const printablePx = Math.max(1, (297 - 2 * m) * (96 / 25.4) * z);
+    const totalPages = Math.max(1, Math.ceil(main.scrollHeight / printablePx));
+    counter.dataset.dnPageTotal = String(totalPages);
+    counter.setAttribute('data-dn-page-preview', `~${totalPages} page${totalPages === 1 ? '' : 's'} on print`);
+  }, [printPageMarginMm, printZoomPercent]);
+
+  const estimateDnPrintPages = layoutDnPrintSheet;
+
+  useEffect(() => {
+    const t = window.setTimeout(() => estimateDnPrintPages(), 80);
+    return () => window.clearTimeout(t);
+  }, [view, displayItems.length, printPageMarginMm, printZoomPercent, printCompactTable, estimateDnPrintPages]);
+
+  useEffect(() => {
+    const onBeforePrint = () => layoutDnPrintSheet();
+    const onAfterPrint = () => resetDnPrintSheetLayout();
+    window.addEventListener('beforeprint', onBeforePrint);
+    window.addEventListener('afterprint', onAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', onBeforePrint);
+      window.removeEventListener('afterprint', onAfterPrint);
+    };
+  }, [layoutDnPrintSheet, resetDnPrintSheetLayout]);
+
+  const executePrintA4 = () => {
     const prevTitle = document.title;
-    // Chrome / Edge / Brave "Save as PDF" default filename follows document.title; use same base as Excel + ".pdf".
-    // Omit the ".pdf" suffix in the tab title so the saved file is usually "Name.pdf" not "Name.pdf.pdf".
     const base = buildDeliveryNoteFilenameBase(view);
     document.title = base || 'Delivery-Note';
     const restore = () => {
       document.title = prevTitle;
     };
     window.addEventListener('afterprint', restore, { once: true });
-    window.print();
+    layoutDnPrintSheet();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => window.print());
+    });
     setTimeout(restore, 4000);
+  };
+
+  const needsExportDocFlowBeforePdf = () =>
+    canEditDn && Boolean(trim(dn?.outbound_number)) && Boolean(selectedWarehouseId) && !isAllWarehouses;
+
+  const handlePrintA4 = () => {
+    if (!dn) return;
+    const go = () => executePrintA4();
+    if (canEditDn && dnNeedsPackagePrompt(dn)) {
+      openPackagePrompt(go, 'general');
+      return;
+    }
+    go();
   };
 
   const handleExportExcel = () => {
@@ -794,9 +1144,258 @@ export default function DeliveryNote() {
         displayItems,
         packageText,
         transportRenderLines,
+        checkedByDisplayName,
       });
     } catch (e) {
       alert(e?.message || 'Export failed');
+    }
+  };
+
+  const dnDrivePreviewName = useMemo(() => {
+    if (!dn) return '';
+    const ob = trim(dn.outbound_number);
+    const dnNum = trim(dn.dn_number) || String(dn.id);
+    return ob && dnNum ? `DN_${ob}_${dnNum}.pdf` : buildDeliveryNoteFilenameBase(view) + '.pdf';
+  }, [dn, view]);
+
+  const runSaveDnToDrive = async (duplicate_action) => {
+    if (!dnId) return;
+    setSaveDriveBusy(true);
+    try {
+      const res = await documentWorkflowApi.saveDnPdf({
+        delivery_note_id: dnId,
+        duplicate_action: duplicate_action || undefined,
+      });
+      if (res.conflict) {
+        setSaveDriveDup(res.existing);
+        return;
+      }
+      toast.success('Delivery note PDF saved to Google Drive');
+      setSaveDriveDup(null);
+      return true;
+    } catch (e) {
+      if (e.response?.status === 409 && e.response?.data?.conflict) {
+        setSaveDriveDup(e.response.data.existing);
+        return false;
+      }
+      toast.error(e.response?.data?.error || e.message || 'Save to Drive failed');
+      return false;
+    } finally {
+      setSaveDriveBusy(false);
+    }
+  };
+
+  const runDownloadSaveAction = async (duplicate_action) => {
+    if (!dn) return;
+    const mode = canEditDn ? downloadActionMode : 'download';
+    if (canEditDn && (mode === 'drive' || mode === 'both')) {
+      const ok = await runSaveDnToDrive(duplicate_action);
+      if (!ok) return;
+    }
+    if (mode === 'download' || mode === 'both') {
+      executePrintA4();
+    }
+    setDownloadActionOpen(false);
+    setSaveDriveDup(null);
+  };
+
+  const handleDownloadSaveContinue = () => {
+    if (!dn) return;
+    setDownloadActionOpen(false);
+    setSaveDriveDup(null);
+
+    const proceedToSave = () => void runDownloadSaveAction();
+
+    if (canEditDn && dnNeedsPackagePrompt(dn)) {
+      openPackagePrompt(proceedToSave, 'general');
+      return;
+    }
+    proceedToSave();
+  };
+
+  const resetExportDocFlowFields = () => {
+    setExportInvoiceNumber(trim(dn?.invoice_number) || '');
+    setExportAccountingNumber('');
+    setExportInvoiceFile(null);
+    setExportAccountingFile(null);
+    exportAccPasteBlobRef.current = null;
+    setExportAccPasteReady(false);
+  };
+
+  const openExportDocFlowModal = (onComplete) => {
+    if (!dn || !trim(dn.outbound_number)) return;
+    const hasFollowUp = typeof onComplete === 'function';
+    exportDocFlowOnCompleteRef.current = hasFollowUp ? onComplete : null;
+    setExportDocFlowHasFollowUp(hasFollowUp);
+    resetExportDocFlowFields();
+    setExportDocFlowOpen(true);
+  };
+
+  const closeExportDocFlowModal = () => {
+    exportDocFlowOnCompleteRef.current = null;
+    setExportDocFlowHasFollowUp(false);
+    setExportDocFlowOpen(false);
+    setExportDocDup(null);
+  };
+
+  const resolveExportFlowKeys = async () => {
+    const ob = trim(dn?.outbound_number);
+    let so = trim(dn?.gapp_po || dn?.sales_order_number);
+    if (!so && ob && selectedWarehouseId) {
+      try {
+        const detail = await documentFlowApi.get(ob, { warehouse_id: selectedWarehouseId });
+        so = trim(detail?.flow?.sales_order_number) || '';
+      } catch {
+        /* use outbound fallback */
+      }
+    }
+    return { ob, so: so || ob };
+  };
+
+  const pasteExportAccountingFromClipboard = async () => {
+    if (!exportAccountingNumber.trim()) {
+      toast.error('Enter the accounting document number first, then paste from clipboard.');
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      let blob = null;
+      for (const item of items) {
+        for (const type of item.types) {
+          if (type.startsWith('image/')) {
+            blob = await item.getType(type);
+            break;
+          }
+        }
+        if (blob) break;
+      }
+      if (!blob) {
+        toast.error('No image in clipboard — copy an accounting screenshot first.');
+        return;
+      }
+      exportAccPasteBlobRef.current = blob;
+      setExportAccPasteReady(true);
+      setExportAccountingFile(null);
+      toast.success('Accounting image ready — click Save to upload to Google Drive.');
+    } catch {
+      toast.error('Clipboard access denied — use Upload accounting file instead.');
+    }
+  };
+
+  const uploadExportDoc = async (ob, fd, duplicate_action) => {
+    if (duplicate_action) fd.append('duplicate_action', duplicate_action);
+    try {
+      const res = await documentFlowApi.upload(ob, fd);
+      if (res?.conflict) {
+        const err = new Error('duplicate');
+        err.conflict = res.existing;
+        throw err;
+      }
+      return res;
+    } catch (e) {
+      if (e.response?.status === 409 && e.response?.data?.conflict) {
+        const err = new Error('duplicate');
+        err.conflict = e.response.data.existing;
+        throw err;
+      }
+      throw e;
+    }
+  };
+
+  const submitExportDocFlow = async (duplicate_action) => {
+    const ob = trim(dn?.outbound_number);
+    if (!ob || !selectedWarehouseId || isAllWarehouses) {
+      toast.error('Select a warehouse and ensure outbound number is set.');
+      return;
+    }
+    if (!exportInvoiceNumber.trim()) {
+      toast.error('Invoice number is required.');
+      return;
+    }
+    if (!exportAccountingNumber.trim()) {
+      toast.error('Accounting document number is required.');
+      return;
+    }
+    const inv = exportInvoiceNumber.trim();
+    const acc = exportAccountingNumber.trim();
+    setExportDocFlowBusy(true);
+    try {
+      const { so } = await resolveExportFlowKeys();
+
+      await documentFlowApi.setAccountingByOutbound(ob, {
+        warehouse_id: selectedWarehouseId,
+        invoice_number: inv,
+        accounting_document_number: acc,
+      });
+
+      if (exportInvoiceFile) {
+        const fd = new FormData();
+        fd.append('file', exportInvoiceFile);
+        fd.append('document_type', 'invoice');
+        fd.append('warehouse_id', String(selectedWarehouseId));
+        fd.append('invoice_number', inv);
+        fd.append('accounting_document_number', acc);
+        try {
+          await uploadExportDoc(ob, fd, duplicate_action);
+        } catch (e) {
+          if (e.message === 'duplicate' && e.conflict) {
+            setExportDocDup({ existing: e.conflict, label: 'Invoice', resume: submitExportDocFlow });
+            return;
+          }
+          throw e;
+        }
+      }
+
+      if (exportAccountingFile && !exportAccPasteReady) {
+        const fd = new FormData();
+        fd.append('file', exportAccountingFile);
+        fd.append('document_type', 'accounting_document');
+        fd.append('warehouse_id', String(selectedWarehouseId));
+        fd.append('invoice_number', inv);
+        fd.append('accounting_document_number', acc);
+        try {
+          await uploadExportDoc(ob, fd, duplicate_action);
+        } catch (e) {
+          if (e.message === 'duplicate' && e.conflict) {
+            setExportDocDup({ existing: e.conflict, label: 'Accounting document', resume: submitExportDocFlow });
+            return;
+          }
+          throw e;
+        }
+      } else if (exportAccPasteReady && exportAccPasteBlobRef.current) {
+        const blob = exportAccPasteBlobRef.current;
+        const fd = new FormData();
+        fd.append('file', new File([blob], `ACC_${acc}.png`, { type: blob.type || 'image/png' }));
+        fd.append('accounting_document_number', acc);
+        fd.append('warehouse_id', String(selectedWarehouseId));
+        fd.append('outbound_number', ob);
+        if (duplicate_action) fd.append('duplicate_action', duplicate_action);
+        const res = await documentFlowApi.pasteAccounting(so, fd);
+        if (res?.conflict) {
+          setExportDocDup({ existing: res.existing, label: 'Accounting document (paste)', resume: submitExportDocFlow });
+          return;
+        }
+      }
+
+      toast.success('Invoice and accounting document saved to Google Drive');
+      const after = exportDocFlowOnCompleteRef.current;
+      exportDocFlowOnCompleteRef.current = null;
+      closeExportDocFlowModal();
+      exportAccPasteBlobRef.current = null;
+      setExportAccPasteReady(false);
+      if (after) after();
+    } catch (e) {
+      if (e.response?.status === 409 && e.response?.data?.conflict) {
+        setExportDocDup({
+          existing: e.response.data.existing,
+          label: 'Document',
+          resume: submitExportDocFlow,
+        });
+        return;
+      }
+      toast.error(e.response?.data?.error || e.message);
+    } finally {
+      setExportDocFlowBusy(false);
     }
   };
 
@@ -840,493 +1439,1335 @@ export default function DeliveryNote() {
     setShowContact2(true);
   };
 
+  const podFileLabel = useMemo(() => {
+    const p = trim(timeline?.pod_file_path || dn?.pod_file_path);
+    if (!p) return '';
+    const parts = p.split(/[/\\]/);
+    return parts[parts.length - 1] || p;
+  }, [timeline, dn]);
+
   return (
     <div className="dn-screen-root">
-      <div className="mb-2 dn-no-print">
+      <div className="dn-screen-header dn-no-print">
         <h2 className="text-base font-bold text-gray-900 leading-tight">Delivery Note (DN)</h2>
-        {dn && trim(view?.gapp_po) ? (
-          <div className="mt-1">
-            <Link
-              className="text-[11px] font-semibold text-primary-700 hover:underline"
-              to={`/sales-order-documents?so=${encodeURIComponent(trim(view.gapp_po))}`}
-            >
-              Sales Order Documents (GAPP PO {trim(view.gapp_po)})
-            </Link>
-          </div>
-        ) : null}
-        <p className="text-[11px] text-gray-600">
-          A4 print / Save as PDF, and Excel export (same layout). File names use the same pattern:{' '}
-          <strong>RG_Invoice_Outbound_CustomerPO_CustomerName_GappPO</strong> (<code>.xlsx</code> on export;{' '}
-          <strong>Save as PDF</strong> suggests <code>.pdf</code> from the page title—same fields as Excel).{' '}
-          <strong>Print / Save PDF</strong> uses this tab only. Use <strong>Page setup</strong> below to tighten margins or scale the
-          sheet. <strong>Brave / Chrome / Edge:</strong> in the print dialog open <strong>More settings</strong> and turn off{' '}
-          <strong>Headers and footers</strong> so the URL and date are not added in the margin (the browser adds those when that option
-          is on).
-        </p>
-        <details className="mt-2 rounded-lg border border-gray-200 bg-gray-50/80 px-3 py-2 text-[11px] text-gray-800">
-          <summary className="cursor-pointer font-bold text-gray-900 select-none">Page setup (print / Save as PDF)</summary>
-          <div className="mt-2 grid gap-3 sm:grid-cols-3">
-            <label className="flex flex-col gap-1">
-              <span className="font-semibold text-gray-700">Sheet margin (mm)</span>
-              <input
-                type="number"
-                min={4}
-                max={22}
-                step={1}
-                className="input-field"
-                value={printPageMarginMm}
-                onChange={(e) => setPrintPageMarginMm(Number(e.target.value))}
-              />
-              <span className="text-[10px] text-gray-500">Smaller margin = more room for content (4–22).</span>
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="font-semibold text-gray-700">Content scale (%)</span>
-              <input
-                type="number"
-                min={72}
-                max={100}
-                step={1}
-                className="input-field"
-                value={printZoomPercent}
-                onChange={(e) => setPrintZoomPercent(Number(e.target.value))}
-              />
-              <span className="text-[10px] text-gray-500">Below 100% shrinks the whole note to reduce page breaks.</span>
-            </label>
-            <label className="flex items-end gap-2 pb-1">
-              <input
-                type="checkbox"
-                checked={printCompactTable}
-                onChange={(e) => setPrintCompactTable(e.target.checked)}
-                className="rounded border-gray-300"
-              />
-              <span className="font-semibold text-gray-700">Compact line-items table</span>
-            </label>
-          </div>
-          <p className="mt-2 text-[10px] text-gray-500">
-            Settings are saved in this browser. They apply when you use Print / Save PDF.
+        {readOnlyViewer ? (
+          <p className="text-[11px] text-sky-900 bg-sky-50 border border-sky-200 rounded-md px-2 py-1.5 mt-1">
+            <strong>Read-only (Viewer):</strong> view status, print/download delivery notes, Excel, POD, and reports. Editing,
+            uploads, and confirm/deliver actions are disabled.
           </p>
-        </details>
-        {dn && trim(dn.outbound_number) && dn.pick_footprint ? (
-          <details className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-[11px] text-emerald-950 dn-no-print">
-            <summary className="cursor-pointer font-bold text-emerald-900 select-none">
-              Pick &amp; rack (live){' '}
-              {dn.pick_footprint.pick_progress?.fully_picked ? (
-                <span className="font-normal text-emerald-700">· Fully picked</span>
-              ) : (
-                <span className="font-normal text-amber-800">· In progress</span>
-              )}
-            </summary>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="rounded border border-emerald-100 bg-white/90 px-2 py-1.5">
-                <div className="text-[9px] font-semibold text-emerald-800 uppercase">Total qty</div>
-                <div>
-                  Picked <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.total_picked_qty).toLocaleString()}</strong> /{' '}
-                  <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.total_required_qty).toLocaleString()}</strong> required
-                </div>
-                <div className="mt-0.5">
-                  Remaining: <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.remaining_qty).toLocaleString()}</strong>
-                </div>
-              </div>
-              <div className="rounded border border-emerald-100 bg-white/90 px-2 py-1.5">
-                <div className="text-[9px] font-semibold text-emerald-800 uppercase">Lines</div>
-                <div>
-                  Complete <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.lines_complete)}</strong> /{' '}
-                  <strong>{pickQtyDn(dn.pick_footprint.pick_progress?.lines_total)}</strong>
-                </div>
-              </div>
-              <div className="rounded border border-emerald-100 bg-white/90 px-2 py-1.5 sm:col-span-2">
-                <div className="text-[9px] font-semibold text-emerald-800 uppercase">Pick confirmed</div>
-                {dn.pick_footprint.picked_order ? (
-                  <div>
-                    <span className="font-semibold">{dn.pick_footprint.picked_order.confirmed_by_user_name || '—'}</span>
-                    {dn.pick_footprint.picked_order.confirmed_at ? (
-                      <span className="text-gray-600"> · {String(dn.pick_footprint.picked_order.confirmed_at).slice(0, 19)}</span>
-                    ) : null}
-                  </div>
-                ) : (
-                  <span className="text-gray-600">Not confirmed yet</span>
-                )}
-              </div>
-            </div>
-            <div className="mt-2 max-h-[200px] overflow-auto rounded border border-emerald-100 bg-white">
-              <table className="min-w-full text-[10px]">
-                <thead className="bg-emerald-100/80 sticky top-0">
-                  <tr>
-                    <th className="tbl-th text-left">When</th>
-                    <th className="tbl-th text-left">Picker</th>
-                    <th className="tbl-th text-left">Part</th>
-                    <th className="tbl-th text-right">Qty</th>
-                    <th className="tbl-th text-left">Rack</th>
-                    <th className="tbl-th text-left">Method</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(dn.pick_footprint.picked_transactions || []).length ? (
-                    dn.pick_footprint.picked_transactions.map((t) => (
-                      <tr key={t.id} className="border-b border-emerald-50">
-                        <td className="tbl-td-nowrap">{t.picked_at ? String(t.picked_at).slice(0, 19) : '—'}</td>
-                        <td className="tbl-td max-w-[7rem] truncate" title={t.user_name || ''}>
-                          {t.user_name || `user #${t.user_id || '—'}`}
-                        </td>
-                        <td className="tbl-td max-w-[9rem] truncate">{t.material || t.sap_part_number || '—'}</td>
-                        <td className="tbl-td text-right">{pickQtyDn(t.picked_qty)}</td>
-                        <td className="tbl-td font-mono max-w-[7rem] truncate" title={t.rack_location || ''}>
-                          {t.rack_location || '—'}
-                        </td>
-                        <td className="tbl-td-nowrap">
-                          {t.picked_method || '—'}
-                          {Number(t.is_manual_pick) ? ' · admin' : ''}
-                        </td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td className="tbl-td text-gray-500 py-2" colSpan={6}>
-                        No pick transactions yet.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <p className="mt-2 text-[10px] text-emerald-900/80">
-              Full FIFO &amp; workflow: open{' '}
-              <Link className="font-semibold underline" to="/outbound-pick">
-                Outbound &amp; pick
-              </Link>{' '}
-              and click this delivery number.
-            </p>
-          </details>
         ) : null}
+        <p className="text-[10px] text-gray-500 mt-0.5">
+          Controls on the left · live delivery note preview on the right.
+        </p>
       </div>
 
-      {/* Search bar (required on screens) */}
-      <div className="app-page-toolbar dn-screen-toolbar">
-        <div className="flex flex-col md:flex-row md:items-center gap-3">
-          <div className="flex flex-col gap-2 max-w-3xl flex-1 w-full">
-            <label className="flex flex-col text-[10px] font-semibold text-gray-600 max-w-xs">
-              Sales doc / GAPP PO / SO (filter)
-              <select
-                className="input-field mt-0.5"
-                value={salesDocFilter}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setSalesDocFilter(v);
-                  setOutboundTyped('');
-                  const f = trimStr(v);
-                  if (!f) return;
-                  setOutboundNumber((prev) => {
-                    const row = outboundOptions.find((o) => trimStr(o.outbound_number) === trimStr(prev));
-                    if (!row) return prev;
-                    return trimStr(row.sales_doc) === f ? prev : '';
-                  });
-                }}
-                onFocus={refreshOutboundOptions}
-              >
-                <option value="">Any</option>
-                {salesDocChoices.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="flex items-center gap-3 flex-1">
-            <Search size={14} className="text-gray-400 flex-shrink-0" />
-            <div className="flex gap-2 flex-1 min-w-0">
-              <select
-                className="input-field flex-1 min-w-0"
-                value={outboundNumber}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setOutboundNumber(v);
-                  setOutboundTyped('');
-                  const row = outboundFiltered.find((o) => trimStr(o.outbound_number) === trimStr(v));
-                  if (row && trimStr(row.sales_doc)) setSalesDocFilter(trimStr(row.sales_doc));
-                }}
-                onFocus={refreshOutboundOptions}
-              >
-                <option value="">Select Outbound Number…</option>
-                {outboundFiltered.slice(0, 500).map((o, idx) => (
-                  <option key={`${o.outbound_number}-${idx}`} value={o.outbound_number}>
-                    {o.outbound_number}
-                    {o.sales_doc ? ` · ${o.sales_doc}` : ''} · {o.customer_name || ''}
-                    {o.customer_reference ? ` · ${o.customer_reference}` : ''}
-                  </option>
-                ))}
-              </select>
-              <input
-                className="input-field w-44"
-                placeholder="Or type…"
-                value={outboundTyped}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setOutboundTyped(v);
-                  setOutboundNumber(v);
-                }}
+      <div className="dn-shell">
+        <div className="dn-mobile-tabs" role="tablist" aria-label="Delivery note panels">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mobilePanel === 'controls'}
+            className={`dn-mobile-tab${mobilePanel === 'controls' ? ' dn-mobile-tab--active' : ''}`}
+            onClick={() => setMobilePanel('controls')}
+          >
+            Controls
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mobilePanel === 'preview'}
+            className={`dn-mobile-tab${mobilePanel === 'preview' ? ' dn-mobile-tab--active' : ''}`}
+            onClick={() => setMobilePanel('preview')}
+          >
+            Preview
+          </button>
+        </div>
+
+        <aside
+          className={`dn-control-panel${mobilePanel !== 'controls' ? ' dn-panel-hidden-mobile' : ''}`}
+          aria-label="Delivery note controls"
+        >
+          <div className="dn-control-scroll">
+            <section className="dn-control-card dn-date-card">
+              <div className="dn-control-card-title">Delivery note date</div>
+              <p className="text-[10px] text-gray-600 mb-1">
+                Click to open the calendar. Updates the DATE on the delivery note preview
+                {dn ? '' : ' (saved when you load the DN)'}.
+              </p>
+              <DnDateCalendarPicker
+                value={dnDateDraft}
+                onChange={applyDnDate}
+                disabled={!canChangeDnDate || dnDateSaving}
+                saving={dnDateSaving}
               />
-              <button type="button" className="btn-secondary whitespace-nowrap" onClick={refreshOutboundOptions}>
-                Refresh
-              </button>
-            </div>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            <button type="button" className="btn-primary" onClick={load} disabled={loading}>
-              {loading ? 'Loading…' : 'Load DN'}
-            </button>
-            <button
-              className="btn-secondary"
-              type="button"
-              onClick={openTransport}
-              disabled={!dn || dnLocked}
-              title={!dn ? 'Load a delivery note first' : dnLocked ? 'Closed — no changes' : ''}
-            >
-              Transportation Method
-            </button>
-            <button className="btn-secondary flex items-center gap-1" type="button" onClick={handlePrintA4}>
-              <Printer size={14} />
-              Print / Save PDF
-            </button>
-            <button
-              className="btn-secondary flex items-center gap-1"
-              type="button"
-              onClick={handleExportExcel}
-              disabled={!dn}
-              title={!dn ? 'Load a delivery note first' : 'Download Excel in the same structure as the delivery note'}
-            >
-              <FileSpreadsheet size={14} />
-              Export Excel
-            </button>
-            <button
-              className="btn-secondary"
-              type="button"
-              disabled={!dn || dnLocked}
-              onClick={openDeliveryTo}
-              title={dnLocked ? 'Closed — no changes' : ''}
-            >
-              Delivery To
-            </button>
-            <button
-              className="btn-secondary"
-              type="button"
-              onClick={toggleHold}
-              disabled={!dn || dnLocked}
-              title={dnLocked ? 'Closed — no changes' : ''}
-            >
-              {String(dn?.status || '').toLowerCase() === 'on hold' ? 'Resume from Hold' : 'Hold'}
-            </button>
-            {isGapp && canUploadOutbound ? (
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={handleConfirmForDelivery}
-                title={
-                  dnLocked
-                    ? 'Closed'
-                    : gappMissingConfirmReasons?.length
-                      ? `Complete required fields:\n- ${gappMissingConfirmReasons.join('\n- ')}`
-                      : 'Send confirmation to driver'
-                }
-              >
-                Confirm for Delivery
-              </button>
-            ) : null}
-            {isAdmin ? (
-              <button
-                type="button"
-                className="btn-secondary border-amber-300"
-                disabled={!dn || dnLocked}
-                onClick={() => {
-                  if (dnLocked) return;
-                  setShowAdminCloseDialog(true);
-                }}
-                title="Admin: lock order (POD or override)"
-              >
-                Close Order (Admin)
-              </button>
-            ) : null}
-            <button
-              className="btn-secondary flex items-center gap-1"
-              type="button"
-              onClick={deliver}
-              disabled={!dn}
-              title={
-                !dn
-                  ? 'Load a delivery note first'
-                  : !hasInvoice
-                    ? 'Click to see why: invoice number is required'
-                    : !hasPackageType
-                      ? 'Click to see why: package type is required'
-                      : !hasTransportation
-                        ? 'Click to see why: transportation method is required'
-                        : gappMarkDeliveredBlocked
-                          ? 'GAPP: Confirm for delivery → driver uploads POD → driver closes (or Admin close). Then Mark Delivered.'
-                          : 'Mark this delivery note as Delivered and deduct main stock'
-              }
-            >
-              <CheckCircle2 size={14} />
-              Mark Delivered
-            </button>
-          </div>
-        </div>
-        {dn && scanWhOk ? (
-          <div className="mt-2">
-            <ScanDocumentPanel
-              warehouseId={selectedWarehouseId}
-              salesOrderNumber={trim(dn.gapp_po || dn.sales_order_number || '')}
-              outboundNumber={trim(dn.outbound_number || '')}
-              dnNumber={trim(dn.dn_number || dn.outbound_number || '')}
-              invoiceNumber={effectiveInvoice}
-              customerPo={trim(dn.customer_po || '')}
-              gappPo={trim(dn.gapp_po || '')}
-              customerName={trim(dn.customer_name || '')}
-              whOk={scanWhOk}
-              onSuccess={() => void refreshDnOnly(dnId, { silent: true })}
-              title="Scan document → Sales Order folder"
-            />
-          </div>
-        ) : null}
-        <div className="mt-2 space-y-2">
-          <div className="flex flex-wrap gap-1 items-center">
-            <button
-              className="btn-secondary"
-              type="button"
-              disabled={!dn || dnLocked}
-              onClick={handleContactPerson2Toggle}
-              title={
-                !dn
-                  ? 'Load a delivery note first'
-                  : dnLocked
-                    ? 'Closed — no changes'
-                    : trim(dn?.contact_person_2) || trim(dn?.contact_number_2)
-                      ? 'Clear secondary contact on this delivery note'
-                      : 'Add fields for a second contact'
-              }
-            >
-              {showContact2 && (trim(dn?.contact_person_2) || trim(dn?.contact_number_2))
-                ? 'Remove Contact Person 2'
-                : showContact2
-                  ? 'Cancel Contact Person 2'
-                  : 'Add Contact Person 2'}
-            </button>
-            {showContact2 && dn && !dnLocked ? (
-              <span className="text-[11px] text-gray-600">
-                Values also populate when you apply an address that includes 2nd Name / 2nd Number.
-              </span>
-            ) : null}
-          </div>
-          {showContact2 && dn && !dnLocked ? (
-            <div className="flex flex-wrap gap-2 items-end max-w-xl">
-              <label className="text-[11px] font-bold text-gray-700 flex-1 min-w-[140px]">
-                Contact Person (2)
+              {readOnlyViewer ? (
+                <p className="text-[10px] text-sky-800 mt-1">Viewer account — date cannot be changed.</p>
+              ) : dnLocked ? (
+                <p className="text-[10px] text-amber-800 mt-1">Delivered — date is locked.</p>
+              ) : null}
+            </section>
+
+            <section className="dn-control-card space-y-2">
+              <div className="dn-control-card-title">Document</div>
+              <label className="flex items-center gap-2 text-[10px] font-semibold text-gray-700">
                 <input
-                  className="input-field mt-1"
-                  value={cp2DraftName}
-                  onChange={(e) => setCp2DraftName(e.target.value)}
-                  placeholder="Name"
+                  type="checkbox"
+                  checked={isHuaweiDnSource}
+                  onChange={(e) => {
+                    const v = Boolean(e.target.checked);
+                    setIsHuaweiDnSource(v);
+                    setOutboundNumber('');
+                    setOutboundTyped('');
+                    setSalesDocFilter('');
+                    setDn(null);
+                    setDnId(null);
+                    setError('');
+                  }}
                 />
+                Huawei source (use Huawei PO and auto-fill DN)
               </label>
-              <label className="text-[11px] font-bold text-gray-700 flex-1 min-w-[140px]">
-                Number (2)
+              {isHuaweiDnSource ? (
+                <p className="text-[10px] text-gray-600 leading-snug">
+                  Lines import <strong>by box</strong> (same box repeats per part). Outbound and invoice you enter
+                  manually. System PO defaults to Huawei B2B.
+                </p>
+              ) : null}
+              <label className="flex flex-col text-[10px] font-semibold text-gray-600">
+                Sales doc / GAPP PO / SO (filter)
+                <select
+                  className="input-field mt-0.5"
+                  value={salesDocFilter}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setSalesDocFilter(v);
+                    setOutboundTyped('');
+                    const f = trimStr(v);
+                    if (!f) return;
+                    setOutboundNumber((prev) => {
+                      const row = outboundOptions.find((o) => trimStr(o.outbound_number) === trimStr(prev));
+                      if (!row) return prev;
+                      return trimStr(row.sales_doc) === f ? prev : '';
+                    });
+                  }}
+                  onFocus={refreshOutboundOptions}
+                  disabled={isHuaweiDnSource}
+                >
+                  <option value="">Any</option>
+                  {salesDocChoices.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col text-[10px] font-semibold text-gray-600">
+                {isHuaweiDnSource ? 'Huawei SAP PO' : 'Outbound / customer'}
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <Search size={12} className="text-gray-400 flex-shrink-0" />
+                  <select
+                    className="input-field flex-1 min-w-0"
+                    value={outboundNumber}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setOutboundNumber(v);
+                      setOutboundTyped('');
+                      const row = outboundFiltered.find((o) => trimStr(o.outbound_number) === trimStr(v));
+                      if (row && trimStr(row.sales_doc)) setSalesDocFilter(trimStr(row.sales_doc));
+                    }}
+                    onFocus={refreshOutboundOptions}
+                    disabled={isHuaweiDnSource}
+                  >
+                    <option value="">{isHuaweiDnSource ? 'Select SAP PO…' : 'Select outbound…'}</option>
+                    {outboundFiltered.slice(0, 500).map((o, idx) => (
+                      <option key={`${o.outbound_number}-${idx}`} value={o.outbound_number}>
+                        {o.customer_name || '—'} · {o.outbound_number}
+                        {o.sales_doc ? ` · ${o.sales_doc}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </label>
+              <div className="flex gap-1.5">
                 <input
-                  className="input-field mt-1"
-                  value={cp2DraftPhone}
-                  onChange={(e) => setCp2DraftPhone(e.target.value)}
-                  placeholder="Phone"
+                  className="input-field flex-1 min-w-0"
+                  placeholder={isHuaweiDnSource ? 'Type Huawei SAP PO…' : 'Or type outbound…'}
+                  value={outboundTyped}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setOutboundTyped(v);
+                    setOutboundNumber(v);
+                  }}
                 />
-              </label>
-              <button type="button" className="btn-primary" onClick={saveContactPerson2Fields}>
-                Save contact (2)
-              </button>
-            </div>
-          ) : null}
-        </div>
-        {error ? <div className="text-xs text-red-600 mt-2">{error}</div> : null}
-        {dn && (!hasInvoice || !hasPackageType) ? (
-          <div className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 mt-2 flex flex-wrap items-center justify-between gap-2">
-            <span>
-              Delivery note is incomplete without Invoice + Package Type. You can print; marking delivered is blocked
-              until saved.
-            </span>
-            <button type="button" className="text-sm font-medium text-amber-900 underline" onClick={() => setShowInvoicePrompt(true)}>
-              Add invoice
-            </button>
-          </div>
-        ) : null}
-        {dn && hasInvoice && !dnLocked ? (
-          <div className="mt-2">
-            <button
-              type="button"
-              className="text-sm text-gray-600 underline"
-              onClick={() => {
-                setInvoiceDraft(trim(dn.invoice_number) || trim(dn.outbound_invoice_number));
-                setShowInvoicePrompt(true);
-              }}
-            >
-              Change invoice number
-            </button>
-          </div>
-        ) : null}
-        {dn ? (
-          <>
-            <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50/80 p-3 text-[11px] text-gray-800">
-              <div className="font-bold text-gray-900 mb-1.5">Delivery status</div>
-              <div className="flex flex-wrap gap-x-4 gap-y-0.5">
-                <span>
-                  <span className="text-gray-500">Workflow: </span>
-                  <strong>{String(dn.delivery_status || 'Draft')}</strong>
-                  {Number(dn.is_closed) ? <span className="ml-1 text-amber-800">(locked)</span> : null}
-                </span>
-                {isGapp && !dn.confirmed_at ? (
-                  <span className="text-amber-800">GAPP requires Confirm before driver flow and Mark Delivered.</span>
-                ) : null}
+                <button type="button" className="btn-secondary text-[10px] px-2" onClick={refreshOutboundOptions}>
+                  Refresh
+                </button>
+                <button type="button" className="btn-primary text-[10px] px-2" onClick={() => void load()} disabled={loading}>
+                  {loading ? '…' : isHuaweiDnSource ? 'Load Huawei DN' : 'Load DN'}
+                </button>
               </div>
-              {timeline ? (
-                <div className="mt-2 pt-2 border-t border-gray-200">
-                  <div className="font-semibold text-gray-800 mb-1">Timeline</div>
-                  <ul className="space-y-0.5 list-disc list-inside text-gray-700">
-                    <li>Confirmed: {fmtDt(timeline.confirmed_at)}</li>
-                    <li>Opened by driver: {fmtDt(timeline.driver_opened_at)}</li>
-                    <li>Pickup: {fmtDt(timeline.pickup_confirmed_at)}</li>
-                    <li>POD uploaded: {fmtDt(timeline.pod_uploaded_at)}</li>
-                    <li>Closed: {fmtDt(timeline.closed_at)}</li>
-                  </ul>
-                  {timeline.pod_file_path ? (
-                    <button type="button" className="mt-1 text-blue-700 underline" onClick={handleViewPod}>
-                      View POD
-                    </button>
+              {dn ? (
+                <div className="text-[10px] text-gray-700 space-y-0.5 pt-1 border-t border-gray-100">
+                  <div>
+                    <span className="text-gray-500">Customer: </span>
+                    <strong>{trim(dn.customer_name) || '—'}</strong>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Delivery to: </span>
+                    {trim(dn.delivery_address) ? (
+                      <span className="line-clamp-2">{trim(dn.delivery_address)}</span>
+                    ) : (
+                      <span className="text-amber-800">Not set</span>
+                    )}
+                  </div>
+                  {effectiveInvoice ? (
+                    <div>
+                      <span className="text-gray-500">Invoice: </span>
+                      <strong>{effectiveInvoice}</strong>
+                    </div>
+                  ) : null}
+                  {packageText ? (
+                    <div>
+                      <span className="text-gray-500">Packages: </span>
+                      <strong>{packageText}</strong>
+                    </div>
                   ) : null}
                 </div>
               ) : null}
-            </div>
-          </>
-        ) : null}
-      </div>
+              <div className="flex flex-wrap gap-1 pt-1">
+                <button
+                  className="btn-secondary text-[10px] flex-1"
+                  type="button"
+                  onClick={openTransport}
+                  disabled={!canEditDn || !dn || dnLocked}
+                >
+                  Transportation
+                </button>
+                <button
+                  className="btn-secondary text-[10px] flex-1"
+                  type="button"
+                  disabled={!canEditDn || !dn || dnLocked}
+                  onClick={openDeliveryTo}
+                >
+                  Delivery To
+                </button>
+              </div>
+              <div className="pt-1 border-t border-gray-100">
+                <button
+                  className="btn-secondary text-[10px] w-full"
+                  type="button"
+                  disabled={!canEditDn || !dn || dnLocked}
+                  onClick={handleContactPerson2Toggle}
+                >
+                  {showContact2 && (trim(dn?.contact_person_2) || trim(dn?.contact_number_2))
+                    ? 'Remove Contact 2'
+                    : showContact2
+                      ? 'Cancel Contact 2'
+                      : 'Add Contact Person 2'}
+                </button>
+                {canEditDn && showContact2 && dn && !dnLocked ? (
+                  <div className="mt-1.5 space-y-1">
+                    <input
+                      className="input-field text-[10px]"
+                      value={cp2DraftName}
+                      onChange={(e) => setCp2DraftName(e.target.value)}
+                      placeholder="Contact person (2)"
+                    />
+                    <input
+                      className="input-field text-[10px]"
+                      value={cp2DraftPhone}
+                      onChange={(e) => setCp2DraftPhone(e.target.value)}
+                      placeholder="Number (2)"
+                    />
+                    <button type="button" className="btn-primary text-[10px] w-full" onClick={saveContactPerson2Fields}>
+                      Save contact (2)
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </section>
 
-      {/* Hold queue (screen only) */}
-      <div className="app-page-toolbar dn-no-print">
-        <div className="text-[11px] font-bold text-gray-800 mb-2">On Hold</div>
-        {holdRows?.length ? (
-          <div className="flex flex-wrap gap-1.5">
-            {holdRows.slice(0, 30).map((r) => (
-              <button
-                key={r.id}
-                type="button"
-                className="btn-secondary text-[11px]"
-                onClick={() => {
-                  setOutboundNumber(r.outbound_number || '');
-                  setTimeout(() => load(), 0);
+            {dn && trim(dn.outbound_number) && dn.pick_footprint ? (
+              <details className="dn-control-card text-[10px] text-emerald-950">
+                <summary className="dn-control-card-title cursor-pointer select-none text-emerald-900">
+                  Pick progress
+                  {dn.pick_footprint.pick_progress?.fully_picked ? (
+                    <span className="font-normal text-emerald-700"> · complete</span>
+                  ) : (
+                    <span className="font-normal text-amber-800"> · in progress</span>
+                  )}
+                </summary>
+                <div className="dn-summary-grid mt-1">
+                  <div>
+                    <dt>Picked</dt>
+                    <dd>
+                      {pickQtyDn(dn.pick_footprint.pick_progress?.total_picked_qty).toLocaleString()} /{' '}
+                      {pickQtyDn(dn.pick_footprint.pick_progress?.total_required_qty).toLocaleString()}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Lines</dt>
+                    <dd>
+                      {pickQtyDn(dn.pick_footprint.pick_progress?.lines_complete)} /{' '}
+                      {pickQtyDn(dn.pick_footprint.pick_progress?.lines_total)}
+                    </dd>
+                  </div>
+                </div>
+                <Link className="mt-1 inline-block text-[10px] font-semibold text-emerald-900 underline" to="/outbound-pick">
+                  Outbound &amp; pick →
+                </Link>
+              </details>
+            ) : null}
+
+            <section className="dn-control-card">
+              <div className="dn-control-card-title flex items-center justify-between gap-2">
+                <span>Invoice number</span>
+                {canEditDn && dn && !dnLocked ? (
+                  <button
+                    type="button"
+                    className="text-[10px] font-semibold text-violet-800 underline inline-flex items-center gap-0.5"
+                    onClick={openInvoiceEditOnly}
+                  >
+                    <Pencil size={11} />
+                    {hasInvoice ? 'Edit' : 'Add'}
+                  </button>
+                ) : null}
+              </div>
+              <p className="text-[11px] font-mono font-semibold text-gray-900 break-all">{effectiveInvoice || 'Not set yet'}</p>
+              {canEditDn && dn && !dnLocked && !hasInvoice ? (
+                <p className="text-[10px] text-gray-500 mt-1">Required before confirm / deliver. You can change it later using Edit.</p>
+              ) : null}
+            </section>
+
+            <section className="dn-control-card">
+              <div className="dn-control-card-title flex items-center justify-between gap-2">
+                <span>Packaging &amp; volume</span>
+                {canEditDn && dn && !dnLocked ? (
+                  <button
+                    type="button"
+                    className="text-[10px] font-semibold text-violet-800 underline inline-flex items-center gap-0.5"
+                    onClick={openPackageEditOnly}
+                  >
+                    <Pencil size={11} />
+                    Edit
+                  </button>
+                ) : null}
+              </div>
+              <dl className="dn-summary-grid text-[11px] mb-2">
+                <div>
+                  <dt>Package type</dt>
+                  <dd>{String(dn?.package_type || '—')}</dd>
+                </div>
+                <div>
+                  <dt>Package qty</dt>
+                  <dd>
+                    {String(dn?.package_type || '').toLowerCase() === 'pallet'
+                      ? dn?.pallet_qty ?? '—'
+                      : String(dn?.package_type || '').toLowerCase() === 'box'
+                        ? dn?.box_qty ?? '—'
+                        : '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Weight (kg)</dt>
+                  <dd>{packageWeightDisplay}</dd>
+                </div>
+                <div>
+                  <dt>Volume (CBM)</dt>
+                  <dd>{packageVolumeDisplay}</dd>
+                </div>
+              </dl>
+              <div className="dn-control-card-title border-t border-gray-100 pt-2 mt-1">Summary</div>
+              <dl className="dn-summary-grid">
+                <div>
+                  <dt>Line items</dt>
+                  <dd>{lineItems.length}</dd>
+                </div>
+                <div>
+                  <dt>Total qty</dt>
+                  <dd>{totalDnQty.toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt>Packages</dt>
+                  <dd>{packageText || '—'}</dd>
+                </div>
+                <div>
+                  <dt>Outbound</dt>
+                  <dd className="font-mono text-[10px]">{trim(dn?.outbound_number) || '—'}</dd>
+                </div>
+                <div>
+                  <dt>DN date</dt>
+                  <dd>{dnDateDraft || '—'}</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section className="dn-control-card">
+              <div className="dn-control-card-title">POD — signed delivery note</div>
+              <p className="text-[10px] text-gray-600 mb-1.5">PDF, JPG, or PNG. Replace before final close.</p>
+              {podFileLabel ? (
+                <div className="text-[10px] bg-emerald-50 border border-emerald-100 rounded px-2 py-1.5 mb-1.5">
+                  <div className="font-semibold text-emerald-950 truncate" title={podFileLabel}>
+                    {podFileLabel}
+                  </div>
+                  {timeline?.pod_uploaded_at ? (
+                    <div className="text-gray-600 mt-0.5">Uploaded: {fmtDt(timeline.pod_uploaded_at)}</div>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="text-[10px] text-gray-500 mb-1.5">No POD on file yet.</p>
+              )}
+              <DnPodDropZone
+                disabled={!canUploadPodDn || !dn || dnLocked}
+                onFile={(f) => {
+                  setPodInitialFile(f);
+                  setPodUploadOpen(true);
                 }}
               >
-                {r.outbound_number} · {r.customer_name || ''} · {r.invoice_number ? `INV ${r.invoice_number}` : 'No invoice'}
-              </button>
-            ))}
+                <Upload size={14} className="inline-block mr-1 opacity-70" />
+                Drag &amp; drop POD here (PDF, JPG, PNG)
+              </DnPodDropZone>
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                <button
+                  className="btn-secondary flex items-center gap-1 text-[10px] flex-1 border-emerald-700/30 bg-emerald-50/90"
+                  type="button"
+                  disabled={!canUploadPodDn || !dn || dnLocked}
+                  onClick={() => {
+                    setPodInitialFile(null);
+                    setPodUploadOpen(true);
+                  }}
+                >
+                  <Upload size={12} />
+                  {podFileLabel ? 'Replace POD' : 'Upload POD'}
+                </button>
+                {podFileLabel ? (
+                  <button type="button" className="btn-secondary text-[10px]" onClick={handleViewPod}>
+                    View
+                  </button>
+                ) : null}
+              </div>
+              {/* TODO: backend endpoint to clear POD before close — use Replace to upload a new file for now */}
+            </section>
+
+            {dn ? (
+              <section className="dn-control-card text-[11px] text-gray-800">
+                <div className="dn-control-card-title">Delivery status</div>
+                <div>
+                  <span className="text-gray-500">Workflow: </span>
+                  <strong>{String(dn.delivery_status || 'Draft')}</strong>
+                  {dnLocked ? <span className="ml-1 text-amber-800">(delivered)</span> : null}
+                </div>
+                {timeline ? (
+                  <ul className="mt-1.5 space-y-0.5 text-[10px] text-gray-700">
+                    <li>
+                      <span className="text-gray-500">Confirmed: </span>
+                      {fmtDt(timeline.confirmed_at)}
+                    </li>
+                    <li>
+                      <span className="text-gray-500">Opened by driver: </span>
+                      {fmtDt(timeline.driver_opened_at)}
+                    </li>
+                    <li>
+                      <span className="text-gray-500">Pickup: </span>
+                      {fmtDt(timeline.pickup_confirmed_at)}
+                    </li>
+                    <li>
+                      <span className="text-gray-500">POD uploaded: </span>
+                      {fmtDt(timeline.pod_uploaded_at)}
+                    </li>
+                    <li>
+                      <span className="text-gray-500">Closed: </span>
+                      {fmtDt(timeline.closed_at)}
+                    </li>
+                  </ul>
+                ) : null}
+              </section>
+            ) : null}
+
+            {error ? <div className="text-xs text-red-600 px-1">{error}</div> : null}
+            {canEditDn && dn && !dnLocked ? (
+              <div className="flex flex-wrap gap-3 px-1">
+                <button
+                  type="button"
+                  className="text-[10px] text-gray-600 underline inline-flex items-center gap-0.5"
+                  onClick={openInvoiceEditOnly}
+                >
+                  <Pencil size={11} />
+                  Edit invoice number
+                </button>
+                <button
+                  type="button"
+                  className="text-[10px] text-gray-600 underline inline-flex items-center gap-0.5"
+                  onClick={openPackageEditOnly}
+                >
+                  <Pencil size={11} />
+                  Edit packaging &amp; volume
+                </button>
+                {needsExportDocFlowBeforePdf() ? (
+                  <button
+                    type="button"
+                    className="text-[10px] text-gray-600 underline"
+                    onClick={() => openExportDocFlowModal()}
+                  >
+                    Upload invoice to Drive (optional)
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
+            <section className="dn-control-card">
+              <div className="dn-control-card-title">Actions</div>
+              <div className="dn-action-grid relative z-10">
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center justify-center gap-1"
+                  disabled={!dn || !canDownloadDn}
+                  onClick={() => {
+                    setSaveDriveDup(null);
+                    setDownloadActionMode(canEditDn ? 'both' : 'download');
+                    setDownloadActionOpen(true);
+                  }}
+                >
+                  <Printer size={12} />
+                  Save PDF
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center justify-center gap-1"
+                  onClick={handlePrintA4}
+                  disabled={!dn}
+                >
+                  <Printer size={12} />
+                  Print
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center justify-center gap-1"
+                  onClick={handleExportExcel}
+                  disabled={!dn || !canDownloadDn}
+                >
+                  <FileSpreadsheet size={12} />
+                  Export Excel
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center justify-center gap-1 border-emerald-700/30 bg-emerald-50/80"
+                  disabled={!dn || !canDownloadDn}
+                  onClick={openCustomerWhatsAppDialog}
+                >
+                  <MessageCircle size={12} />
+                  WhatsApp
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={toggleHold}
+                  disabled={!canEditDn || !dn || dnLocked}
+                >
+                  {String(dn?.status || '').toLowerCase() === 'on hold' ? 'Resume Hold' : 'Hold'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center justify-center gap-1"
+                  onClick={deliver}
+                  disabled={!canEditDn || !dn}
+                >
+                  <CheckCircle2 size={12} />
+                  Mark Delivered
+                </button>
+                {isGapp && dn && !dn.confirmed_at && canEditDn && !dnLocked ? (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={!gappCanConfirm}
+                    onClick={handleConfirmForDelivery}
+                    title={!gappCanConfirm ? gappMissingConfirmReasons?.join('; ') : 'Notify driver'}
+                  >
+                    Confirm for delivery
+                  </button>
+                ) : null}
+                {trim(dn?.gapp_po || dn?.sales_order_number || view?.gapp_po) ? (
+                  <Link
+                    className="btn-secondary text-center col-span-2"
+                    to={`/document-workflow?ob=${encodeURIComponent(trim(dn?.outbound_number || ''))}&so=${encodeURIComponent(
+                      trim(dn?.gapp_po || dn?.sales_order_number || view?.gapp_po)
+                    )}`}
+                  >
+                    Document Workflow
+                  </Link>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="dn-control-card">
+              <div className="dn-control-card-title">On hold</div>
+              {holdRows?.length ? (
+                <div className="flex flex-wrap gap-1">
+                  {holdRows.slice(0, 12).map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      className="btn-secondary text-[9px] px-1.5 py-0.5"
+                      onClick={() => {
+                        const ob = r.outbound_number || '';
+                        setOutboundNumber(ob);
+                        void load(ob);
+                      }}
+                    >
+                      {r.outbound_number}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[10px] text-gray-500">No held delivery notes.</p>
+              )}
+            </section>
           </div>
-        ) : (
-          <div className="text-[11px] text-gray-500">No held delivery notes.</div>
-        )}
+        </aside>
+
+        <section
+          className={`dn-preview-panel${mobilePanel !== 'preview' ? ' dn-panel-hidden-mobile' : ''}`}
+          aria-label="Delivery note preview"
+        >
+          <div className="dn-preview-toolbar">
+            <span className="text-[10px] font-bold text-gray-800 mr-1">Live preview</span>
+            {dn ? (
+              <span className="text-[10px] text-gray-500 font-mono truncate max-w-[12rem]">
+                {trim(dn.outbound_number) || '—'}
+              </span>
+            ) : (
+              <span className="text-[10px] text-gray-500">Load a delivery note</span>
+            )}
+            <button
+              type="button"
+              className="btn-secondary text-[10px] py-0.5 px-2 ml-auto"
+              onClick={handlePrintA4}
+              disabled={!dn}
+            >
+              <Printer size={12} className="inline mr-0.5" />
+              Print
+            </button>
+            <details className="text-[10px] relative">
+              <summary className="cursor-pointer font-semibold text-gray-700 select-none">Page setup</summary>
+              <div className="absolute right-0 z-10 mt-1 p-2 bg-white border rounded-lg shadow-lg grid gap-2 min-w-[200px]">
+                <label className="flex flex-col gap-0.5">
+                  Margin (mm)
+                  <input
+                    type="number"
+                    min={4}
+                    max={22}
+                    className="input-field"
+                    value={printPageMarginMm}
+                    onChange={(e) => setPrintPageMarginMm(Number(e.target.value))}
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  Scale (%)
+                  <input
+                    type="number"
+                    min={72}
+                    max={100}
+                    className="input-field"
+                    value={printZoomPercent}
+                    onChange={(e) => setPrintZoomPercent(Number(e.target.value))}
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={printCompactTable}
+                    onChange={(e) => setPrintCompactTable(e.target.checked)}
+                  />
+                  Compact table
+                </label>
+              </div>
+            </details>
+          </div>
+          <div className="dn-preview-scroll">
+
+      {/* A4 Printable DN */}
+      <div className={`dn-wrap bg-white border rounded-xl shadow-sm p-4${printCompactTable ? ' dn-print-compact' : ''}`}>
+        <div className="dn-page" aria-label="Delivery Note A4 Page">
+          <div className="dn-page-scaled">
+          <div className="dn-page-main">
+          <div className="dn-page-body">
+          {/* TOP HEADER */}
+          <div className="dn-top">
+            <div className="dn-company">
+              <img className="dn-logo" src="/LOGO.png" alt="Gulf Applications (GAPP)" />
+              <div className="dn-company-text">
+                <div className="dn-company-name dn-company-name-red">Gulf Applications</div>
+                <div className="dn-company-address">
+                  Apartment 5001, 50th Floor, Kingdom Tower
+                  <br />
+                  P.O Box 89098, Riyadh, Saudi Arabia
+                </div>
+                <div className="dn-company-contact-lines">
+                  <div>Tel.: +966 11 47 28 256</div>
+                  <div>Fax: +966 11 47 81 503</div>
+                  <a className="dn-company-site" href="https://www.gapp.sa" target="_blank" rel="noreferrer">
+                    https://www.gapp.sa
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            <div className="dn-title-block">
+              <div className="dn-title">DELIVERY NOTE</div>
+            </div>
+
+            <div className="dn-right-stack">
+              <div className="dn-headgrid" role="table" aria-label="DN Header Fields">
+                {(isHuaweiDn
+                  ? [
+                      ['DATE', formatDateDDMMYYYY(view?.dn_date)],
+                      ['CUSTOMER PO', view?.customer_po || ''],
+                      ['OUTBOUND', view?.outbound_number || ''],
+                      ['INVOICE', invoiceForPrint],
+                      ['SO NUMBER', view?.sales_order_number || ''],
+                    ]
+                  : [
+                      ['DATE', formatDateDDMMYYYY(view?.dn_date)],
+                      ['GAPP PO', view?.gapp_po || ''],
+                      ['CUSTOMER PO', view?.customer_po || ''],
+                      ['OUTBOUND', view?.outbound_number || ''],
+                      ['INVOICE', invoiceForPrint],
+                    ]
+                ).map(([k, v], idx) => (
+                  <div className="dn-headrow" role="row" key={k || `spacer-${idx}`}>
+                    <div className="dn-headkey" role="cell">
+                      {k}
+                    </div>
+                    <div className="dn-headval" role="cell">
+                      {v}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="dn-spo-only">
+                <div className="dn-spo-row">
+                  <div className="dn-spo-key">SPO</div>
+                  <div className="dn-spo-val">{isHuaweiDn ? 'B2B' : (view?.spo || '—')}</div>
+                </div>
+                {isHuaweiDn && (
+                  <div className="dn-spo-row" style={{ marginTop: '4px' }}>
+                    <div className="dn-spo-key">CONTRACT</div>
+                    <div className="dn-spo-val">{view?.huawei_contract || '—'}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* DELIVERY + CONTACTS — shared label column so “Delivery to” lines up with Contact Person */}
+          <div className="dn-address-contact-block">
+            <div className="dn-delivery">
+              <div className="dn-delivery-left">
+                <div className="lbl">Delivery to:</div>
+              </div>
+              <div className="dn-delivery-content">
+                {String(view?.customer_name || '').trim() ? (
+                  <div className="dn-delivery-name">{view.customer_name}</div>
+                ) : null}
+                {String(view?.delivery_address || '').trim() ? (
+                  <div className="dn-delivery-addr">{view.delivery_address}</div>
+                ) : null}
+                {String(view?.city_name || '').trim() ? (
+                  <div className="dn-delivery-addr">{view.city_name}</div>
+                ) : null}
+                {String(view?.gps || '').trim() ? (
+                  <a className="dn-link dn-no-print" href={view.gps} target="_blank" rel="noreferrer">
+                    {view.gps}
+                  </a>
+                ) : null}
+              </div>
+            </div>
+
+            {isHuaweiDn && String(view?.reseller_name || '').trim() && trim(view?.reseller_name) !== trim(view?.customer_name) ? (
+              <div className="dn-delivery dn-delivery-reseller">
+                <div className="dn-delivery-left">
+                  <div className="lbl">Delivery (reseller):</div>
+                </div>
+                <div className="dn-delivery-content">
+                  <div className="dn-delivery-name">{view.reseller_name}</div>
+                </div>
+              </div>
+            ) : null}
+
+            {String(view?.contact_person || '').trim() || String(view?.contact_number || '').trim() ? (
+              <div className="dn-contact dn-contact-1row">
+                <div className="lbl">Contact Person:</div>
+                <div className="dn-inline-underline">
+                  <span className="dn-under-text">
+                    {[view?.contact_person, view?.contact_number].filter(Boolean).join(' - ')}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+
+            {String(view?.contact_person_2 || '').trim() || String(view?.contact_number_2 || '').trim() ? (
+              <div className="dn-contact dn-contact-2">
+                <div className="lbl">Contact Person:</div>
+                <div className="dn-inline-underline">
+                  <span className="dn-under-text">
+                    {[view?.contact_person_2, view?.contact_number_2].filter(Boolean).join(' - ')}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+
+            {String(view?.deliver_to_remarks || '').trim() ? (
+              <div className="dn-contact dn-contact-remarks">
+                <div className="lbl">Delivery remarks:</div>
+                <div className="dn-inline-underline">
+                  <span className="dn-under-text whitespace-pre-wrap">{String(view.deliver_to_remarks).trim()}</span>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          {/* ITEM TABLE */}
+          <table className="dn-grid">
+            <thead className="dn-items-thead">
+              <tr>
+                {isHuaweiDn ? (
+                  <SortTh
+                    bare
+                    columnKey="box_name"
+                    sortKey={dnItemSortKey}
+                    direction={dnItemDir}
+                    onSort={dnItemRequestSort}
+                    style={{ width: '12%' }}
+                  >
+                    Box
+                  </SortTh>
+                ) : (
+                  <th style={{ width: '6%' }}>Item #</th>
+                )}
+                <SortTh
+                  bare
+                  columnKey="part_number"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '18%' }}
+                >
+                  Part Number
+                </SortTh>
+                <SortTh bare columnKey="description" sortKey={dnItemSortKey} direction={dnItemDir} onSort={dnItemRequestSort}>
+                  Description
+                </SortTh>
+                <SortTh
+                  bare
+                  columnKey="qty"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '8%' }}
+                >
+                  Qty
+                </SortTh>
+                <SortTh
+                  bare
+                  columnKey="uom"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '8%' }}
+                >
+                  UOM
+                </SortTh>
+                <SortTh
+                  bare
+                  columnKey="serial_no"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '14%' }}
+                >
+                  Serial No.
+                </SortTh>
+                <SortTh
+                  bare
+                  columnKey="condition"
+                  sortKey={dnItemSortKey}
+                  direction={dnItemDir}
+                  onSort={dnItemRequestSort}
+                  style={{ width: '12%' }}
+                >
+                  Condition
+                </SortTh>
+              </tr>
+            </thead>
+            <tbody>
+              {displayItems.map((it, idx) => (
+                <tr key={`${it.box_name || ''}-${it.part_number}-${idx}`} className="dn-row">
+                  {isHuaweiDn ? (
+                    <td className="c font-mono text-[10px]">{it.box_name || '—'}</td>
+                  ) : (
+                    <td className="c">{idx + 1}</td>
+                  )}
+                  <td>{it.part_number || ''}</td>
+                  <td>{it.description || ''}</td>
+                  <td className="c">{it.qty}</td>
+                  <td className="c">{it.uom || ''}</td>
+                  <td className="c">{isHuaweiDn ? '-' : it.serial_no || '-'}</td>
+                  <td className="c">{it.condition_text || it.condition || 'New'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {/* BOTTOM SUMMARY LINE + Checked by (one line, below volume column) */}
+          <div className="dn-summary-block">
+            <div className="dn-summary-cell">
+              Total: <strong>{packageText || ''}</strong>
+            </div>
+            <div className="dn-summary-cell">
+              gross weight(KG): <strong>{packageWeightDisplay}</strong>
+            </div>
+            <div className="dn-summary-cell">
+              volume(CBM): <strong>{packageVolumeDisplay}</strong>
+            </div>
+            <div className="dn-checked-by-line">
+              <span className="dn-checked-by-label">Checked by:</span>
+              <span className="dn-checked-by-name">{checkedByDisplayName}</span>
+            </div>
+          </div>
+
+          {/* Transportation */}
+          {transportRenderLines.length ? (
+            <div className="dn-transport">
+              <div className="dn-transport-inner">
+                {transportRenderLines.map((l, idx) => (
+                  <div className="dn-transport-row" key={idx}>
+                    <div className="k">{l.k}</div>
+                    <div className="v">{l.v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="dn-transport dn-transport-empty">
+              <div className="dn-transport-inner">Transportation Method not set.</div>
+            </div>
+          )}
+
+          </div>
+
+          {/* RECEIVER SECTION — left 60% fields, right 38% stamp */}
+          <div className="dn-receiver">
+            <div className="cap">
+              Below fields are mandatory to be filled by the Receiver; stated particulars must be true and correct.
+            </div>
+            <div className="dn-receiver-body">
+              <div className="dn-receiver-col-fields">
+                <div className="rrow">
+                  <div className="k">NAME</div>
+                  <div className="u" />
+                </div>
+                <div className="rrow">
+                  <div className="k">SIGN</div>
+                  <div className="u" />
+                </div>
+                <div className="rrow">
+                  <div className="k">Mobile no.</div>
+                  <div className="u" />
+                </div>
+                <div className="rrow">
+                  <div className="k">DATE</div>
+                  <div className="u" />
+                </div>
+              </div>
+              <div className="dn-receiver-col-stamp" aria-hidden="true">
+                <div className="dn-stamp-watermark">STAMP</div>
+              </div>
+            </div>
+          </div>
+
+          </div>
+          </div>
+        </div>
+        <div className="dn-page-counter" aria-label="Page number" />
       </div>
+
+          </div>
+        </section>
+      </div>
+
+
+      <DnPodUploadModal
+        open={podUploadOpen}
+        onClose={() => {
+          setPodUploadOpen(false);
+          setPodInitialFile(null);
+        }}
+        dnId={dnId}
+        initialFile={podInitialFile}
+        onSuccess={async () => {
+          setPodInitialFile(null);
+          if (dnId) await refreshDnOnly(dnId, { silent: true });
+        }}
+      />
+
+      {exportDocFlowOpen && dn ? (
+        <div className="dn-no-print fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl shadow-lg max-w-lg w-full p-5 border text-sm max-h-[90vh] overflow-y-auto">
+            <h3 className="text-sm font-bold text-gray-900">Export PDF — Invoice &amp; Accounting</h3>
+            <p className="text-[11px] text-gray-600 mt-2">
+              Outbound <strong className="font-mono">{trim(dn.outbound_number)}</strong>. Enter invoice and accounting document
+              numbers before printing or saving the delivery note PDF. Optional: upload files or paste accounting screenshot.
+            </p>
+            <div className="mt-4 space-y-3">
+              <div className="rounded-lg border border-gray-200 bg-gray-50/80 p-3 space-y-2">
+                <p className="text-[10px] font-bold text-gray-700 uppercase tracking-wide">Step 1 — Reference numbers</p>
+                <label className="text-[10px] font-bold text-gray-600 flex flex-col">
+                  Invoice number *
+                  <input
+                    className="input-field mt-0.5 bg-white"
+                    value={exportInvoiceNumber}
+                    onChange={(e) => setExportInvoiceNumber(e.target.value)}
+                    placeholder="e.g. INV-2026-001"
+                  />
+                </label>
+                <label className="text-[10px] font-bold text-gray-600 flex flex-col">
+                  Accounting document number *
+                  <input
+                    className="input-field mt-0.5 bg-white"
+                    value={exportAccountingNumber}
+                    onChange={(e) => {
+                      setExportAccountingNumber(e.target.value);
+                      if (!e.target.value.trim()) {
+                        exportAccPasteBlobRef.current = null;
+                        setExportAccPasteReady(false);
+                      }
+                    }}
+                    placeholder="SAP / voucher reference"
+                  />
+                </label>
+              </div>
+
+              <div className="rounded-lg border border-violet-200 bg-violet-50/50 p-3 space-y-2">
+                <p className="text-[10px] font-bold text-violet-900 uppercase tracking-wide">Step 2 — Upload or paste</p>
+                <label className="text-[10px] font-bold text-gray-600 flex flex-col">
+                  <span className="inline-flex items-center gap-1">
+                    <Upload size={12} /> Upload invoice (PDF or image)
+                  </span>
+                  <input
+                    type="file"
+                    className="mt-0.5 text-[11px] bg-white rounded border border-gray-200 px-2 py-1"
+                    accept=".pdf,.jpg,.jpeg,.png"
+                    onChange={(e) => setExportInvoiceFile(e.target.files?.[0] || null)}
+                  />
+                  {exportInvoiceFile ? (
+                    <span className="text-[10px] text-emerald-800 mt-0.5">{exportInvoiceFile.name}</span>
+                  ) : (
+                    <span className="text-[10px] text-gray-500 mt-0.5 font-normal">Optional</span>
+                  )}
+                </label>
+                <label className="text-[10px] font-bold text-gray-600 flex flex-col">
+                  <span className="inline-flex items-center gap-1">
+                    <Upload size={12} /> Upload accounting document (PDF or image)
+                  </span>
+                  <input
+                    type="file"
+                    className="mt-0.5 text-[11px] bg-white rounded border border-gray-200 px-2 py-1"
+                    accept=".pdf,.jpg,.jpeg,.png"
+                    disabled={exportAccPasteReady}
+                    onChange={(e) => {
+                      setExportAccountingFile(e.target.files?.[0] || null);
+                      if (e.target.files?.[0]) {
+                        exportAccPasteBlobRef.current = null;
+                        setExportAccPasteReady(false);
+                      }
+                    }}
+                  />
+                  {exportAccountingFile ? (
+                    <span className="text-[10px] text-emerald-800 mt-0.5">{exportAccountingFile.name}</span>
+                  ) : (
+                    <span className="text-[10px] text-gray-500 mt-0.5 font-normal">Optional if you paste below</span>
+                  )}
+                </label>
+                <button
+                  type="button"
+                  className="btn-secondary w-full text-[11px] flex items-center justify-center gap-1.5"
+                  disabled={!exportAccountingNumber.trim() || exportDocFlowBusy}
+                  onClick={() => void pasteExportAccountingFromClipboard()}
+                >
+                  <ClipboardPaste size={14} />
+                  Paste accounting from clipboard
+                </button>
+                {exportAccPasteReady ? (
+                  <p className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-100 rounded px-2 py-1">
+                    Clipboard image ready for <strong className="font-mono">{exportAccountingNumber.trim()}</strong> — save to upload.
+                  </p>
+                ) : (
+                  <p className="text-[10px] text-gray-500">Enter accounting number first, copy screenshot, then paste.</p>
+                )}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2 mt-4 pt-2 border-t border-gray-100">
+              <button type="button" className="btn-primary" disabled={exportDocFlowBusy} onClick={() => void submitExportDocFlow()}>
+                {exportDocFlowBusy ? 'Saving to Drive…' : 'Save to Google Drive'}
+              </button>
+              <Link
+                to={`/document-flow/${encodeURIComponent(trim(dn.outbound_number))}`}
+                className="btn-secondary"
+                onClick={() => closeExportDocFlowModal()}
+              >
+                Open Document Flow
+              </Link>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  const after = exportDocFlowOnCompleteRef.current;
+                  exportDocFlowOnCompleteRef.current = null;
+                  closeExportDocFlowModal();
+                  exportAccPasteBlobRef.current = null;
+                  setExportAccPasteReady(false);
+                  if (after) after();
+                }}
+              >
+                {exportDocFlowHasFollowUp ? 'Continue without Drive upload' : 'Close'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {exportDocDup ? (
+        <div className="dn-no-print fixed inset-0 z-[55] flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl shadow-lg max-w-md w-full p-5 border text-sm">
+            <h3 className="font-bold text-gray-900">File already exists — {exportDocDup.label}</h3>
+            <p className="text-[11px] text-gray-600 mt-2">
+              <code className="font-mono">{exportDocDup.existing?.stored_file_name}</code> is already in Drive.
+            </p>
+            <div className="flex flex-col gap-2 mt-4">
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={exportDocFlowBusy}
+                onClick={() => {
+                  setExportDocDup(null);
+                  void exportDocDup.resume('replace');
+                }}
+              >
+                Replace — overwrite existing file
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={exportDocFlowBusy}
+                onClick={() => {
+                  setExportDocDup(null);
+                  void exportDocDup.resume('append');
+                }}
+              >
+                Append — keep both (second file name)
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => setExportDocDup(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {downloadActionOpen && dn ? (
+        <div className="dn-no-print fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl shadow-lg max-w-md w-full p-5 border text-sm">
+            <h3 className="text-sm font-bold text-gray-900">Choose action</h3>
+            <div className="mt-3 space-y-2 text-[11px]">
+              {[
+                { id: 'download', label: 'Download PDF only' },
+                ...(canEditDn
+                  ? [
+                      { id: 'drive', label: 'Save PDF to Google Drive only' },
+                      { id: 'both', label: 'Save to Google Drive + Download PDF' },
+                    ]
+                  : []),
+              ].map((o) => (
+                <label key={o.id} className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="dn-dl-mode"
+                    checked={downloadActionMode === o.id}
+                    onChange={() => setDownloadActionMode(o.id)}
+                  />
+                  {o.label}
+                </label>
+              ))}
+            </div>
+            <dl className="mt-3 text-[11px] space-y-1 text-gray-800">
+              <div className="flex gap-2">
+                <dt className="font-semibold w-28">Sales Order</dt>
+                <dd>{trim(dn.gapp_po || dn.sales_order_number || view?.outbound_sales_doc) || '—'}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="font-semibold w-28">Outbound</dt>
+                <dd>{trim(dn.outbound_number) || '—'}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="font-semibold w-28">DN number</dt>
+                <dd>{trim(dn.dn_number) || String(dn.id)}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="font-semibold w-28">File preview</dt>
+                <dd className="font-mono text-[10px] break-all">{dnDrivePreviewName}</dd>
+              </div>
+            </dl>
+            {saveDriveDup ? (
+              <p className="mt-3 text-amber-800 text-[11px]">
+                Existing file: <code>{saveDriveDup.stored_file_name}</code>
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-2 mt-4">
+              {saveDriveDup ? (
+                <>
+                  <button type="button" className="btn-primary" disabled={saveDriveBusy} onClick={() => void runDownloadSaveAction('replace')}>
+                    Replace existing
+                  </button>
+                  <button type="button" className="btn-secondary" disabled={saveDriveBusy} onClick={() => void runDownloadSaveAction('append')}>
+                    Append (second file name)
+                  </button>
+                </>
+              ) : (
+                <button type="button" className="btn-primary" disabled={saveDriveBusy} onClick={() => void handleDownloadSaveContinue()}>
+                  {saveDriveBusy ? 'Working…' : 'Continue'}
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setDownloadActionOpen(false);
+                  setSaveDriveDup(null);
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showPackageEditOnly && dn ? (
+        <div
+          className="dn-no-print fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dn-package-edit-title"
+        >
+          <div className="bg-white rounded-xl shadow-lg max-w-md w-full p-5 border">
+            <h3 id="dn-package-edit-title" className="text-sm font-bold text-gray-900">
+              Edit packaging &amp; volume
+            </h3>
+            <p className="text-[11px] text-gray-600 mt-2">
+              Invoice: <span className="font-mono font-semibold">{effectiveInvoice || '—'}</span>
+              {!effectiveInvoice ? (
+                <span className="block text-amber-800 mt-1">Set invoice number first (Edit invoice).</span>
+              ) : null}
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3">
+              <select
+                className="input-field"
+                value={packageTypeDraft}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setPackageTypeDraft(v);
+                  if (isIgnorePackageType(v)) {
+                    setPackageQtyDraft('');
+                    setGrossWeightDraft('');
+                    setVolumeDraft('');
+                  }
+                }}
+              >
+                <option value="Pallet">Pallet</option>
+                <option value="Box">Box</option>
+                <option value="Ignore">Ignore</option>
+              </select>
+              <input
+                className="input-field"
+                placeholder="Package qty"
+                value={packageQtyDraft}
+                onChange={(e) => setPackageQtyDraft(e.target.value)}
+                disabled={isIgnorePackageType(packageTypeDraft)}
+              />
+              <input
+                className="input-field"
+                placeholder="Gross weight (kg)"
+                value={grossWeightDraft}
+                onChange={(e) => setGrossWeightDraft(e.target.value)}
+                disabled={isIgnorePackageType(packageTypeDraft)}
+              />
+              <input
+                className="input-field"
+                placeholder="Volume (CBM)"
+                value={volumeDraft}
+                onChange={(e) => setVolumeDraft(e.target.value)}
+                disabled={isIgnorePackageType(packageTypeDraft)}
+              />
+            </div>
+            <div className="flex flex-wrap gap-2 mt-4 justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={packageEditBusy}
+                onClick={() => setShowPackageEditOnly(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={packageEditBusy || !effectiveInvoice}
+                onClick={() => void savePackageEditOnly()}
+              >
+                {packageEditBusy ? 'Saving…' : 'Save packaging'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showInvoiceEditOnly && dn ? (
+        <div
+          className="dn-no-print fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dn-invoice-edit-title"
+        >
+          <div className="bg-white rounded-xl shadow-lg max-w-sm w-full p-5 border">
+            <h3 id="dn-invoice-edit-title" className="text-sm font-bold text-gray-900">
+              {hasInvoice ? 'Edit invoice number' : 'Add invoice number'}
+            </h3>
+            <p className="text-[11px] text-gray-600 mt-2">
+              Updates the invoice on this delivery note and the linked outbound order.
+            </p>
+            <input
+              className="input-field w-full mt-3"
+              placeholder="Invoice #"
+              value={invoiceDraft}
+              onChange={(e) => setInvoiceDraft(e.target.value)}
+              autoFocus
+            />
+            <div className="flex flex-wrap gap-2 mt-4 justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={invoiceEditBusy}
+                onClick={() => setShowInvoiceEditOnly(false)}
+              >
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" disabled={invoiceEditBusy} onClick={() => void saveInvoiceOnly()}>
+                {invoiceEditBusy ? 'Saving…' : 'Save invoice'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showInvoicePrompt && dn ? (
         <div
@@ -1337,10 +2778,20 @@ export default function DeliveryNote() {
         >
           <div className="bg-white rounded-xl shadow-lg max-w-md w-full p-5 border">
             <h3 id="dn-invoice-dialog-title" className="text-sm font-bold text-gray-900">
-              Invoice & Package
+              {invoicePromptPurpose === 'deliver' ? 'Before marking delivered' : 'Invoice & package'}
             </h3>
             <p className="text-sm text-gray-600 mt-2">
-              Invoice Number and Package Type are required before marking Delivered.
+              {invoicePromptPurpose === 'deliver' ? (
+                <>
+                  Confirm invoice and packaging (quantity, weight, volume). Uploading files to Drive is{' '}
+                  <strong>not</strong> required here — use Document Workflow when you need that.
+                </>
+              ) : (
+                <>
+                  Invoice number is required. Choose <strong>Ignore</strong> for package type if you do not need pallet/box
+                  quantity, weight, or volume on this delivery note.
+                </>
+              )}
             </p>
             <input
               className="input-field w-full mt-3"
@@ -1350,7 +2801,19 @@ export default function DeliveryNote() {
               autoFocus
             />
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-3">
-              <select className="input-field" value={packageTypeDraft} onChange={(e) => setPackageTypeDraft(e.target.value)}>
+              <select
+                className="input-field"
+                value={packageTypeDraft}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setPackageTypeDraft(v);
+                  if (isIgnorePackageType(v)) {
+                    setPackageQtyDraft('');
+                    setGrossWeightDraft('');
+                    setVolumeDraft('');
+                  }
+                }}
+              >
                 <option value="Pallet">Pallet</option>
                 <option value="Box">Box</option>
                 <option value="Ignore">Ignore</option>
@@ -1360,27 +2823,41 @@ export default function DeliveryNote() {
                 placeholder="Package Qty"
                 value={packageQtyDraft}
                 onChange={(e) => setPackageQtyDraft(e.target.value)}
-                disabled={packageTypeDraft === 'Ignore'}
+                disabled={isIgnorePackageType(packageTypeDraft)}
               />
               <input
                 className="input-field"
                 placeholder="gross weight(KG)"
                 value={grossWeightDraft}
                 onChange={(e) => setGrossWeightDraft(e.target.value)}
+                disabled={isIgnorePackageType(packageTypeDraft)}
               />
               <input
                 className="input-field"
                 placeholder="volume(CBM)"
                 value={volumeDraft}
                 onChange={(e) => setVolumeDraft(e.target.value)}
+                disabled={isIgnorePackageType(packageTypeDraft)}
               />
             </div>
             <div className="flex flex-wrap gap-2 mt-4 justify-end">
-              <button type="button" className="btn-secondary" onClick={() => setShowInvoicePrompt(false)}>
-                Ignore for now
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  invoicePromptAfterRef.current = null;
+                  setInvoicePromptPurpose('general');
+                  setShowInvoicePrompt(false);
+                }}
+              >
+                {invoicePromptPurpose === 'deliver' ? 'Cancel' : 'Ignore for now'}
               </button>
               <button type="button" className="btn-primary" onClick={saveInvoiceFromModal}>
-                Save invoice
+                {invoicePromptPurpose === 'deliver'
+                  ? 'Save & mark delivered'
+                  : isIgnorePackageType(packageTypeDraft)
+                    ? 'Save invoice only'
+                    : 'Save invoice & package'}
               </button>
             </div>
           </div>
@@ -2132,249 +3609,6 @@ export default function DeliveryNote() {
         </div>
       ) : null}
 
-      {/* A4 Printable DN */}
-      <div className={`dn-wrap bg-white border rounded-xl shadow-sm p-4${printCompactTable ? ' dn-print-compact' : ''}`}>
-        <div className="dn-page" aria-label="Delivery Note A4 Page">
-          <div className="dn-page-body">
-          {/* TOP HEADER */}
-          <div className="dn-top">
-            <div className="dn-company">
-              <img className="dn-logo" src="/LOGO.png" alt="Gulf Applications (GAPP)" />
-              <div className="dn-company-text">
-                <div className="dn-company-name dn-company-name-red">Gulf Applications</div>
-                <div className="dn-company-address">
-                  Apartment 5001, 50th Floor, Kingdom Tower
-                  <br />
-                  P.O Box 89098, Riyadh, Saudi Arabia
-                </div>
-                <div className="dn-company-contact-lines">
-                  <div>Tel.: +966 11 47 28 256</div>
-                  <div>Fax: +966 11 47 81 503</div>
-                  <a className="dn-company-site" href="https://www.gapp.sa" target="_blank" rel="noreferrer">
-                    https://www.gapp.sa
-                  </a>
-                </div>
-              </div>
-            </div>
-
-            <div className="dn-title-block">
-              <div className="dn-title">DELIVERY NOTE</div>
-            </div>
-
-            <div className="dn-right-stack">
-              <div className="dn-headgrid" role="table" aria-label="DN Header Fields">
-                {[
-                  ['DATE', view?.dn_date || ''],
-                  ['GAPP PO', view?.gapp_po || ''],
-                  ['CUSTOMER PO', view?.customer_po || ''],
-                  ['OUTBOUND', view?.outbound_number || ''],
-                  ['INVOICE', invoiceForPrint],
-                ].map(([k, v]) => (
-                  <div className="dn-headrow" role="row" key={k}>
-                    <div className="dn-headkey" role="cell">
-                      {k}
-                    </div>
-                    <div className="dn-headval" role="cell">
-                      {v}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Only SPO is boxed — vendor is resolved from the first item's part number */}
-              <div className="dn-spo-only">
-                <div className="dn-spo-row">
-                  <div className="dn-spo-key">SPO</div>
-                  <div className="dn-spo-val">{view?.spo || '—'}</div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* DELIVERY + CONTACTS — shared label column so “Delivery to” lines up with Contact Person */}
-          <div className="dn-address-contact-block">
-            <div className="dn-delivery">
-              <div className="dn-delivery-left">
-                <div className="lbl">Delivery to:</div>
-              </div>
-              <div className="dn-delivery-content">
-                {String(view?.customer_name || '').trim() ? (
-                  <div className="dn-delivery-name">{view.customer_name}</div>
-                ) : null}
-                {String(view?.delivery_address || '').trim() ? (
-                  <div className="dn-delivery-addr">{view.delivery_address}</div>
-                ) : null}
-                {String(view?.city_name || '').trim() ? (
-                  <div className="dn-delivery-addr">{view.city_name}</div>
-                ) : null}
-                {String(view?.gps || '').trim() ? (
-                  <a className="dn-link dn-no-print" href={view.gps} target="_blank" rel="noreferrer">
-                    {view.gps}
-                  </a>
-                ) : null}
-              </div>
-            </div>
-
-            {String(view?.contact_person || '').trim() || String(view?.contact_number || '').trim() ? (
-              <div className="dn-contact dn-contact-1row">
-                <div className="lbl">Contact Person:</div>
-                <div className="dn-inline-underline">
-                  <span className="dn-under-text">
-                    {[view?.contact_person, view?.contact_number].filter(Boolean).join(' - ')}
-                  </span>
-                </div>
-              </div>
-            ) : null}
-
-            {String(view?.contact_person_2 || '').trim() || String(view?.contact_number_2 || '').trim() ? (
-              <div className="dn-contact dn-contact-2">
-                <div className="lbl">Contact Person:</div>
-                <div className="dn-inline-underline">
-                  <span className="dn-under-text">
-                    {[view?.contact_person_2, view?.contact_number_2].filter(Boolean).join(' - ')}
-                  </span>
-                </div>
-              </div>
-            ) : null}
-
-            {String(view?.deliver_to_remarks || '').trim() ? (
-              <div className="dn-contact dn-contact-remarks">
-                <div className="lbl">Delivery remarks:</div>
-                <div className="dn-inline-underline">
-                  <span className="dn-under-text whitespace-pre-wrap">{String(view.deliver_to_remarks).trim()}</span>
-                </div>
-              </div>
-            ) : null}
-          </div>
-
-          {/* ITEM TABLE */}
-          <table className="dn-grid">
-            <thead>
-              <tr>
-                <th style={{ width: '6%' }}>Item #</th>
-                <SortTh
-                  bare
-                  columnKey="part_number"
-                  sortKey={dnItemSortKey}
-                  direction={dnItemDir}
-                  onSort={dnItemRequestSort}
-                  style={{ width: '18%' }}
-                >
-                  Part Number
-                </SortTh>
-                <SortTh bare columnKey="description" sortKey={dnItemSortKey} direction={dnItemDir} onSort={dnItemRequestSort}>
-                  Description
-                </SortTh>
-                <SortTh
-                  bare
-                  columnKey="qty"
-                  sortKey={dnItemSortKey}
-                  direction={dnItemDir}
-                  onSort={dnItemRequestSort}
-                  style={{ width: '8%' }}
-                >
-                  Qty
-                </SortTh>
-                <SortTh
-                  bare
-                  columnKey="uom"
-                  sortKey={dnItemSortKey}
-                  direction={dnItemDir}
-                  onSort={dnItemRequestSort}
-                  style={{ width: '8%' }}
-                >
-                  UOM
-                </SortTh>
-                <SortTh
-                  bare
-                  columnKey="serial_no"
-                  sortKey={dnItemSortKey}
-                  direction={dnItemDir}
-                  onSort={dnItemRequestSort}
-                  style={{ width: '14%' }}
-                >
-                  Serial No.
-                </SortTh>
-                <SortTh
-                  bare
-                  columnKey="condition"
-                  sortKey={dnItemSortKey}
-                  direction={dnItemDir}
-                  onSort={dnItemRequestSort}
-                  style={{ width: '12%' }}
-                >
-                  Condition
-                </SortTh>
-              </tr>
-            </thead>
-            <tbody>
-              {displayItems.map((it, idx) => (
-                <tr key={`${it.part_number}-${idx}`} className="dn-row">
-                  <td className="c">{idx + 1}</td>
-                  <td>{it.part_number || ''}</td>
-                  <td>{it.description || ''}</td>
-                  <td className="c">{it.qty}</td>
-                  <td className="c">{it.uom || ''}</td>
-                  <td className="c">{it.serial_no || '-'}</td>
-                  <td className="c">{it.condition_text || it.condition || 'New'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {/* BOTTOM SUMMARY LINE */}
-          <div className="dn-summary">
-            <div>
-              Total: <strong>{packageText || ''}</strong>
-            </div>
-            <div>
-              gross weight(KG): <strong>{Number(view?.gross_weight_kg || 0)}</strong>
-            </div>
-            <div>
-              volume(CBM): <strong>{Number(view?.volume_cbm || 0)}</strong>
-            </div>
-          </div>
-
-          {/* TRANSPORTATION DETAILS (replaces old static Delivered/Pickup/Name/Mobile/Carrier block) */}
-          {transportRenderLines.length ? (
-            <div className="dn-transport">
-              <div className="dn-transport-inner">
-                {transportRenderLines.map((l, idx) => (
-                  <div className="dn-transport-row" key={idx}>
-                    <div className="k">{l.k}</div>
-                    <div className="v">{l.v}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="dn-transport dn-transport-empty">
-              <div className="dn-transport-inner">Transportation Method not set.</div>
-            </div>
-          )}
-
-          {/* RECEIVER SECTION */}
-          <div className="dn-receiver">
-            <div className="cap">
-              Below fields are mandatory to be filled by the Receiver; stated particulars must be true and correct.
-            </div>
-            <div className="dn-receiver-body">
-              <div className="dn-receiver-left">
-                <div className="rrow"><div className="k">NAME</div><div className="u" /></div>
-                <div className="rrow"><div className="k">SIGN</div><div className="u" /></div>
-                <div className="rrow"><div className="k">Mobile no.</div><div className="u" /></div>
-                <div className="rrow"><div className="k">DATE</div><div className="u" /></div>
-              </div>
-              <div className="dn-receiver-stamp">
-                <div className="dn-stamp-watermark">STAMP</div>
-              </div>
-            </div>
-          </div>
-
-          {/* No extra receiver name footer (already captured above) */}
-          </div>
-        </div>
-      </div>
 
       {/* Print CSS */}
       <style>{`
@@ -2392,8 +3626,17 @@ export default function DeliveryNote() {
           display: flex;
           flex-direction: column;
         }
+        .dn-page-scaled {
+          width: 100%;
+          transform-origin: top center;
+          display: flex;
+          flex-direction: column;
+        }
+        .dn-page-main {
+          flex: 0 0 auto;
+        }
         .dn-page-body {
-          flex: 1 1 auto;
+          flex: 0 0 auto;
           min-height: 0;
         }
         .dn-top {
@@ -2513,46 +3756,132 @@ export default function DeliveryNote() {
         .dn-inline-underline { min-height: 16px; }
         .dn-under-text { display: inline-block; border-bottom: 1px solid #000; padding-bottom: 2px; font-size: 10px; line-height: 1.1; }
 
-        .dn-grid { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; }
+        .dn-grid { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px; page-break-inside: auto; }
         .dn-grid th, .dn-grid td { border: 1px solid #000; padding: 4px 6px; }
         .dn-grid th { font-weight: 700; text-align: center; }
+        .dn-grid tbody tr { page-break-inside: auto; break-inside: auto; }
+        /* Line-items column headers: dim violet tint (matches bg-violet-50/50 panels on this page) */
+        .dn-grid thead.dn-items-thead th {
+          background-color: #ede9fe;
+          color: #111827;
+        }
         .dn-row { height: 28px; }
         .dn-grid .c { text-align: center; }
 
-        .dn-summary { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 11px; margin-top: 8px; }
-        .dn-summary strong { font-weight: 800; }
-        /* Transport block should sit directly under Total and align left (not centered). */
-        .dn-transport { margin-top: 2px; font-size: 11px; display: block; }
+        .dn-summary-block {
+          display: grid;
+          grid-template-columns: 1fr 1fr 1fr;
+          gap: 10px;
+          row-gap: 4px;
+          margin-top: 8px;
+          font-size: 11px;
+        }
+        .dn-summary-cell strong { font-weight: 800; }
+        .dn-checked-by-line {
+          grid-column: 3;
+          display: flex;
+          flex-direction: row;
+          flex-wrap: nowrap;
+          align-items: baseline;
+          justify-content: flex-end;
+          gap: 6px;
+          white-space: nowrap;
+          line-height: 1.3;
+          page-break-inside: avoid;
+          break-inside: avoid;
+        }
+        .dn-checked-by-label { font-weight: 700; flex-shrink: 0; }
+        .dn-checked-by-name { font-weight: 600; }
+        .dn-transport { margin-top: 6px; font-size: 11px; display: block; }
         .dn-transport-inner { width: 100%; max-width: none; min-width: 0; }
         .dn-transport-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; margin: 2px 0; }
         .dn-transport-row .k { font-weight: 700; text-align: left; padding-left: 0; }
         .dn-transport-row .v { min-height: 14px; }
         .dn-transport-empty { color: rgba(0,0,0,0.55); font-weight: 700; }
 
-        /* Increase gap after Delivered/Pickup/Name/Mobile/Carrier block (≈ +70%) */
-        .dn-receiver { border: 1px solid #000; margin-top: 20px; padding: 8px; font-size: 11px; }
-        .dn-receiver .cap { font-weight: 700; margin-bottom: 8px; }
-        .dn-receiver-body { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 16px; align-items: start; }
-        .dn-receiver-left { display: grid; gap: 10px; }
-        .dn-receiver .rrow { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 8px; }
-        .dn-receiver .k { font-weight: 700; }
-        .dn-receiver .u { border-bottom: 1px solid #000; height: 14px; }
-
-        .dn-receiver-stamp { display: flex; justify-content: flex-end; }
+        .dn-receiver {
+          border: 1px solid #000;
+          margin-top: 16px;
+          padding: 10px 10px 12px;
+          font-size: 11px;
+          page-break-inside: avoid;
+          break-inside: avoid;
+        }
+        .dn-receiver .cap {
+          font-weight: 700;
+          line-height: 1.45;
+          margin-bottom: 12px;
+        }
+        .dn-receiver-body {
+          display: grid;
+          grid-template-columns: 60% 38%;
+          column-gap: 2%;
+          align-items: start;
+        }
+        .dn-receiver-col-fields {
+          display: grid;
+          gap: 14px;
+          min-width: 0;
+          max-width: 100%;
+        }
+        .dn-receiver .rrow {
+          display: grid;
+          grid-template-columns: 88px minmax(0, 1fr);
+          align-items: end;
+          gap: 8px 10px;
+          min-height: 26px;
+          max-width: 100%;
+        }
+        .dn-receiver .k { font-weight: 700; line-height: 1.3; padding-bottom: 3px; white-space: nowrap; }
+        .dn-receiver .u {
+          border-bottom: 1px solid #000;
+          height: 16px;
+          min-height: 16px;
+          margin-bottom: 2px;
+          width: 100%;
+          max-width: 100%;
+          box-sizing: border-box;
+        }
+        .dn-receiver-col-stamp {
+          display: flex;
+          justify-content: center;
+          align-items: flex-start;
+          min-width: 0;
+          padding-top: 2px;
+        }
         .dn-stamp-watermark {
-          width: 150px;
-          height: 130px;
-          border: 2px solid rgba(0,0,0,0.1);
-          color: rgba(0,0,0,0.1);
+          width: 100%;
+          max-width: 140px;
+          height: 118px;
+          border: 2px dashed rgba(0,0,0,0.18);
+          color: rgba(0,0,0,0.12);
           display: flex;
           align-items: center;
           justify-content: center;
           font-weight: 800;
           letter-spacing: 1px;
-          font-size: 16px;
+          font-size: 14px;
           pointer-events: none;
+          box-sizing: border-box;
         }
 
+        /* Page x of y: counter lives outside zoomed .dn-page-scaled (Chrome print counters) */
+        .dn-page-counter {
+          display: none;
+          pointer-events: none;
+        }
+        .dn-preview-scroll .dn-page-counter {
+          display: block;
+          text-align: right;
+          font-size: 9px;
+          font-weight: 600;
+          color: #6b7280;
+          margin-top: 6px;
+          padding-right: 2px;
+        }
+        .dn-preview-scroll .dn-page-counter::after {
+          content: attr(data-dn-page-preview);
+        }
         /* @page margin is injected by dnPrintDynamicCss (Page setup) */
         @media print {
           /* Kill themed page gradients on in-tab print fallback (see index.css body / .app-shell). */
@@ -2585,7 +3914,6 @@ export default function DeliveryNote() {
             max-width: none !important;
             background: #fff !important;
           }
-          /* Single page when content fits: no forced full-page min-height (that caused a blank 2nd page) */
           .dn-page {
             box-sizing: border-box !important;
             width: 100% !important;
@@ -2597,20 +3925,95 @@ export default function DeliveryNote() {
             box-shadow: none !important;
             border: none !important;
             page-break-after: auto;
+          }
+          .dn-page-scaled {
             display: flex !important;
             flex-direction: column !important;
           }
-          /* Long tables: continue on additional sheets only when needed */
+          .dn-page-main {
+            flex: 0 0 auto !important;
+          }
+          .dn-summary-block {
+            display: grid !important;
+            grid-template-columns: 1fr 1fr 1fr !important;
+          }
+          .dn-checked-by-line {
+            grid-column: 3 !important;
+            display: flex !important;
+            flex-wrap: nowrap !important;
+            justify-content: flex-end !important;
+            white-space: nowrap !important;
+          }
           .dn-grid {
-            page-break-inside: auto;
+            page-break-inside: auto !important;
+          }
+          .dn-grid tbody tr {
+            page-break-inside: auto !important;
+            break-inside: auto !important;
           }
           .dn-grid thead {
             display: table-header-group;
           }
-          .btn-primary, .btn-secondary, header, aside, .dn-screen-toolbar, .dn-no-print { display: none !important; }
+          .dn-grid thead.dn-items-thead th {
+            background-color: #f3f4f6 !important;
+            color: #000 !important;
+            print-color-adjust: exact;
+            -webkit-print-color-adjust: exact;
+          }
+          .dn-receiver-body {
+            display: grid !important;
+            grid-template-columns: 60% 38% !important;
+            column-gap: 2% !important;
+          }
+          .dn-receiver-col-fields { max-width: 100% !important; }
+          .dn-receiver .u { max-width: 100% !important; }
+          .dn-preview-scroll .dn-page-counter {
+            display: none !important;
+          }
+          .dn-page-counter {
+            display: block !important;
+            position: fixed;
+            bottom: 4mm;
+            right: 0;
+            font-size: 9px;
+            font-weight: 600;
+            color: #000 !important;
+            z-index: 9999;
+            pointer-events: none;
+          }
+          .dn-page-counter::after {
+            content: counter(page) " of " counter(pages);
+          }
+          .btn-primary, .btn-secondary, header,
+          .dn-screen-header, .dn-control-panel, .dn-preview-toolbar,
+          .dn-mobile-tabs, .dn-no-print { display: none !important; }
+          .dn-screen-root, .dn-shell {
+            display: block !important;
+            max-height: none !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+          }
+          .dn-shell {
+            grid-template-columns: 1fr !important;
+          }
+          .dn-preview-panel, .dn-preview-scroll {
+            display: block !important;
+            overflow: visible !important;
+            padding: 0 !important;
+            border: none !important;
+            background: #fff !important;
+            max-height: none !important;
+          }
         }
       `}</style>
       <style>{dnPrintDynamicCss}</style>
+
+      <WhatsAppDnDialog
+        open={whatsappDialogOpen}
+        onClose={() => setWhatsappDialogOpen(false)}
+        dnId={dnId}
+        dn={dn}
+      />
     </div>
   );
 }

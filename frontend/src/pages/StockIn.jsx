@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, Download, Eye, Pencil, Plus, Trash2, Upload } from 'lucide-react';
+import { Copy, Download, Eye, FileDown, Pencil, Plus, Trash2, Upload } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { stockInApi } from '../services/api';
+import { stockInApi, vendorItemsApi, vendorsApi } from '../services/api';
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
 import { reportUploadError, reportUploadResult } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
+import { exportJsonToExcel } from '../utils/exportExcel';
 
 /**
  * Tab-separated (Excel paste) or comma-separated TXT/CSV; delimiter chosen per line.
@@ -67,15 +68,22 @@ const StockIn = () => {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({
     transaction_date: new Date().toISOString().slice(0, 10),
+    vendor_id: '',
+    vendor_name: '',
     part_number: '',
     sap_part_number: '',
     description: '',
+    uom: '',
     rack_location: '',
     qty_in: '',
     source_type: '',
     reference_no: '',
     remarks: '',
   });
+
+  const [vendors, setVendors] = useState([]);
+  const [vendorItems, setVendorItems] = useState([]);
+  const [loadingVendorItems, setLoadingVendorItems] = useState(false);
 
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [bulkData, setBulkData] = useState('');
@@ -99,6 +107,76 @@ const StockIn = () => {
     fetchRows();
   }, []);
 
+  const refreshVendors = async () => {
+    try {
+      const v = await vendorsApi.list('');
+      setVendors(Array.isArray(v) ? v.filter((x) => x.is_active !== 0) : []);
+    } catch {
+      setVendors([]);
+    }
+  };
+
+  const loadVendorItems = async (vendorId) => {
+    if (!vendorId) {
+      setVendorItems([]);
+      return;
+    }
+    setLoadingVendorItems(true);
+    try {
+      const data = await vendorItemsApi.list({ vendor_id: vendorId });
+      setVendorItems(Array.isArray(data) ? data.filter((x) => x.is_active !== 0) : []);
+    } catch {
+      setVendorItems([]);
+    } finally {
+      setLoadingVendorItems(false);
+    }
+  };
+
+  const emptyForm = () => ({
+    transaction_date: new Date().toISOString().slice(0, 10),
+    vendor_id: '',
+    vendor_name: '',
+    part_number: '',
+    sap_part_number: '',
+    description: '',
+    uom: '',
+    rack_location: '',
+    qty_in: '',
+    source_type: '',
+    reference_no: '',
+    remarks: '',
+  });
+
+  const onVendorPick = (vendorId) => {
+    const v = vendors.find((x) => String(x.id) === String(vendorId));
+    setForm((f) => ({
+      ...f,
+      vendor_id: vendorId,
+      vendor_name: v?.vendor_name || '',
+      part_number: '',
+      sap_part_number: '',
+      description: '',
+      uom: '',
+    }));
+    loadVendorItems(vendorId);
+  };
+
+  const onPartPick = (partNumber) => {
+    const item = vendorItems.find((x) => x.part_number === partNumber);
+    if (!item) {
+      setForm((f) => ({ ...f, part_number: partNumber }));
+      return;
+    }
+    setForm((f) => ({
+      ...f,
+      part_number: item.part_number,
+      sap_part_number: item.sap_part_number || '',
+      description: item.description || '',
+      uom: item.uom || '',
+      vendor_name: item.vendor_name || f.vendor_name,
+    }));
+  };
+
   const stockInSortValue = useCallback((r, k) => {
     if (k === 'qty_in') return Number(r.qty_in) || 0;
     if (k === 'transaction_date') {
@@ -112,17 +190,9 @@ const StockIn = () => {
 
   const openCreate = () => {
     setEditId(null);
-    setForm({
-      transaction_date: new Date().toISOString().slice(0, 10),
-      part_number: '',
-      sap_part_number: '',
-      description: '',
-      rack_location: '',
-      qty_in: '',
-      source_type: '',
-      reference_no: '',
-      remarks: '',
-    });
+    setForm(emptyForm());
+    setVendorItems([]);
+    refreshVendors();
     setShowEditModal(true);
   };
 
@@ -130,15 +200,21 @@ const StockIn = () => {
     setEditId(row.id);
     setForm({
       transaction_date: String(row.transaction_date || '').slice(0, 10),
+      vendor_id: row.vendor_id != null ? String(row.vendor_id) : '',
+      vendor_name: row.vendor_name || '',
       part_number: row.part_number || '',
       sap_part_number: row.sap_part_number || '',
       description: row.description || '',
+      uom: row.uom || '',
       rack_location: row.rack_location || '',
       qty_in: String(row.qty_in ?? ''),
       source_type: row.source_type || '',
       reference_no: row.reference_no || '',
       remarks: row.remarks || '',
     });
+    refreshVendors();
+    if (row.vendor_id) loadVendorItems(String(row.vendor_id));
+    else setVendorItems([]);
     setShowEditModal(true);
   };
 
@@ -146,6 +222,7 @@ const StockIn = () => {
     try {
       const payload = {
         ...form,
+        vendor_id: form.vendor_id ? Number(form.vendor_id) : null,
         qty_in: parseFloat(form.qty_in) || 0,
       };
       if (editId) await stockInApi.update(editId, payload);
@@ -228,9 +305,11 @@ const StockIn = () => {
   const downloadTemplate = () => {
     const header = [
       'transaction_date',
+      'vendor_name',
       'part_number',
       'sap_part_number',
       'description',
+      'uom',
       'rack_location',
       'qty_in',
       'source_type',
@@ -240,9 +319,11 @@ const StockIn = () => {
     const sample = [
       {
         transaction_date: '2026-04-28',
+        vendor_name: 'Schneider',
         part_number: 'C25F3TM250C',
         sap_part_number: 'SAP001',
         description: 'Breaker',
+        uom: 'PCS',
         rack_location: '241A',
         qty_in: 8,
         source_type: 'txt_scan',
@@ -310,6 +391,32 @@ const StockIn = () => {
             <Copy size={14} />
             Copy-paste bulk entry
           </button>
+          <button
+            type="button"
+            className="btn-secondary flex items-center gap-1"
+            onClick={() =>
+              exportJsonToExcel(
+                (displayRows || []).map((r) => ({
+                  'Transaction Date': r.transaction_date,
+                  Vendor: r.vendor_name || '',
+                  'Part Number': r.part_number,
+                  'SAP Part Number': r.sap_part_number,
+                  Description: r.description,
+                  UOM: r.uom,
+                  Rack: r.rack_location,
+                  'Qty In': r.qty_in,
+                  'Source Type': r.source_type,
+                  'Reference No': r.reference_no,
+                  Remarks: r.remarks,
+                })),
+                'stock-in-export.xlsx',
+                'Stock In'
+              )
+            }
+          >
+            <FileDown size={14} />
+            Export Excel
+          </button>
         </div>
       </div>
 
@@ -323,6 +430,9 @@ const StockIn = () => {
                 <SortTh columnKey="transaction_date" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Transaction Date
                 </SortTh>
+                <SortTh columnKey="vendor_name" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                  Vendor
+                </SortTh>
                 <SortTh columnKey="part_number" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Part Number
                 </SortTh>
@@ -331,6 +441,9 @@ const StockIn = () => {
                 </SortTh>
                 <SortTh columnKey="description" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Description
+                </SortTh>
+                <SortTh columnKey="uom" sortKey={sortKey} direction={direction} onSort={requestSort}>
+                  UOM
                 </SortTh>
                 <SortTh columnKey="rack_location" sortKey={sortKey} direction={direction} onSort={requestSort}>
                   Rack
@@ -353,12 +466,12 @@ const StockIn = () => {
             <tbody className="divide-y divide-gray-100">
               {(displayRows || []).map((r) => (
                 <tr key={r.id} className="hover:bg-gray-50">
-                  <td className="tbl-td-nowrap">
-                    {formatDateDDMMYYYY(r.transaction_date)}
-                  </td>
+                  <td className="tbl-td-nowrap">{formatDateDDMMYYYY(r.transaction_date)}</td>
+                  <td className="tbl-td-nowrap">{r.vendor_name || '-'}</td>
                   <td className="tbl-td-nowrap">{r.part_number}</td>
                   <td className="tbl-td-nowrap">{r.sap_part_number || '-'}</td>
                   <td className="tbl-td">{r.description || '-'}</td>
+                  <td className="tbl-td-nowrap">{r.uom || '-'}</td>
                   <td className="tbl-td-nowrap">{r.rack_location}</td>
                   <td className="tbl-td-nowrap">{r.qty_in}</td>
                   <td className="tbl-td-nowrap">{r.source_type || '-'}</td>
@@ -386,7 +499,6 @@ const StockIn = () => {
         </div>
       )}
 
-      {/* Create/Edit Modal */}
       {showEditModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[80vh] overflow-y-auto">
@@ -403,64 +515,145 @@ const StockIn = () => {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <input
-                className="input-field"
-                type="date"
-                value={form.transaction_date}
-                onChange={(e) => setForm((f) => ({ ...f, transaction_date: e.target.value }))}
-                placeholder="transaction_date"
-              />
-              <input
-                className="input-field"
-                value={form.part_number}
-                onChange={(e) => setForm((f) => ({ ...f, part_number: e.target.value }))}
-                placeholder="part_number"
-                disabled={!!editId}
-              />
-              <input
-                className="input-field"
-                value={form.sap_part_number}
-                onChange={(e) => setForm((f) => ({ ...f, sap_part_number: e.target.value }))}
-                placeholder="sap_part_number"
-              />
-              <input
-                className="input-field"
-                value={form.description}
-                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-                placeholder="description"
-              />
-              <input
-                className="input-field"
-                value={form.rack_location}
-                onChange={(e) => setForm((f) => ({ ...f, rack_location: e.target.value }))}
-                placeholder="rack_location"
-                disabled={!!editId}
-              />
-              <input
-                className="input-field"
-                value={form.qty_in}
-                onChange={(e) => setForm((f) => ({ ...f, qty_in: e.target.value }))}
-                placeholder="qty_in"
-              />
-              <input
-                className="input-field"
-                value={form.source_type}
-                onChange={(e) => setForm((f) => ({ ...f, source_type: e.target.value }))}
-                placeholder="source_type"
-              />
-              <input
-                className="input-field"
-                value={form.reference_no}
-                onChange={(e) => setForm((f) => ({ ...f, reference_no: e.target.value }))}
-                placeholder="reference_no"
-              />
-              <input
-                className="input-field"
-                value={form.remarks}
-                onChange={(e) => setForm((f) => ({ ...f, remarks: e.target.value }))}
-                placeholder="remarks"
-              />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label className="text-[11px] font-bold md:col-span-2">
+                Vendor
+                <select
+                  className="input-field mt-1"
+                  value={form.vendor_id}
+                  onChange={(e) => onVendorPick(e.target.value)}
+                >
+                  <option value="">Select vendor…</option>
+                  {vendors.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.vendor_name}
+                      {v.vendor_number ? ` (${v.vendor_number})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="text-[11px] font-bold">
+                Part Number
+                {vendorItems.length ? (
+                  <select
+                    className="input-field mt-1"
+                    value={form.part_number}
+                    onChange={(e) => onPartPick(e.target.value)}
+                    disabled={!!editId}
+                  >
+                    <option value="">{loadingVendorItems ? 'Loading…' : 'Select part number…'}</option>
+                    {vendorItems.map((item) => (
+                      <option key={item.id} value={item.part_number}>
+                        {item.part_number}
+                        {item.description ? ` — ${item.description}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="input-field mt-1"
+                    value={form.part_number}
+                    onChange={(e) => setForm((f) => ({ ...f, part_number: e.target.value }))}
+                    placeholder="Enter part number"
+                    disabled={!!editId}
+                  />
+                )}
+              </label>
+
+              <label className="text-[11px] font-bold">
+                Quantity
+                <input
+                  className="input-field mt-1"
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={form.qty_in}
+                  onChange={(e) => setForm((f) => ({ ...f, qty_in: e.target.value }))}
+                  placeholder="Qty in"
+                />
+              </label>
+
+              <label className="text-[11px] font-bold md:col-span-2">
+                Description
+                <input
+                  className="input-field mt-1"
+                  value={form.description}
+                  onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                  placeholder="Description"
+                />
+              </label>
+
+              <label className="text-[11px] font-bold">
+                UOM
+                <input
+                  className="input-field mt-1"
+                  value={form.uom}
+                  onChange={(e) => setForm((f) => ({ ...f, uom: e.target.value }))}
+                  placeholder="e.g. PCS"
+                />
+              </label>
+
+              <label className="text-[11px] font-bold">
+                SAP Part Number
+                <input
+                  className="input-field mt-1"
+                  value={form.sap_part_number}
+                  onChange={(e) => setForm((f) => ({ ...f, sap_part_number: e.target.value }))}
+                  placeholder="SAP part number"
+                />
+              </label>
+
+              <label className="text-[11px] font-bold">
+                Transaction Date
+                <input
+                  className="input-field mt-1"
+                  type="date"
+                  value={form.transaction_date}
+                  onChange={(e) => setForm((f) => ({ ...f, transaction_date: e.target.value }))}
+                />
+              </label>
+
+              <label className="text-[11px] font-bold">
+                Rack Location
+                <input
+                  className="input-field mt-1"
+                  value={form.rack_location}
+                  onChange={(e) => setForm((f) => ({ ...f, rack_location: e.target.value }))}
+                  placeholder="Rack location"
+                  disabled={!!editId}
+                />
+              </label>
+
+              <label className="text-[11px] font-bold">
+                Source Type
+                <input
+                  className="input-field mt-1"
+                  value={form.source_type}
+                  onChange={(e) => setForm((f) => ({ ...f, source_type: e.target.value }))}
+                  placeholder="Source type"
+                />
+              </label>
+
+              <label className="text-[11px] font-bold">
+                Reference No
+                <input
+                  className="input-field mt-1"
+                  value={form.reference_no}
+                  onChange={(e) => setForm((f) => ({ ...f, reference_no: e.target.value }))}
+                  placeholder="Reference no"
+                />
+              </label>
+
+              <label className="text-[11px] font-bold md:col-span-2">
+                Remarks
+                <input
+                  className="input-field mt-1"
+                  value={form.remarks}
+                  onChange={(e) => setForm((f) => ({ ...f, remarks: e.target.value }))}
+                  placeholder="Remarks"
+                />
+              </label>
             </div>
 
             <div className="flex flex-wrap gap-3 mt-6">
@@ -478,7 +671,6 @@ const StockIn = () => {
         </div>
       )}
 
-      {/* Bulk Paste Modal */}
       {showBulkModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[80vh] overflow-y-auto">

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Plus, Pencil, Ban, KeyRound } from 'lucide-react';
 import { usersApi, warehousesApi } from '../services/api';
+import { useWarehouse } from '../context/WarehouseContext';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
 
@@ -12,7 +13,23 @@ function warehouseLabel(list, id) {
   return w ? `${w.warehouse_code}` : `#${id}`;
 }
 
+/** Normalize warehouse id list (fixes checkbox toggle when ids were strings). */
+function normWarehouseIds(ids) {
+  return [...new Set((Array.isArray(ids) ? ids : []).map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0))];
+}
+
+function dedupeWarehouses(list) {
+  const seen = new Set();
+  return (list || []).filter((w) => {
+    const id = Number(w.id);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return Number(w.is_active) !== 0;
+  });
+}
+
 export default function UsersAdmin() {
+  const { selectedWarehouseId, isAllWarehouses } = useWarehouse();
   const [rows, setRows] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -26,7 +43,7 @@ export default function UsersAdmin() {
       setLoading(true);
       const [userRows, wh] = await Promise.all([usersApi.list(), warehousesApi.list().catch(() => [])]);
       setRows(userRows);
-      setWarehouses(Array.isArray(wh) ? wh.filter((w) => Number(w.is_active) !== 0) : []);
+      setWarehouses(dedupeWarehouses(wh));
     } catch (e) {
       alert(e.response?.data?.error || e.message);
     } finally {
@@ -38,8 +55,35 @@ export default function UsersAdmin() {
     load();
   }, [load]);
 
+  const openCreateViewer = () => {
+    const ctxWh =
+      !isAllWarehouses && selectedWarehouseId && Number(selectedWarehouseId) > 0
+        ? Number(selectedWarehouseId)
+        : warehouses[0]?.id
+          ? Number(warehouses[0].id)
+          : null;
+    setForm({
+      username: '',
+      password: '',
+      full_name: 'Read-only Viewer',
+      mobile_number: '',
+      email: '',
+      role: 'viewer',
+      is_active: true,
+      can_access_web: true,
+      can_access_mobile: false,
+      token_expiry_days: 30,
+      warehouse_ids: ctxWh ? [ctxWh] : [],
+      default_warehouse_id: ctxWh,
+    });
+    setModal('create');
+  };
+
   const openCreate = () => {
-    const first = warehouses[0];
+    const ctxWh =
+      !isAllWarehouses && selectedWarehouseId && Number(selectedWarehouseId) > 0
+        ? Number(selectedWarehouseId)
+        : null;
     setForm({
       username: '',
       password: '',
@@ -51,8 +95,8 @@ export default function UsersAdmin() {
       can_access_web: false,
       can_access_mobile: true,
       token_expiry_days: 30,
-      warehouse_ids: first ? [first.id] : [],
-      default_warehouse_id: first ? first.id : null,
+      warehouse_ids: ctxWh ? [ctxWh] : [],
+      default_warehouse_id: ctxWh,
     });
     setModal('create');
   };
@@ -63,8 +107,9 @@ export default function UsersAdmin() {
       let default_warehouse_id = u.default_warehouse_id ?? null;
       try {
         const a = await usersApi.getWarehouseAssignments(u.id);
-        warehouse_ids = Array.isArray(a.warehouse_ids) ? a.warehouse_ids.map(Number) : [];
+        warehouse_ids = normWarehouseIds(a.warehouse_ids);
         default_warehouse_id = a.default_warehouse_id ?? default_warehouse_id;
+        if (warehouse_ids.length === 1) default_warehouse_id = warehouse_ids[0];
       } catch (e) {
         alert(e.response?.data?.error || e.message);
         return;
@@ -86,21 +131,10 @@ export default function UsersAdmin() {
     })();
   };
 
-  const toggleWarehouse = (wid) => {
+  const selectWarehouse = (wid) => {
     const id = Number(wid);
-    const cur = Array.isArray(form.warehouse_ids) ? [...form.warehouse_ids] : [];
-    const i = cur.indexOf(id);
-    let next;
-    if (i >= 0) {
-      next = cur.filter((x) => x !== id);
-    } else {
-      next = [...cur, id];
-    }
-    let def = form.default_warehouse_id;
-    if (def != null && !next.includes(Number(def))) {
-      def = next[0] ?? null;
-    }
-    setForm({ ...form, warehouse_ids: next, default_warehouse_id: def });
+    if (!id) return;
+    setForm({ ...form, warehouse_ids: [id], default_warehouse_id: id });
   };
 
   const save = async () => {
@@ -117,13 +151,13 @@ export default function UsersAdmin() {
         token_expiry_days: form.token_expiry_days,
       };
       if (role !== 'admin') {
-        const ids = Array.isArray(form.warehouse_ids) ? form.warehouse_ids.map(Number).filter((n) => n > 0) : [];
-        if (!ids.length) {
-          alert('Non-admin users need at least one warehouse. Select warehouses or set role to admin.');
+        const ids = normWarehouseIds(form.warehouse_ids);
+        if (ids.length !== 1) {
+          alert('Select exactly one warehouse for this user. Pick/web/mobile data and notifications are scoped to that site only.');
           return;
         }
         payloadBase.warehouse_ids = ids;
-        payloadBase.default_warehouse_id = form.default_warehouse_id != null ? Number(form.default_warehouse_id) : ids[0];
+        payloadBase.default_warehouse_id = ids[0];
       } else {
         payloadBase.warehouse_ids = [];
         if (form.default_warehouse_id != null && form.default_warehouse_id !== '') {
@@ -187,10 +221,16 @@ export default function UsersAdmin() {
           <h2 className="text-base font-bold text-gray-900">User Management</h2>
           <p className="text-[11px] text-gray-600">Admin only · roles, web/mobile access, warehouse assignment</p>
         </div>
-        <button type="button" className="btn-primary flex items-center gap-1" onClick={openCreate}>
-          <Plus size={14} />
-          Add user
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className="btn-primary flex items-center gap-1" onClick={openCreate}>
+            <Plus size={14} />
+            Add user
+          </button>
+          <button type="button" className="btn-secondary flex items-center gap-1" onClick={openCreateViewer} title="Web read-only: view status, download DN/POD — no edits">
+            <Plus size={14} />
+            Add viewer (read-only)
+          </button>
+        </div>
       </div>
 
       <div className="table-container">
@@ -226,7 +266,11 @@ export default function UsersAdmin() {
                 <td className="tbl-td">{u.full_name || '-'}</td>
                 <td className="tbl-td-nowrap">{u.role}</td>
                 <td className="tbl-td-nowrap text-xs">
-                  {String(u.role || '').toLowerCase() === 'admin' ? 'all' : warehouseLabel(warehouses, u.default_warehouse_id)}
+                  {String(u.role || '').toLowerCase() === 'admin'
+                    ? u.default_warehouse_id
+                      ? `default: ${warehouseLabel(warehouses, u.default_warehouse_id)} (all sites)`
+                      : 'all sites'
+                    : warehouseLabel(warehouses, u.default_warehouse_id)}
                 </td>
                 <td className="tbl-td-nowrap">{Number(u.is_active) ? 'Yes' : 'No'}</td>
                 <td className="tbl-td-nowrap">{Number(u.can_access_web) ? 'Y' : 'N'}</td>
@@ -281,12 +325,11 @@ export default function UsersAdmin() {
                 const wasAdmin = String(form.role || '').toLowerCase() === 'admin';
                 const nowAdmin = String(nextRole || '').toLowerCase() === 'admin';
                 let patch = { ...form, role: nextRole };
-                if (wasAdmin && !nowAdmin && warehouses.length) {
-                  const ids =
-                    Array.isArray(form.warehouse_ids) && form.warehouse_ids.length ? form.warehouse_ids.map(Number) : [warehouses[0].id];
-                  patch.warehouse_ids = ids;
-                  const d = Number(form.default_warehouse_id);
-                  patch.default_warehouse_id = ids.includes(d) ? d : ids[0];
+                if (wasAdmin && !nowAdmin) {
+                  const ids = normWarehouseIds(form.warehouse_ids);
+                  const whId = ids[0] || (selectedWarehouseId && !isAllWarehouses ? Number(selectedWarehouseId) : warehouses[0]?.id);
+                  patch.warehouse_ids = whId ? [whId] : [];
+                  patch.default_warehouse_id = whId ?? null;
                 }
                 setForm(patch);
               }}
@@ -319,7 +362,10 @@ export default function UsersAdmin() {
               </>
             ) : (
               <>
-                <p className="text-[11px] font-semibold text-gray-800">Warehouses</p>
+                <p className="text-[11px] font-semibold text-gray-800">Assigned warehouse</p>
+                <p className="text-[11px] text-gray-600 mb-1">
+                  One site per user — orders, stock, and notifications are limited to this warehouse.
+                </p>
                 {!warehouses.length ? (
                   <p className="text-[11px] text-amber-800">No active warehouses defined. Add sites under Admin → Warehouses first.</p>
                 ) : (
@@ -327,9 +373,10 @@ export default function UsersAdmin() {
                     {warehouses.map((w) => (
                       <label key={w.id} className="flex items-center gap-2 text-[11px] cursor-pointer">
                         <input
-                          type="checkbox"
-                          checked={Array.isArray(form.warehouse_ids) && form.warehouse_ids.map(Number).includes(Number(w.id))}
-                          onChange={() => toggleWarehouse(w.id)}
+                          type="radio"
+                          name="user_warehouse"
+                          checked={normWarehouseIds(form.warehouse_ids).includes(Number(w.id))}
+                          onChange={() => selectWarehouse(w.id)}
                         />
                         <span>
                           {w.warehouse_code} — {w.warehouse_name}
@@ -338,21 +385,6 @@ export default function UsersAdmin() {
                     ))}
                   </div>
                 )}
-                <label className="block text-[11px] font-semibold text-gray-800">Default warehouse</label>
-                <select
-                  className="input-field"
-                  value={form.default_warehouse_id ?? ''}
-                  onChange={(e) => setForm({ ...form, default_warehouse_id: e.target.value === '' ? null : Number(e.target.value) })}
-                >
-                  {(Array.isArray(form.warehouse_ids) ? form.warehouse_ids : []).map((wid) => {
-                    const w = warehouses.find((x) => Number(x.id) === Number(wid));
-                    return (
-                      <option key={wid} value={wid}>
-                        {w ? `${w.warehouse_code} — ${w.warehouse_name}` : wid}
-                      </option>
-                    );
-                  })}
-                </select>
               </>
             )}
 

@@ -11,6 +11,7 @@ const {
 const { getGoogleDriveSetupStatus } = require('../services/googleDriveSetupStatus');
 
 const router = express.Router();
+const dbGet = promisify(db.get.bind(db));
 const dbAll = promisify(db.all.bind(db));
 
 function decodeSoParam(raw) {
@@ -86,6 +87,10 @@ router.post('/ensure', requireAnyPermission(['can_upload_outbound', 'can_confirm
     }
     const sales_order_number = String(req.body.sales_order_number || '').trim();
     if (!sales_order_number) return res.status(400).json({ error: 'sales_order_number is required' });
+    const existed = await dbGet(
+      `SELECT id FROM sales_order_folders WHERE warehouse_id = ? AND TRIM(sales_order_number) = TRIM(?) LIMIT 1`,
+      [warehouseId, sales_order_number]
+    );
     const folder = await getOrEnsureSalesOrderFolder({
       warehouseId,
       salesOrderNumber: sales_order_number,
@@ -94,7 +99,16 @@ router.post('/ensure', requireAnyPermission(['can_upload_outbound', 'can_confirm
       customer_po_number: req.body.customer_po_number || null,
       customer_name: req.body.customer_name || null,
     });
-    res.json({ folder });
+    const meta = folder._drive_meta || {};
+    res.json({
+      folder,
+      created: Boolean(meta.created ?? !existed),
+      message:
+        meta.message ||
+        (existed
+          ? `SO ${sales_order_number} is already in our database. Existing Google Drive folder will be used.`
+          : null),
+    });
   } catch (e) {
     const code = /not configured|GOOGLE_DRIVE|credentials/i.test(String(e.message)) ? 503 : 400;
     res.status(code).json({ error: e.message });

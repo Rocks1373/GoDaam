@@ -1,14 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { Truck, Upload, Wand2, ClipboardCheck, Send, Search, Trash2, PackageCheck, Undo2, FileText } from 'lucide-react';
-import api, { outboundGodamApi, pickedOrdersApi, stockByRackApi } from '../services/api';
+import { Truck, Upload, UploadCloud, Wand2, ClipboardCheck, Send, Search, Trash2, PackageCheck, Undo2, FileText, FileDown } from 'lucide-react';
+import { toast } from 'sonner';
+import api, { customersApi, outboundGodamApi, pickedOrdersApi, stockByRackApi } from '../services/api';
 import { reportUploadError, reportUploadResult } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
+import {
+  OUTBOUND_HUB_TABS,
+  filterOutboundByHubTab,
+  normalizeOutboundHubTab,
+  outboundHubTabQuery,
+} from '../utils/outboundHubTabs';
+import { exportJsonToExcel } from '../utils/exportExcel';
 
 function pickQty(n) {
   const x = Number(n);
   return Number.isFinite(x) ? x : 0;
+}
+
+function warnDriveToast(message, navigate) {
+  const text = String(message || '').trim();
+  if (!text) return;
+  const full = text.startsWith('File saved locally.') ? text : `File saved locally. Google Drive: ${text}`;
+  if (/not connected/i.test(full) && navigate) {
+    toast.warning(full, {
+      duration: 15000,
+      action: {
+        label: 'Connect Drive',
+        onClick: () => navigate('/settings/google-drive'),
+      },
+    });
+    return;
+  }
+  toast.warning(full);
 }
 
 function PickLivePanel({ detail, loading, onRefresh }) {
@@ -118,18 +143,16 @@ function statusBadgeClass(statusRaw) {
   return 'bg-gray-50 text-gray-800 border-gray-200';
 }
 
-const ORDER_ATTACHMENT_STAGES = [
-  { stage: 'order_created', title: 'At order creation' },
-  { stage: 'post_delivery', title: 'After delivery' },
-];
-
 export default function OutboundUpload({ currentUser }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const fileRef = useRef(null);
-  const docRefCreated = useRef(null);
-  const docRefPost = useRef(null);
-  const [hubTab, setHubTab] = useState(() => (searchParams.get('tab') === 'delivered' ? 'delivered' : 'active'));
+  const soDocInputRef = useRef(null);
+  const soDragDepth = useRef(0);
+  const [soDropActive, setSoDropActive] = useState(false);
+  const [customers, setCustomers] = useState([]);
+  const [selectedCustomerNumber, setSelectedCustomerNumber] = useState('');
+  const [hubTab, setHubTab] = useState(() => normalizeOutboundHubTab(searchParams.get('tab')));
   const [pickedMap, setPickedMap] = useState({});
   const [uploadedOrders, setUploadedOrders] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -142,8 +165,22 @@ export default function OutboundUpload({ currentUser }) {
   const [editFifoQty, setEditFifoQty] = useState({});
   const [rackPicker, setRackPicker] = useState({ open: false, fifoId: null, rows: [], q: '' });
   const [manualPick, setManualPick] = useState({ override: false, reason: '' });
-  const isAdmin = String(currentUser?.role || '').toLowerCase() === 'admin';
-  const canUploadOutbound = isAdmin || Boolean(currentUser?.permissions?.can_upload_outbound);
+  const role = String(currentUser?.role || '').toLowerCase();
+  const isAdmin = role === 'admin';
+  const canUploadOutbound =
+    isAdmin ||
+    role === 'manager' ||
+    role === 'checker' ||
+    Boolean(currentUser?.permissions?.can_upload_outbound);
+  const canMarkDelivered =
+    canUploadOutbound || Boolean(currentUser?.permissions?.can_confirm_picked);
+  const canSendForPick =
+    isAdmin ||
+    role === 'manager' ||
+    role === 'checker' ||
+    canUploadOutbound ||
+    Boolean(currentUser?.permissions?.can_confirm_picked) ||
+    Boolean(currentUser?.permissions?.can_pick_orders);
 
   const loadOrders = useCallback(async () => {
     setLoading(true);
@@ -168,25 +205,34 @@ export default function OutboundUpload({ currentUser }) {
   }, [isAdmin]);
 
   const setHubTabFromUi = (tab) => {
-    setHubTab(tab);
-    if (tab === 'delivered') setSearchParams({ tab: 'delivered' }, { replace: true });
-    else setSearchParams({}, { replace: true });
+    const next = normalizeOutboundHubTab(tab);
+    setHubTab(next);
+    const q = outboundHubTabQuery(next);
+    setSearchParams(q, { replace: true });
   };
 
   useEffect(() => {
-    const t = searchParams.get('tab');
-    if (t === 'delivered') setHubTab('delivered');
-    if (t === 'active') setHubTab('active');
+    setHubTab(normalizeOutboundHubTab(searchParams.get('tab')));
   }, [searchParams]);
 
   useEffect(() => {
     loadOrders();
   }, [loadOrders]);
 
+  const openOrderParam = searchParams.get('open');
+
+  /** Open detail panel from dashboard or deep link (?open=orderId). */
+  useEffect(() => {
+    const openId = Number(openOrderParam);
+    if (Number.isFinite(openId) && openId > 0 && detail?.id !== openId) {
+      void loadDetail(openId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openOrderParam]);
+
   const filteredOrders = useMemo(() => {
     const q = pageSearch.trim().toLowerCase();
-    const isDelivered = (o) => String(o.status || '').trim().toLowerCase() === 'delivered';
-    let rows = hubTab === 'delivered' ? orders.filter(isDelivered) : orders.filter((o) => !isDelivered(o));
+    let rows = filterOutboundByHubTab(orders, hubTab);
     if (!q) return rows;
     return rows.filter((o) => {
       const po = pickedMap[o.id];
@@ -286,13 +332,40 @@ export default function OutboundUpload({ currentUser }) {
     setMsg('');
     try {
       const res = await outboundGodamApi.uploadExcel(file);
-      setUploadedOrders(res.orders || []);
+      const imported = (res.orders || []).filter((o) => o && o.id);
+      setUploadedOrders(imported);
       await loadOrders();
       reportUploadResult(res, { label: 'Outbound upload', filenamePrefix: 'outbound-upload', notify: setMsg });
-      if ((res.orders || []).length === 1) {
-        const d = await outboundGodamApi.get(res.orders[0].id);
+      const driveNotes = (res.results || []).flatMap((r) => {
+        const notes = [];
+        if (r.drive_message) notes.push(r.drive_message);
+        if (r.drive_folder?.message) notes.push(r.drive_folder.message);
+        if (r.drive_error) notes.push(`Google Drive: ${r.drive_error}`);
+        else if (r.drive_folder?.error) notes.push(`Google Drive: ${r.drive_folder.error}`);
+        if (r.drive_folder?.folder_path) notes.push(`Drive path: ${r.drive_folder.folder_path}`);
+        return notes;
+      });
+      const uniqueDrive = [...new Set(driveNotes)];
+      if (uniqueDrive.length) {
+        uniqueDrive.forEach((m) => {
+          if (/error|missing|not configured|not found|failed|not connected/i.test(m)) {
+            warnDriveToast(m, navigate);
+          } else toast.info(m);
+        });
+      }
+      if (imported.length > 0) {
+        const firstId = Number(imported[0].id);
+        const d = await outboundGodamApi.get(firstId);
         setDetail(d);
         setPreviewOpen(true);
+        setSearchParams({ open: String(firstId) }, { replace: true });
+        if (imported.length > 1) {
+          setMsg(
+            `Upload OK. Opened first order (${imported[0].outbound_number || imported[0].delivery || firstId}). ${imported.length - 1} more in the table — click a row to review. Use Check stock → Generate FIFO → Send for pick.`
+          );
+        } else {
+          setMsg('Upload OK. Review lines below, then Check stock → Generate FIFO → Send for pick when ready.');
+        }
       }
     } catch (e) {
       reportUploadError(e, { label: 'Outbound upload', filenamePrefix: 'outbound-upload', notify: setMsg });
@@ -308,6 +381,25 @@ export default function OutboundUpload({ currentUser }) {
       const d = await outboundGodamApi.get(id);
       setDetail(d);
       setPreviewOpen(true);
+      setSearchParams({ open: String(id) }, { replace: true });
+      try {
+        const rows = await customersApi.list('');
+        setCustomers(rows || []);
+        const po = String(d.customer_po_number || '').trim();
+        const ref = String(d.customer_reference || d.sold_to || '').trim();
+        if (po) setSelectedCustomerNumber(po);
+        else if (ref && rows?.length) {
+          const hit = rows.find(
+            (c) =>
+              String(c.customer_number || '').trim() === ref ||
+              String(c.company_name || '').trim().toLowerCase() === ref.toLowerCase()
+          );
+          setSelectedCustomerNumber(hit ? String(hit.customer_number).trim() : ref);
+        } else setSelectedCustomerNumber(ref);
+      } catch {
+        setCustomers([]);
+        setSelectedCustomerNumber(String(d.customer_po_number || d.customer_reference || d.sold_to || '').trim());
+      }
     } catch (e) {
       setMsg(e.response?.data?.error || e.message);
     } finally {
@@ -419,8 +511,35 @@ export default function OutboundUpload({ currentUser }) {
       await outboundGodamApi.sendForPick(detail.id);
       const d = await outboundGodamApi.get(detail.id);
       setDetail(d);
-      setMsg('Sent for pick. Notifications queued.');
-      setPreviewOpen(false);
+      setMsg('Sent for pick. Notifications queued. Review FIFO and lines below, or close when done.');
+      await loadOrders();
+    } catch (e) {
+      setMsg(e.response?.data?.error || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const confirmDirectManualPick = async () => {
+    if (!detail?.id) return;
+    if (!isAdmin) {
+      setMsg('Direct pick is Admin only.');
+      return;
+    }
+    if (
+      !confirm(
+        'Direct pick (admin): skip Send for pick and mobile scanning. Stock check, FIFO, and pick will run now and status becomes Picked.'
+      )
+    ) {
+      return;
+    }
+    setLoading(true);
+    setMsg('');
+    try {
+      const res = await outboundGodamApi.manualPick(detail.id, { direct: true });
+      setDetail(res.order || (await outboundGodamApi.get(detail.id)));
+      setMsg(`Direct pick completed. Status: ${res.status}.`);
+      setManualPick({ override: false, reason: '' });
       await loadOrders();
     } catch (e) {
       setMsg(e.response?.data?.error || e.message);
@@ -481,7 +600,7 @@ export default function OutboundUpload({ currentUser }) {
       setMsg('Marked delivered. Stock deducted.');
       await loadOrders();
       setPreviewOpen(false);
-      setHubTabFromUi('delivered');
+      setHubTabFromUi(OUTBOUND_HUB_TABS.DELIVERED);
     } catch (e) {
       setMsg(e.response?.data?.error || e.message);
     } finally {
@@ -513,6 +632,29 @@ export default function OutboundUpload({ currentUser }) {
     }
   };
 
+  const reversePicked = async (orderId = detail?.id) => {
+    if (!orderId) return;
+    const reason = prompt(
+      'Reverse picked order? This restores rack quantities, clears picked quantities, changes the outbound back to Sent For Pick, and keeps the picked record as Reversed. Enter reason:',
+      'Wrong pick / re-pick required'
+    );
+    if (reason == null) return;
+    setLoading(true);
+    setMsg('');
+    try {
+      const res = await outboundGodamApi.reversePicked(orderId, { reason: reason.trim() });
+      const d = detail?.id === orderId ? await outboundGodamApi.get(orderId) : detail;
+      if (d) setDetail(d);
+      setMsg(res?.note || 'Picked order reversed.');
+      await loadOrders();
+      setHubTabFromUi(OUTBOUND_HUB_TABS.SEND_FOR_PICK);
+    } catch (e) {
+      setMsg(e.response?.data?.error || e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const deleteOrder = async (id) => {
     if (!confirm(`Delete outbound #${id}? This cannot be undone.`)) return;
     setLoading(true);
@@ -532,26 +674,50 @@ export default function OutboundUpload({ currentUser }) {
     }
   };
 
-  const uploadOrderDocFile = async (stage) => {
-    if (!detail?.id) return;
-    const ref = stage === 'order_created' ? docRefCreated : docRefPost;
-    const f = ref.current?.files?.[0];
-    if (!f) {
-      setMsg('Choose a file to upload.');
+  const uploadSalesOrderDoc = async (file) => {
+    if (!detail?.id || !file) return;
+    if (!String(selectedCustomerNumber || '').trim()) {
+      setMsg('Select a Customer ID from the list before uploading.');
       return;
     }
     setLoading(true);
     setMsg('');
     try {
-      await outboundGodamApi.uploadOrderDocument(detail.id, f, stage);
-      if (ref.current) ref.current.value = '';
+      const res = await outboundGodamApi.uploadOrderDocument(detail.id, file, {
+        customer_number: String(selectedCustomerNumber).trim(),
+        upload_stage: 'sales_order',
+      });
+      if (res.drive_error) {
+        warnDriveToast(res.drive_error, navigate);
+      } else if (res.drive_document) {
+        toast.success('Saved to Google Drive (Customer PO folder).');
+      } else {
+        toast.success('Sales order file saved.');
+      }
       const d = await outboundGodamApi.get(detail.id);
       setDetail(d);
-      setMsg('Attachment saved.');
+      setMsg(
+        res.drive_error
+          ? `File saved. Drive: ${res.drive_error}`
+          : res.drive_folder_link
+            ? 'Sales order saved and linked to Google Drive.'
+            : 'Sales order attachment saved.'
+      );
     } catch (e) {
       setMsg(e.response?.data?.error || e.message);
     } finally {
       setLoading(false);
+      if (soDocInputRef.current) soDocInputRef.current.value = '';
+    }
+  };
+
+  const onCustomerNumberChange = async (value) => {
+    setSelectedCustomerNumber(value);
+    if (!detail?.id || !String(value || '').trim()) return;
+    try {
+      await outboundGodamApi.linkOutboundCustomer(detail.id, value.trim());
+    } catch {
+      /* keep local selection; link on upload */
     }
   };
 
@@ -595,8 +761,8 @@ export default function OutboundUpload({ currentUser }) {
       <div className="mb-2">
         <h2 className="text-base font-bold text-gray-900 leading-tight">Outbound &amp; pick</h2>
         <p className="text-[11px] text-gray-600">
-          Upload outbounds, run FIFO / send for pick, and track pick confirmation. Delivered orders move to the{' '}
-          <strong>Delivered</strong> tab. Excel columns: Delivery, Sales Doc., Customer Reference, Sold-to, Name 1, Material,
+          Upload outbounds, run FIFO / send for pick, and track pick confirmation. Use tabs:{' '}
+          <strong>Send for pick</strong>, <strong>Picked</strong>, <strong>Delivered</strong>. Excel columns: Delivery, Sales Doc., Customer Reference, Sold-to, Name 1, Material,
           SAP Part Number, Description, Delivery quantity
         </p>
       </div>
@@ -605,18 +771,33 @@ export default function OutboundUpload({ currentUser }) {
         <button
           type="button"
           className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold ${
-            hubTab === 'active' ? 'border-primary-600 bg-primary-50 text-primary-900' : 'border-gray-200 bg-white text-gray-700'
+            hubTab === OUTBOUND_HUB_TABS.SEND_FOR_PICK
+              ? 'border-amber-500 bg-amber-50 text-amber-950'
+              : 'border-gray-200 bg-white text-gray-700'
           }`}
-          onClick={() => setHubTabFromUi('active')}
+          onClick={() => setHubTabFromUi(OUTBOUND_HUB_TABS.SEND_FOR_PICK)}
         >
-          Outbound &amp; pick (active)
+          Send for pick
         </button>
         <button
           type="button"
           className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold ${
-            hubTab === 'delivered' ? 'border-emerald-600 bg-emerald-50 text-emerald-900' : 'border-gray-200 bg-white text-gray-700'
+            hubTab === OUTBOUND_HUB_TABS.PICKED
+              ? 'border-sky-600 bg-sky-50 text-sky-950'
+              : 'border-gray-200 bg-white text-gray-700'
           }`}
-          onClick={() => setHubTabFromUi('delivered')}
+          onClick={() => setHubTabFromUi(OUTBOUND_HUB_TABS.PICKED)}
+        >
+          Picked
+        </button>
+        <button
+          type="button"
+          className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold ${
+            hubTab === OUTBOUND_HUB_TABS.DELIVERED
+              ? 'border-emerald-600 bg-emerald-50 text-emerald-900'
+              : 'border-gray-200 bg-white text-gray-700'
+          }`}
+          onClick={() => setHubTabFromUi(OUTBOUND_HUB_TABS.DELIVERED)}
         >
           Delivered
         </button>
@@ -641,6 +822,28 @@ export default function OutboundUpload({ currentUser }) {
         ) : null}
         <button type="button" className="btn-secondary flex items-center gap-1" onClick={loadOrders} disabled={loading}>
           Refresh
+        </button>
+        <button
+          type="button"
+          className="btn-secondary flex items-center gap-1"
+          disabled={!orderDisplayRows.length}
+          onClick={() =>
+            exportJsonToExcel(
+              orderDisplayRows.map((o) => ({
+                ID: o.id,
+                Delivery: o.delivery || o.outbound_number,
+                'Sales Doc': o.sales_doc,
+                'Customer Name': o.customer_name,
+                Status: o.status,
+                'Outbound Number': o.outbound_number,
+              })),
+              `outbound-orders-${hubTab}.xlsx`,
+              'Outbound'
+            )
+          }
+        >
+          <FileDown size={14} />
+          Export Excel
         </button>
         {loading ? <span className="text-[11px] text-gray-500">Working…</span> : null}
       </div>
@@ -757,21 +960,35 @@ export default function OutboundUpload({ currentUser }) {
                     <button type="button" className="btn-secondary !py-1 !px-2" onClick={() => loadDetail(o.id)}>
                       Edit / workflow
                     </button>
-                    {isAdmin && stLower === 'uploaded' ? (
+                    {isAdmin && !['picked', 'delivered', 'cancelled'].includes(stLower) ? (
                       <button
                         type="button"
                         className="btn-primary !py-1 !px-2 flex items-center gap-1"
                         onClick={async () => {
                           await loadDetail(o.id);
+                          setMsg('Open workflow → use Direct pick (admin) to skip mobile steps.');
                         }}
                         disabled={loading}
-                        title="Open workflow then Send for pick"
+                        title="Open workflow — use Direct pick (admin) to pick without mobile"
                       >
-                        <Send size={14} />
-                        Send
+                        <PackageCheck size={14} />
+                        Direct pick
                       </button>
                     ) : null}
                     {canUploadOutbound ? (
+                    <>
+                    {stLower === 'picked' ? (
+                      <button
+                        type="button"
+                        className="btn-secondary !py-1 !px-2 flex items-center gap-1 text-amber-800 border-amber-300"
+                        onClick={() => reversePicked(o.id)}
+                        disabled={loading}
+                        title="Restore rack quantities and keep picked record as Reversed"
+                      >
+                        <Undo2 size={14} />
+                        Reverse picked
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="btn-secondary !py-1 !px-2 flex items-center gap-1 text-red-700"
@@ -782,6 +999,7 @@ export default function OutboundUpload({ currentUser }) {
                       <Trash2 size={14} />
                       Delete
                     </button>
+                    </>
                     ) : null}
                   </div>
                 </td>
@@ -825,7 +1043,14 @@ export default function OutboundUpload({ currentUser }) {
                     Sales Order Documents
                   </Link>
                 ) : null}
-                <button type="button" className="btn-secondary" onClick={() => setPreviewOpen(false)}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setPreviewOpen(false);
+                    setSearchParams({}, { replace: true });
+                  }}
+                >
                   Close
                 </button>
               </div>
@@ -841,9 +1066,27 @@ export default function OutboundUpload({ currentUser }) {
                 Generate FIFO
               </button>
               {isAdmin ? (
-                <button type="button" className="btn-primary flex items-center gap-1" onClick={sendForPick} disabled={loading}>
+                <button
+                  type="button"
+                  className="btn-primary flex items-center gap-1"
+                  onClick={confirmDirectManualPick}
+                  disabled={loading || String(detail.status || '').toLowerCase() === 'picked'}
+                  title="Skip Send for pick and mobile — pick now and set status Picked"
+                >
+                  <PackageCheck size={14} />
+                  Direct pick (admin)
+                </button>
+              ) : null}
+              {canSendForPick ? (
+                <button
+                  type="button"
+                  className="btn-primary flex items-center gap-1"
+                  onClick={sendForPick}
+                  disabled={loading || !['Uploaded', 'Stock Checked'].includes(String(detail.status || '').trim())}
+                  title="Notify mobile pickers — run Check stock / Generate FIFO first if needed"
+                >
                   <Send size={14} />
-                  Send for pick
+                  Send for pick (mobile)
                 </button>
               ) : null}
               {isAdmin ? (
@@ -852,10 +1095,10 @@ export default function OutboundUpload({ currentUser }) {
                   className="btn-secondary flex items-center gap-1 border-blue-200"
                   onClick={confirmManualPick}
                   disabled={loading || String(detail.status || '').toLowerCase() === 'picked'}
-                  title="Admin-only pick without mobile scanning"
+                  title="Pick using FIFO rows shown (optional override for shortages)"
                 >
                   <PackageCheck size={14} />
-                  Manual Pick
+                  Manual pick (FIFO)
                 </button>
               ) : null}
               {String(detail.status || '').toLowerCase() === 'delivered' ? (
@@ -869,7 +1112,18 @@ export default function OutboundUpload({ currentUser }) {
                   <Undo2 size={14} />
                   Reverse delivery
                 </button>
-              ) : (
+              ) : String(detail.status || '').toLowerCase() === 'picked' && canUploadOutbound ? (
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center gap-1 border-amber-300 text-amber-900"
+                  onClick={() => reversePicked(detail.id)}
+                  disabled={loading}
+                  title="Restore rack quantities and keep picked record as Reversed"
+                >
+                  <Undo2 size={14} />
+                  Reverse picked
+                </button>
+              ) : canMarkDelivered ? (
                 <button
                   type="button"
                   className="btn-secondary flex items-center gap-1 border-emerald-200"
@@ -880,92 +1134,139 @@ export default function OutboundUpload({ currentUser }) {
                   <PackageCheck size={14} />
                   Mark delivered
                 </button>
-              )}
+              ) : null}
             </div>
 
             <PickLivePanel detail={detail} loading={loading} onRefresh={() => loadDetail(detail.id)} />
 
             <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
-              <div className="text-[10px] font-bold text-gray-600 uppercase mb-1">Sales order attachments</div>
+              <div className="text-[10px] font-bold text-gray-600 uppercase mb-1">Sales order upload</div>
               <p className="text-[10px] text-gray-600 mb-3 leading-snug">
-                Optional files tied to this outbound (sales order), by lifecycle stage. Separate from the driver POD on the delivery note.
+                Upload the customer sales order (PDF or any file) before or when you send for pick. Files go to Google Drive
+                under SO / Customer_PO, linked to the Customer ID you select.
               </p>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {ORDER_ATTACHMENT_STAGES.map(({ stage, title }) => {
-                  const rows = (detail.order_documents || []).filter((d) => d.upload_stage === stage);
-                  const ref = stage === 'order_created' ? docRefCreated : docRefPost;
+
+              <label className="block text-[10px] font-semibold text-gray-700 mb-1">Customer ID</label>
+              <select
+                className="w-full max-w-md rounded border border-gray-300 bg-white px-2 py-1.5 text-[11px] mb-3"
+                value={selectedCustomerNumber}
+                disabled={!canUploadOutbound || loading}
+                onChange={(e) => void onCustomerNumberChange(e.target.value)}
+              >
+                <option value="">— Select customer ID —</option>
+                {customers.map((c) => {
+                  const num = String(c.customer_number || '').trim();
+                  if (!num) return null;
                   return (
-                    <div key={stage} className="rounded border bg-white p-2.5">
-                      <div className="text-[11px] font-bold text-gray-800 mb-1.5">{title}</div>
-                      <ul className="space-y-1 mb-2 min-h-[2rem]">
-                        {rows.length ? (
-                          rows.map((d) => (
-                            <li key={d.id} className="flex items-center justify-between gap-1 text-[10px]">
-                              <button
-                                type="button"
-                                className="text-left text-primary-700 hover:underline truncate max-w-[70%]"
-                                onClick={() => downloadOrderDoc(d)}
-                              >
-                                {d.file_name || 'file'}
-                              </button>
-                              <div className="flex items-center gap-0.5 shrink-0">
-                                {canUploadOutbound ? (
-                                  <button
-                                    type="button"
-                                    className="btn-secondary !py-0.5 !px-1 text-red-700"
-                                    title="Remove"
-                                    onClick={() => deleteOrderDoc(d.id)}
-                                  >
-                                    <Trash2 size={12} />
-                                  </button>
-                                ) : null}
-                              </div>
-                            </li>
-                          ))
-                        ) : (
-                          <li className="text-[10px] text-gray-400">No files yet</li>
-                        )}
-                      </ul>
-                      {canUploadOutbound ? (
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <input ref={ref} type="file" className="text-[10px] max-w-[11rem]" />
-                          <button
-                            type="button"
-                            className="btn-primary !py-1 !px-2 text-[10px]"
-                            disabled={loading}
-                            onClick={() => uploadOrderDocFile(stage)}
-                          >
-                            Upload
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="text-[10px] text-gray-500">Upload requires outbound upload permission.</div>
-                      )}
-                    </div>
+                    <option key={num} value={num}>
+                      {num}
+                      {c.company_name ? ` — ${c.company_name}` : ''}
+                    </option>
                   );
                 })}
-              </div>
-              {(detail.order_documents || []).some((d) => d.upload_stage && !['order_created', 'post_delivery'].includes(d.upload_stage)) ? (
-                <div className="mt-2 text-[10px] text-gray-600 border-t border-gray-200 pt-2">
-                  <span className="font-semibold">Other tags:</span>{' '}
-                  {(detail.order_documents || [])
-                    .filter((d) => d.upload_stage && !['order_created', 'post_delivery'].includes(d.upload_stage))
-                    .map((d) => (
-                      <span key={d.id} className="inline-block mr-2">
-                        <button type="button" className="text-primary-700 underline" onClick={() => downloadOrderDoc(d)}>
-                          {d.file_name}
-                        </button>
-                        {canUploadOutbound ? (
-                          <button type="button" className="text-red-600 ml-0.5" onClick={() => deleteOrderDoc(d.id)} title="Remove">
-                            ×
-                          </button>
-                        ) : null}
-                      </span>
-                    ))}
-                </div>
-              ) : null}
-            </div>
+                {selectedCustomerNumber &&
+                !customers.some((c) => String(c.customer_number || '').trim() === selectedCustomerNumber) ? (
+                  <option value={selectedCustomerNumber}>{selectedCustomerNumber} (from order)</option>
+                ) : null}
+              </select>
 
+              <ul className="space-y-1 mb-3 min-h-[1.5rem]">
+                {(detail.order_documents || []).length ? (
+                  (detail.order_documents || []).map((d) => (
+                    <li key={d.id} className="flex items-center justify-between gap-2 text-[10px] rounded bg-white border px-2 py-1">
+                      <button
+                        type="button"
+                        className="text-left text-primary-700 hover:underline truncate flex-1"
+                        onClick={() => downloadOrderDoc(d)}
+                      >
+                        <FileText size={12} className="inline mr-1 opacity-70" />
+                        {d.file_name || 'file'}
+                      </button>
+                      {canUploadOutbound ? (
+                        <button
+                          type="button"
+                          className="btn-secondary !py-0.5 !px-1 text-red-700 shrink-0"
+                          title="Remove"
+                          onClick={() => deleteOrderDoc(d.id)}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      ) : null}
+                    </li>
+                  ))
+                ) : (
+                  <li className="text-[10px] text-gray-400">No sales order files uploaded yet</li>
+                )}
+              </ul>
+
+              {canUploadOutbound ? (
+                <>
+                  <input
+                    ref={soDocInputRef}
+                    type="file"
+                    className="hidden"
+                    accept=".pdf,.png,.jpg,.jpeg,.webp,.xlsx,.xls,.doc,.docx,image/*"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void uploadSalesOrderDoc(f);
+                    }}
+                  />
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    className={[
+                      'app-upload-dropzone',
+                      soDropActive ? 'app-upload-dropzone--active' : '',
+                      loading ? 'app-upload-dropzone--disabled' : '',
+                    ].join(' ')}
+                    onClick={() => !loading && soDocInputRef.current?.click()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        soDocInputRef.current?.click();
+                      }
+                    }}
+                    onDragEnter={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      soDragDepth.current += 1;
+                      setSoDropActive(true);
+                    }}
+                    onDragLeave={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      soDragDepth.current = Math.max(0, soDragDepth.current - 1);
+                      if (soDragDepth.current === 0) setSoDropActive(false);
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      soDragDepth.current = 0;
+                      setSoDropActive(false);
+                      const f = e.dataTransfer?.files?.[0];
+                      if (f) void uploadSalesOrderDoc(f);
+                    }}
+                  >
+                    <UploadCloud className="w-8 h-8 mx-auto mb-1 text-primary-600 opacity-90" aria-hidden />
+                    <p className="text-[11px] font-bold text-gray-800 text-center">
+                      {loading ? 'Uploading…' : 'Drag & drop sales order file here'}
+                    </p>
+                    <p className="text-[10px] text-gray-500 text-center mt-1">PDF, images, Excel, Word — or click to browse</p>
+                  </div>
+                  {!String(detail.sales_doc || detail.sales_order_number || '').trim() ? (
+                    <p className="text-[10px] text-amber-800 mt-2">
+                      Warning: no Sales Doc. on this outbound — file saves locally only until Sales Doc. is set.
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-[10px] text-gray-500">Upload requires outbound upload permission.</p>
+              )}
+            </div>
             {isAdmin ? (
               <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 p-3">
                 <label className="flex items-center gap-2 text-[11px] font-bold text-blue-900">

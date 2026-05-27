@@ -3,6 +3,13 @@ const { promisify } = require('util');
 
 const db = require('../db');
 const { readKnowledgeCached, getKnowledgeStatus } = require('../services/aiKnowledge');
+const { callAiService, serviceUrl } = require('../services/aiServiceClient');
+const {
+  buildDatabaseSummary,
+  buildStructuredUser,
+  buildStructuredContext,
+  pickAiEndpoint,
+} = require('../services/aiContextService');
 
 const router = express.Router();
 
@@ -35,6 +42,13 @@ function summarizeText(raw, maxLen = 240) {
   const t = String(raw || '').replace(/\s+/g, ' ').trim();
   if (!t) return '';
   return t.length > maxLen ? `${t.slice(0, maxLen - 1)}…` : t;
+}
+
+/** Pydantic on the AI plugin rejects JSON null for optional string fields — omit instead. */
+function pluginBody(base) {
+  const out = { ...base };
+  if (out.confirm_token == null || out.confirm_token === '') delete out.confirm_token;
+  return out;
 }
 
 async function callPlugin(pathname, { method = 'POST', body } = {}) {
@@ -96,6 +110,28 @@ async function logAiAction(req, entry) {
       error_message,
     ]
   );
+}
+
+async function logAiServiceLog(req, { module, request, response, ai_provider, processing_time_ms }) {
+  const userId = Number(req.user?.sub) || null;
+  const warehouseId = Number(req.warehouseId ?? req.headers?.['x-warehouse-id']) || null;
+  try {
+    await dbRun(
+      `INSERT INTO ai_logs (user_id, warehouse_id, module, request, response, ai_provider, processing_time_ms, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      [
+        userId,
+        warehouseId || null,
+        module || null,
+        String(request || '').slice(0, 8000),
+        String(response || '').slice(0, 16000),
+        ai_provider || null,
+        processing_time_ms != null ? Number(processing_time_ms) : null,
+      ]
+    );
+  } catch {
+    // table may not exist until migrate runs
+  }
 }
 
 async function logAiWidgetUsage(req, { message, response_summary, tools_used }) {
@@ -236,9 +272,16 @@ async function localAiFallback(message) {
 // GET /api/ai/health
 router.get('/health', requireAuthOnly, async (_req, res) => {
   try {
-    const url = pluginUrl();
-    const out = await callPlugin('/logs?limit=1', { method: 'GET' }).catch(() => null);
-    return res.json({ ok: true, pluginUrl: url, pluginReachable: Boolean(out) });
+    const url = serviceUrl();
+    const out = await fetch(`${url}/health`).then((r) => r.json()).catch(() => null);
+    return res.json({
+      ok: true,
+      aiServiceUrl: url,
+      aiServiceReachable: Boolean(out?.ok),
+      provider: out?.provider || null,
+      gemini_model: out?.gemini_model || null,
+      ollama_model: out?.ollama_model || null,
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
@@ -249,70 +292,54 @@ router.get('/knowledge-status', requireAuthOnly, async (_req, res) => {
   return res.json(getKnowledgeStatus());
 });
 
-// POST /api/ai/chat
-// Accepts either legacy `{command}` or new `{message,pageContext,entityId,userRole}` payloads.
+// POST /api/ai/chat — forwards to AI microservice (Gemini Flash + Ollama fallback)
 router.post('/chat', requireAuthOnly, async (req, res) => {
   const message = String(req.body?.message || req.body?.command || '').trim();
   if (!message) return res.status(400).json({ error: 'message is required' });
+  const pageContext = req.body?.pageContext || null;
+  const structuredContext = buildStructuredContext(req, pageContext);
+  const warehouseId = structuredContext.warehouse_id ?? req.warehouseId ?? req.headers?.['x-warehouse-id'];
   try {
-    const knowledge = readKnowledgeCached({ maxChars: 160_000 });
-    const context = {
-      ...(req.body?.context || {}),
-      pageContext: req.body?.pageContext || null,
-      entityId: req.body?.entityId || null,
-      userRole: req.body?.userRole || req.user?.role || null,
-      knowledge: knowledge.ok
-        ? {
-            path: knowledge.path,
-            updatedAt: knowledge.mtimeMs ? new Date(knowledge.mtimeMs).toISOString() : null,
-            text: knowledge.text,
-          }
-        : { error: knowledge.error || 'knowledge missing' },
-    };
-
+    const knowledge = readKnowledgeCached({ maxChars: 80_000 });
+    const database_summary = await buildDatabaseSummary({
+      message,
+      warehouseId,
+      context: structuredContext,
+    });
+    const endpoint = pickAiEndpoint(message, structuredContext);
     const payload = {
-      command: message,
-      context,
-      confirm_token: req.body?.confirm_token || null,
-      user: {
-        id: req.user?.sub || null,
-        username: req.user?.username || null,
-        role: req.user?.role || null,
-      },
-      request_meta: {
-        ip: req.ip,
-        ua: req.headers['user-agent'] || '',
-      },
+      message,
+      user: buildStructuredUser(req),
+      context: structuredContext,
+      database_summary,
+      knowledge: knowledge.ok ? { text: knowledge.text } : undefined,
     };
-    const out = await callPlugin('/chat', { method: 'POST', body: payload });
-    // plugin returns structured tool/action info; log here for audit.
+    const out = await callAiService(endpoint, { body: payload });
+    const answer = String(out?.answer || '').trim() || 'No response.';
+    await logAiServiceLog(req, {
+      module: structuredContext.module || 'chat',
+      request: message,
+      response: answer,
+      ai_provider: out?.provider,
+      processing_time_ms: out?.processing_time_ms,
+    });
     await logAiAction(req, {
       command: message,
-      tool_name: out?.tool_name || out?.decision?.tool_name || null,
-      tool_args: out?.tool_args || out?.decision?.tool_args || null,
+      tool_name: endpoint,
+      tool_args: { provider: out?.provider, fallback: out?.fallback_used },
       result: out,
       status: 'ok',
-    });
+    }).catch(() => {});
     await logAiWidgetUsage(req, {
       message,
-      response_summary: summarizeText(out?.summary || out?.result?.message || out?.result?.ok || out?.ok ? 'OK' : ''),
-      tools_used: { tool_name: out?.tool_name || null },
+      response_summary: summarizeText(answer),
+      tools_used: { endpoint, provider: out?.provider },
     }).catch(() => {});
 
-    // Shape response for web widget.
     return res.json({
-      answer: out?.summary || JSON.stringify(out?.result || out).slice(0, 4000),
-      diagnostics: out?.result ? [out.result] : [],
-      suggestedActions: out?.needs_confirmation
-        ? [
-            {
-              type: 'confirm_required',
-              tool_name: out.tool_name,
-              tool_args: out.tool_args,
-              confirmation_reason: out.confirmation_reason,
-            },
-          ]
-        : [],
+      answer,
+      diagnostics: database_summary ? [database_summary] : [],
+      suggestedActions: [],
       raw: out,
     });
   } catch (e) {
@@ -364,7 +391,7 @@ router.post('/run-diagnostic', requireAuthOnly, async (req, res) => {
   const tool_name = String(req.body?.name || '').trim();
   if (!tool_name) return res.status(400).json({ error: 'name is required' });
   try {
-    const payload = {
+    const payload = pluginBody({
       tool_name,
       tool_args: req.body?.args || {},
       confirm_token: req.body?.confirm_token || null,
@@ -373,7 +400,7 @@ router.post('/run-diagnostic', requireAuthOnly, async (req, res) => {
         username: req.user?.username || null,
         role: req.user?.role || null,
       },
-    };
+    });
     const out = await callPlugin('/run-tool', { method: 'POST', body: payload });
     await logAiAction(req, { command: null, tool_name, tool_args: payload.tool_args, result: out, status: 'ok' });
     return res.json(out);
@@ -389,7 +416,7 @@ router.post('/run-tool', requireAuthOnly, async (req, res) => {
   const tool_name = String(req.body?.tool_name || '').trim();
   if (!tool_name) return res.status(400).json({ error: 'tool_name is required' });
   try {
-    const payload = {
+    const payload = pluginBody({
       tool_name,
       tool_args: req.body?.tool_args || {},
       confirm_token: req.body?.confirm_token || null,
@@ -398,7 +425,7 @@ router.post('/run-tool', requireAuthOnly, async (req, res) => {
         username: req.user?.username || null,
         role: req.user?.role || null,
       },
-    };
+    });
     const out = await callPlugin('/run-tool', { method: 'POST', body: payload });
     await logAiAction(req, {
       command: null,

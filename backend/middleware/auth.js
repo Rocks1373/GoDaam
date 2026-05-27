@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { promisify } = require('util');
+const { getPermissionMapForUserId } = require('../services/permissionService');
 
 /**
  * JWT_SECRET hardening.
@@ -181,8 +182,30 @@ function requireWebAccess(req, res, next) {
   return res.status(403).json({ error: 'Forbidden', detail: 'Web access disabled' });
 }
 
+/** Re-check DB: approved, active, not blocked (invalidates JWT for blocked/pending users). */
+function requireApprovedAccount(req, res, next) {
+  void requireApprovedAccountAsync(req, res, next).catch(next);
+}
+
+async function requireApprovedAccountAsync(req, res, next) {
+  if (!req.user?.sub) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  const mapped = await getPermissionMapForUserId(req.user.sub);
+  if (!mapped) {
+    res.status(403).json({
+      error: 'Account not approved or access revoked',
+      status: 'ACCESS_DENIED',
+    });
+    return;
+  }
+  next();
+}
+
 module.exports = {
   requireAuth,
+  requireApprovedAccount,
   requireAdmin,
   requirePermission,
   requireAnyPermission,

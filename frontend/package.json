@@ -10,14 +10,18 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@react-oauth/google": "^0.13.5",
     "@tanstack/react-table": "^8.20.5",
     "axios": "^1.7.7",
     "exceljs": "^4.4.0",
     "lucide-react": "^0.441.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-hook-form": "^7.53.0",
     "react-router-dom": "^6.26.1",
+    "socket.io-client": "^4.8.3",
     "sonner": "^2.0.7",
     "xlsx": "^0.18.5",
     "zod": "^3.23.8"

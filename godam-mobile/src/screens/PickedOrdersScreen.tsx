@@ -12,6 +12,8 @@ import {
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
 import { listPickedOrders, type PickedOrderRow } from '../api/pickedOrdersApi';
+import { formatApiError } from '../api/client';
+import { OrderIdentityLabels } from '../components/OrderIdentityLabels';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'PickedOrders'>;
 
@@ -23,11 +25,17 @@ export default function PickedOrdersScreen({ navigation }: Props) {
   const [rows, setRows] = useState<PickedOrderRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const [q, setQ] = useState('');
 
   const load = useCallback(async () => {
-    const data = await listPickedOrders(200);
-    setRows(Array.isArray(data) ? data : []);
+    try {
+      const data = await listPickedOrders(200);
+      setRows(Array.isArray(data) ? data : []);
+      setLoadErr(null);
+    } catch (e) {
+      setLoadErr(formatApiError(e));
+    }
   }, []);
 
   useEffect(() => {
@@ -51,6 +59,8 @@ export default function PickedOrdersScreen({ navigation }: Props) {
         r.customer_reference,
         r.sold_to,
         r.name_1,
+        r.customer_name,
+        r.outbound_number,
         r.confirmed_by_user_name,
         r.picked_by_names,
         r.order_status,
@@ -72,12 +82,21 @@ export default function PickedOrdersScreen({ navigation }: Props) {
           style={styles.search}
           value={q}
           onChangeText={setQ}
-          placeholder="Search delivery, sales doc, picker..."
+          placeholder="Search customer, outbound, sales doc, picker..."
           placeholderTextColor="#94a3b8"
           autoCapitalize="none"
           autoCorrect={false}
         />
       </View>
+
+      {loadErr ? (
+        <View style={styles.errBanner}>
+          <Text style={styles.errText}>{loadErr}</Text>
+          <Pressable onPress={() => void load()}>
+            <Text style={styles.errRetry}>Retry</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       {loading && !rows.length ? <ActivityIndicator style={{ marginTop: 24 }} /> : null}
 
@@ -100,14 +119,20 @@ export default function PickedOrdersScreen({ navigation }: Props) {
             onPress={() => navigation.navigate('PickedOrderDetail', { orderId: Number(item.order_id) })}
           >
             <View style={styles.rowTop}>
-              <Text style={styles.title}>{String(item.delivery || item.order_id)}</Text>
+              <View style={{ flex: 1 }}>
+                <OrderIdentityLabels
+                  item={{
+                    ...item,
+                    outbound_number: item.outbound_number || item.delivery,
+                    customer_name: item.customer_name || item.name_1,
+                  }}
+                  meta={`Sales Doc: ${String(item.sales_doc || '—')} · Ref: ${String(item.customer_reference || '—')}`}
+                />
+              </View>
               <View style={styles.badge}>
                 <Text style={styles.badgeText}>{String(item.order_status || 'Picked')}</Text>
               </View>
             </View>
-            <Text style={styles.sub} numberOfLines={1}>
-              Sales Doc: {String(item.sales_doc || '—')} · Ref: {String(item.customer_reference || '—')}
-            </Text>
             <Text style={styles.sub} numberOfLines={1}>
               Picked by: {String(item.picked_by_names || '—')}
             </Text>
@@ -123,6 +148,21 @@ export default function PickedOrdersScreen({ navigation }: Props) {
 
 const styles = StyleSheet.create({
   wrap: { flex: 1, backgroundColor: '#f8fafc' },
+  errBanner: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    backgroundColor: '#fef2f2',
+    borderColor: '#fecaca',
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  errText: { flex: 1, fontSize: 11, color: '#991b1b' },
+  errRetry: { fontSize: 12, fontWeight: '700', color: '#2563eb' },
   searchRow: { padding: 16, paddingBottom: 8 },
   search: {
     borderWidth: 1,

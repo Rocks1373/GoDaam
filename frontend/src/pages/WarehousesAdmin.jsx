@@ -73,10 +73,30 @@ export default function WarehousesAdmin() {
 
   const save = async () => {
     try {
-      const code = String(form.warehouse_code || '').trim();
+      const code = String(form.warehouse_code || '')
+        .trim()
+        .toUpperCase();
       const name = String(form.warehouse_name || '').trim();
       if (!code || !name) {
         alert('Warehouse code and name are required.');
+        return;
+      }
+      const codeTaken = rows.some(
+        (w) =>
+          String(w.warehouse_code || '').toUpperCase() === code &&
+          Number(w.id) !== Number(form.id)
+      );
+      const nameTaken = rows.some(
+        (w) =>
+          String(w.warehouse_name || '').trim().toLowerCase() === name.toLowerCase() &&
+          Number(w.id) !== Number(form.id)
+      );
+      if (codeTaken) {
+        alert(`Warehouse code "${code}" is already in use. Codes must be unique.`);
+        return;
+      }
+      if (nameTaken) {
+        alert(`Warehouse name "${name}" is already in use. Names must be unique.`);
         return;
       }
       let whId = form.id;
@@ -93,6 +113,7 @@ export default function WarehousesAdmin() {
         whId = created.id;
       } else {
         await warehousesApi.update(form.id, {
+          warehouse_code: code,
           warehouse_name: name,
           warehouse_number: String(form.warehouse_number || '').trim() || null,
           location: form.location || null,
@@ -179,7 +200,6 @@ export default function WarehousesAdmin() {
               placeholder="Warehouse code (e.g. WH2)"
               value={form.warehouse_code || ''}
               onChange={(e) => setForm({ ...form, warehouse_code: e.target.value })}
-              disabled={modal === 'edit'}
             />
             <input
               className="input-field"

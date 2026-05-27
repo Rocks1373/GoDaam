@@ -22,6 +22,23 @@ export function getDefaultApiBaseUrl(): string {
  * Normalize user input or env origin to `{origin}/api`.
  * Accepts `https://host`, `https://host/`, or `https://host/api`.
  */
+/** Saved URLs that fail on real phones (blocked :8080, old VPS IP, etc.). */
+export function isDeprecatedApiBase(apiBase: string): boolean {
+  const t = String(apiBase || '').trim().toLowerCase();
+  if (!t) return false;
+  if (/72\.61\.245\.23:8080/.test(t)) return true;
+  if (/:\d{2,5}\/api$/.test(t) && !/:443\/api$/.test(t)) {
+    try {
+      const u = new URL(t.includes('://') ? t : `http://${t}`);
+      const port = u.port ? Number(u.port) : u.protocol === 'https:' ? 443 : 80;
+      if (port !== 443 && port !== 80) return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export function normalizeToApiBase(input: string): string {
   const t = input.trim().replace(/\/+$/, '');
   if (!t) return '';

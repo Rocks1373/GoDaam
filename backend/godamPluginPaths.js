@@ -12,6 +12,8 @@ function resolveGoDamPluginDir(repoRoot) {
   ];
   for (const dir of candidates) {
     if (fs.existsSync(path.join(dir, 'Home.py'))) return dir;
+    if (fs.existsSync(path.join(dir, 'app.py'))) return dir;
+    if (fs.existsSync(path.join(dir, 'sample_data', 'INPUT.xlsx'))) return dir;
   }
   return null;
 }

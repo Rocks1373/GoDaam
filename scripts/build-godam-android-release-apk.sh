@@ -49,11 +49,30 @@ fi
 if [[ -n "${ANDROID_HOME:-}" ]]; then
   apksigner_bin="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name apksigner -type f 2>/dev/null | sort -V | tail -1)"
   if [[ -n "$apksigner_bin" && -x "$apksigner_bin" ]]; then
+    v1_ok="$("$apksigner_bin" verify --verbose "$DEST_DIR/GoDam.apk" 2>&1 | grep -c 'v1 scheme (JAR signing): true' || true)"
+    if [[ "${v1_ok:-0}" -lt 1 ]]; then
+      echo "APK missing v1 (JAR) signature — re-signing for sideload compatibility..."
+      ks="$ROOT/godam-mobile/android/app/debug.keystore"
+      "$apksigner_bin" sign \
+        --ks "$ks" \
+        --ks-pass pass:android \
+        --ks-key-alias androiddebugkey \
+        --key-pass pass:android \
+        --v1-signing-enabled true \
+        --v2-signing-enabled true \
+        --v3-signing-enabled true \
+        "$DEST_DIR/GoDam.apk"
+    fi
     "$apksigner_bin" verify "$DEST_DIR/GoDam.apk" || {
       echo "apksigner verify failed." >&2
       exit 1
     }
   fi
 fi
-echo "OK: $DEST_DIR/GoDam.apk ($(wc -c < "$DEST_DIR/GoDam.apk" | tr -d ' ') bytes)"
+apk_bytes="$(wc -c < "$DEST_DIR/GoDam.apk" | tr -d ' ')"
+if command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 "$DEST_DIR/GoDam.apk" | awk '{print $1}' > "$DEST_DIR/GoDam.apk.sha256"
+  echo "SHA256: $(cat "$DEST_DIR/GoDam.apk.sha256")"
+fi
+echo "OK: $DEST_DIR/GoDam.apk (${apk_bytes} bytes) — on phone, file size must match exactly"
 echo "API origin embedded at build time: $API_URL (bundle uses /api paths via app config + client)"

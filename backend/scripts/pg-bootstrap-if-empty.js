@@ -39,6 +39,12 @@ async function pgIsEmpty() {
 }
 
 async function main() {
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'production' && process.env.ALLOW_PG_BOOTSTRAP !== '1') {
+    console.log(
+      '[pg-bootstrap] Skipped in production (NODE_ENV=production). Deploy uses existing PostgreSQL only — never copies SQLite over prod.'
+    );
+    return;
+  }
   if (!DATABASE_URL) {
     console.log('[pg-bootstrap] DATABASE_URL not set; skip.');
     return;

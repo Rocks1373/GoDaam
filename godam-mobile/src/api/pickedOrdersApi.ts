@@ -3,6 +3,8 @@ import { api } from './client';
 export type PickedOrderRow = {
   order_id: number;
   delivery?: string | null;
+  outbound_number?: string | null;
+  customer_name?: string | null;
   sales_doc?: string | null;
   customer_reference?: string | null;
   sold_to?: string | null;

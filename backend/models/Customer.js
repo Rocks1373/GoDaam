@@ -1,4 +1,5 @@
 const db = require('../db');
+const { expandCustomerContactOptions } = require('../services/customerContactOptions');
 
 function cleanStr(v) {
   if (v === undefined || v === null) return null;
@@ -20,6 +21,48 @@ function primaryPhone(payload) {
 class Customer {
   constructor() {
     this.db = db;
+  }
+
+  expandContactOptions(row) {
+    return expandCustomerContactOptions(row);
+  }
+
+  async browseContactPersons({ limit = 30 } = {}) {
+    const lim = Math.min(50, Math.max(1, Number(limit) || 30));
+    const rows = await this.findAll({ search: '', page: 1, limit: Math.min(120, lim * 4) });
+    const options = [];
+    const seen = new Set();
+    for (const row of rows || []) {
+      for (const opt of this.expandContactOptions(row)) {
+        const key = `${opt.customer_id}:${opt.contact_slot}:${opt.phone_digits}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        options.push(opt);
+        if (options.length >= lim) break;
+      }
+      if (options.length >= lim) break;
+    }
+    return options;
+  }
+
+  async searchContactPersons({ search = '', limit = 25 } = {}) {
+    const term = String(search || '').trim();
+    if (term.length < 1) return this.browseContactPersons({ limit });
+    const lim = Math.min(50, Math.max(1, Number(limit) || 25));
+    const rows = await this.findAll({ search: term, page: 1, limit: Math.min(80, lim * 4) });
+    const options = [];
+    const seen = new Set();
+    for (const row of rows || []) {
+      for (const opt of this.expandContactOptions(row)) {
+        const key = `${opt.customer_id}:${opt.contact_slot}:${opt.phone_digits}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        options.push(opt);
+        if (options.length >= lim) break;
+      }
+      if (options.length >= lim) break;
+    }
+    return options;
   }
 
   async findAll({ search = '', page = 1, limit = 200 }) {

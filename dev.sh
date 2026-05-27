@@ -2,7 +2,7 @@
 # All-in-one dev launcher for GoDaam + Huawei GoDam (Streamlit).
 #
 # Usage:
-#   ./dev.sh              — backend (:3001) + frontend (:5173) + Streamlit (:8501)
+#   ./dev.sh              — backend (:3001) + frontend (:5173); DN matching at /huawei
 #   ./dev.sh start        — same as above (default “everything”)
 #   ./dev.sh web          — backend + frontend only (no Streamlit)
 #   ./dev.sh huawei       — same as start (alias)
@@ -129,12 +129,15 @@ case "$ACTION" in
     stop_all
     ensure_godam_postgres
     ensure_jwt_secret_for_local_dev
-    export HUAWEI_GODAM_STREAMLIT_AUTOSTART="${HUAWEI_GODAM_STREAMLIT_AUTOSTART:-1}"
+    export HUAWEI_GODAM_STREAMLIT_AUTOSTART="${HUAWEI_GODAM_STREAMLIT_AUTOSTART:-0}"
     echo ""
     echo "Starting FULL stack (Ctrl+C to stop all):"
     echo "  • API     → http://127.0.0.1:3001"
     echo "  • Web app → http://127.0.0.1:5173"
-    echo "  • Huawei GoDam (Streamlit) → http://127.0.0.1:8501 (child of Node when HUAWEI_GODAM_STREAMLIT_AUTOSTART=1)"
+    echo "  • Huawei DN Matching → http://127.0.0.1:5173/huawei"
+    if [[ "${HUAWEI_GODAM_STREAMLIT_AUTOSTART}" == "1" ]]; then
+      echo "  • Streamlit plugin (optional) → http://127.0.0.1:8501"
+    fi
     echo ""
     if [[ ! -f "$ROOT/plugins/GoDam-1.0/Home.py" ]] && [[ ! -f "$ROOT/GoDam/GoDam-1.0/Home.py" ]]; then
       echo "WARN: GoDam-1.0/Home.py missing — add plugins/GoDam-1.0 (canonical) or legacy GoDam/GoDam-1.0"
@@ -148,7 +151,7 @@ case "$ACTION" in
     ;;
   *)
     echo "Usage: $0 [start|web|huawei|stop]"
-    echo "  start | huawei | (no args) — backend + Vite + Streamlit on :8501"
+    echo "  start | huawei | (no args) — backend + Vite; optional Streamlit if HUAWEI_GODAM_STREAMLIT_AUTOSTART=1"
     echo "  web                         — backend + Vite only"
     echo "  stop                        — kill listeners on dev ports"
     echo ""

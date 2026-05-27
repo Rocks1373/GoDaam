@@ -1,15 +1,16 @@
 const fs = require('fs');
 const path = require('path');
 const { google } = require('googleapis');
+const { getGoogleDriveAuthMode, getDriveScope } = require('../googleDriveOAuthConfig');
+const { getAuthorizedOAuth2Client } = require('../googleDriveOAuthClient');
 
 /**
- * Google Drive implementation (service account).
- * Root folder must be shared with the service account email.
+ * Google Drive storage — OAuth user My Drive (default) or legacy service account.
+ * Root folder (GOOGLE_DRIVE_ROOT_FOLDER_ID) must live in the connected user's Drive.
  */
 class GoogleDriveStorage {
   constructor() {
     this.name = 'GOOGLE_DRIVE';
-    this._drive = null;
     this._jsonPath = String(process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH || '').trim();
   }
 
@@ -18,63 +19,87 @@ class GoogleDriveStorage {
     if (!raw) {
       throw new Error('GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_PATH is not set');
     }
-    if (path.isAbsolute(raw) && fs.existsSync(raw)) return raw;
+    const repoRoot = path.join(__dirname, '..', '..', '..');
+    const baseName = path.basename(raw);
     const candidates = [
+      raw,
       path.join(process.cwd(), raw),
       path.join(__dirname, '..', '..', raw),
-      path.join(__dirname, '..', '..', '..', raw),
+      path.join(repoRoot, raw),
+      path.join(repoRoot, baseName),
+      path.join(repoRoot, 'delete', 'credentials-local', baseName),
     ];
     for (const p of candidates) {
-      if (fs.existsSync(p)) return p;
+      if (p && fs.existsSync(p)) return path.resolve(p);
     }
-    const tried = path.isAbsolute(raw) ? raw : candidates[0];
-    throw new Error(`Google service account JSON not found at ${tried}`);
+    throw new Error(`Google service account JSON not found at ${raw}`);
   }
 
-  _auth() {
+  _serviceAccountAuth() {
     const abs = this._resolveJsonPath();
     const raw = fs.readFileSync(abs, 'utf8');
     const creds = JSON.parse(raw);
-    const auth = new google.auth.JWT({
+    return new google.auth.JWT({
       email: creds.client_email,
       key: creds.private_key,
       scopes: ['https://www.googleapis.com/auth/drive'],
     });
-    return auth;
   }
 
-  getDrive() {
-    if (!this._drive) {
-      const auth = this._auth();
-      this._drive = google.drive({ version: 'v3', auth });
+  async _getAuth() {
+    if (getGoogleDriveAuthMode() === 'service_account') {
+      return this._serviceAccountAuth();
     }
-    return this._drive;
+    return getAuthorizedOAuth2Client();
   }
 
-  /** @returns {string} service account client_email from JSON */
+  async getDrive() {
+    const auth = await this._getAuth();
+    if (getGoogleDriveAuthMode() === 'oauth') {
+      const creds = auth.credentials || {};
+      if (!creds.access_token) {
+        throw new Error(
+          'Google Drive is not connected. Open Settings → Google Drive → Reconnect.'
+        );
+      }
+    }
+    return google.drive({ version: 'v3', auth });
+  }
+
+  /** @returns {string|null} service account email (legacy mode only) */
   getServiceAccountEmail() {
+    if (getGoogleDriveAuthMode() !== 'service_account') return null;
     const abs = this._resolveJsonPath();
     const creds = JSON.parse(fs.readFileSync(abs, 'utf8'));
-    return String(creds.client_email || '').trim();
+    return String(creds.client_email || '').trim() || null;
   }
 
-  /** Throws a clear error if the service account cannot access this folder (share / wrong id). */
   async assertFolderAccessible(folderId, label = 'folder') {
-    const drive = this.getDrive();
+    const drive = await this.getDrive();
     const id = String(folderId || '').trim();
     if (!id) throw new Error(`Google Drive ${label} id is empty`);
     try {
       await drive.files.get({
         fileId: id,
-        fields: 'id, name',
+        fields: 'id, name, driveId',
         supportsAllDrives: true,
       });
     } catch (e) {
       const status = e?.code || e?.response?.status;
       if (status === 404 || status === 403) {
+        if (getGoogleDriveAuthMode() === 'oauth') {
+          const scope = getDriveScope();
+          const driveFileOnly = scope.includes('drive.file') && !scope.includes('/auth/drive');
+          const scopeHint = driveFileOnly
+            ? ' OAuth scope is drive.file — it cannot open folders you created manually. Set GOOGLE_DRIVE_OAUTH_SCOPE=https://www.googleapis.com/auth/drive in backend/.env, restart backend, then Settings → Google Drive → Reconnect.'
+            : ' Ensure GOOGLE_DRIVE_ROOT_FOLDER_ID is a folder in the connected Google account’s My Drive, then Reconnect in Settings → Google Drive if you changed accounts.';
+          throw new Error(
+            `Google Drive ${label} not accessible (id ${id}).${scopeHint}`
+          );
+        }
         const email = this.getServiceAccountEmail();
         throw new Error(
-          `Google Drive ${label} not accessible (id ${id}). Share that folder in Drive with the service account as Editor: ${email || '(see JSON client_email)'}`
+          `Google Drive ${label} not accessible (id ${id}). Share that folder with the service account as Editor: ${email || '(see JSON client_email)'}`
         );
       }
       throw e;
@@ -82,7 +107,7 @@ class GoogleDriveStorage {
   }
 
   async createFolderIfNotExists(parentFolderId, folderName) {
-    const drive = this.getDrive();
+    const drive = await this.getDrive();
     const name = String(folderName || '').trim();
     if (!name) throw new Error('folderName required');
     const parent = String(parentFolderId || '').trim();
@@ -115,7 +140,7 @@ class GoogleDriveStorage {
   }
 
   async uploadDocument({ folderId, filePath, fileName, mimeType }) {
-    const drive = this.getDrive();
+    const drive = await this.getDrive();
     const media = {
       mimeType: mimeType || 'application/octet-stream',
       body: fs.createReadStream(filePath),
@@ -145,7 +170,7 @@ class GoogleDriveStorage {
   }
 
   async replaceDocument({ fileId, filePath, mimeType }) {
-    const drive = this.getDrive();
+    const drive = await this.getDrive();
     const media = {
       mimeType: mimeType || 'application/octet-stream',
       body: fs.createReadStream(filePath),
@@ -161,7 +186,7 @@ class GoogleDriveStorage {
   }
 
   async getWebLink(fileId) {
-    const drive = this.getDrive();
+    const drive = await this.getDrive();
     const res = await drive.files.get({
       fileId: String(fileId),
       fields: 'id, webViewLink, webContentLink',
@@ -170,9 +195,8 @@ class GoogleDriveStorage {
     return { webViewLink: res.data.webViewLink || null, webContentLink: res.data.webContentLink || null };
   }
 
-  /** Download file bytes (binary Google Drive file, e.g. PDF). */
   async downloadFileMedia(fileId) {
-    const drive = this.getDrive();
+    const drive = await this.getDrive();
     const res = await drive.files.get(
       { fileId: String(fileId), alt: 'media', supportsAllDrives: true },
       { responseType: 'arraybuffer' }

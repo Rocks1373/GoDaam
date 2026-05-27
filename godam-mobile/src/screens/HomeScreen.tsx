@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ScrollView,
   Platform,
+  AppState,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,8 +15,9 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp, NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './LoginScreen';
 import { me } from '../api/authApi';
-import { registerDevice } from '../api/notificationsApi';
+import { registerDevice, testMyPush } from '../api/notificationsApi';
 import { getMobileSummary, listOrders } from '../api/ordersApi';
+import { listAwaitingSendForPickup } from '../api/sendForPickupApi';
 import { shouldSkipExpoNotifications, tryConfigurePushNotifications } from '../utils/expoPushSafe';
 import { useTheme } from '../theme/ThemeContext';
 import type { ThemeDefinition } from '../theme/palettes';
@@ -24,9 +26,12 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
 type QuickActionRoute =
   | 'Orders'
+  | 'SendForPickup'
   | 'PickedOrders'
   | 'ScanRack'
+  | 'RackUpdate'
   | 'Receiving'
+  | 'UpcomingShipments'
   | 'Settings'
   | 'MainStockCheck'
   | 'StockByRackCheck'
@@ -50,6 +55,13 @@ const ACTIONS: ActionItem[] = [
     route: 'Orders',
   },
   {
+    key: 'sendForPickup',
+    title: 'Send for pick',
+    subtitle: 'Release uploaded orders to pickers',
+    icon: 'send-outline',
+    route: 'SendForPickup',
+  },
+  {
     key: 'pickedOrders',
     title: 'Picked orders',
     subtitle: 'Who picked what',
@@ -66,9 +78,16 @@ const ACTIONS: ActionItem[] = [
   {
     key: 'scan',
     title: 'Scan Rack',
-    subtitle: 'Locate by barcode',
-    icon: 'barcode-outline',
+    subtitle: 'Part list · rack · qty → Stock By Rack',
+    icon: 'layers-outline',
     route: 'ScanRack',
+  },
+  {
+    key: 'rackUpdate',
+    title: 'Rack Update',
+    subtitle: 'Scan → local → upload SBR',
+    icon: 'layers-outline',
+    route: 'RackUpdate',
   },
   {
     key: 'receiving',
@@ -76,6 +95,13 @@ const ACTIONS: ActionItem[] = [
     subtitle: 'Inbound & putaway',
     icon: 'cube-outline',
     route: 'Receiving',
+  },
+  {
+    key: 'shipments',
+    title: 'Shipments',
+    subtitle: 'Upcoming inbound shipments',
+    icon: 'boat-outline',
+    route: 'UpcomingShipments',
   },
   {
     key: 'settings',
@@ -108,6 +134,7 @@ export default function HomeScreen({ navigation }: Props) {
   const [userLabel, setUserLabel] = useState('');
   const [roleLabel, setRoleLabel] = useState('');
   const [orderTotal, setOrderTotal] = useState(0);
+  const [awaitingSendTotal, setAwaitingSendTotal] = useState(0);
   const [summary, setSummary] = useState({
     notifications_unread: 0,
     orders_unseen: 0,
@@ -118,16 +145,55 @@ export default function HomeScreen({ navigation }: Props) {
     notif_unread_picked: 0,
   });
   const [pushNote, setPushNote] = useState('');
+  const [pushTesting, setPushTesting] = useState(false);
+  const [summaryErr, setSummaryErr] = useState<string | null>(null);
+  const summaryEverOk = useRef(false);
   const [perms, setPerms] = useState<Record<string, boolean>>({});
   const [permissionsLoaded, setPermissionsLoaded] = useState(false);
 
   useEffect(() => {
-    setPushNote(
-      shouldSkipExpoNotifications()
-        ? 'Alerts: use a dev build for push on Android (Expo Go limitation).'
-        : 'Alerts: push when permission granted.'
-    );
+    setPushNote(shouldSkipExpoNotifications() ? 'Alerts: Expo Go cannot receive Android push.' : 'Alerts: checking push...');
   }, []);
+
+  const refreshPushRegistration = useCallback(async () => {
+    const result = await tryConfigurePushNotifications(registerDevice);
+    if (result.ok) {
+      const prefix = result.tokenPrefix ? ` (${result.tokenPrefix}…)` : '';
+      setPushNote(`Alerts: phone push enabled${prefix}. Tap to send test.`);
+    } else if (result.skipped) {
+      setPushNote('Alerts: install the APK/dev build. Expo Go cannot receive Android push.');
+    } else if (result.permissionStatus && result.permissionStatus !== 'granted') {
+      setPushNote('Alerts off: allow Notifications in Android app settings. Tap to retry.');
+    } else {
+      setPushNote(`Alerts issue: ${result.error || 'push setup failed'}. Tap to retry.`);
+    }
+    return result;
+  }, []);
+
+  const onPushBannerPress = useCallback(async () => {
+    if (pushTesting) return;
+    setPushTesting(true);
+    try {
+      const setup = await refreshPushRegistration();
+      if (!setup.ok) return;
+      const res = await testMyPush('GoDaam test', 'If you see this, push is working.');
+      if (res.ok && res.result?.ok !== false) {
+        setPushNote('Test push sent. Check your notification shade in a few seconds.');
+      } else {
+        const err =
+          res.result?.errors?.[0]?.error ||
+          res.error ||
+          res.result?.tickets?.find((t) => t.status === 'error')?.message ||
+          'Server could not deliver push';
+        setPushNote(`Push failed: ${err}. Check Expo FCM credentials.`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setPushNote(`Push test error: ${msg}`);
+    } finally {
+      setPushTesting(false);
+    }
+  }, [pushTesting, refreshPushRegistration]);
 
   useEffect(() => {
     (async () => {
@@ -137,36 +203,54 @@ export default function HomeScreen({ navigation }: Props) {
         setRoleLabel(user.role);
         setPerms(user.permissions || {});
         setPermissionsLoaded(true);
-        await tryConfigurePushNotifications(registerDevice);
+        await refreshPushRegistration();
       } catch {
         setUserLabel('');
       }
     })();
-  }, []);
+  }, [refreshPushRegistration]);
 
   const refreshSummary = useCallback(async () => {
     try {
-      const [s, list] = await Promise.all([getMobileSummary(), listOrders().catch(() => [])]);
+      const role = String(roleLabel || '').toLowerCase();
+      const canSend =
+        role === 'admin' ||
+        role === 'manager' ||
+        role === 'checker' ||
+        !!perms.can_upload_outbound ||
+        !!perms.can_confirm_picked;
+      const [s, list, awaiting] = await Promise.all([
+        getMobileSummary(),
+        listOrders().catch(() => []),
+        canSend ? listAwaitingSendForPickup().catch(() => []) : Promise.resolve([]),
+      ]);
       setSummary(s);
       setOrderTotal(Array.isArray(list) ? list.length : 0);
+      setAwaitingSendTotal(Array.isArray(awaiting) ? awaiting.length : 0);
+      summaryEverOk.current = true;
+      setSummaryErr(null);
     } catch {
-      setSummary({
-        notifications_unread: 0,
-        orders_unseen: 0,
-        inbound_putaway_pending: 0,
-        notif_unread_orders: 0,
-        notif_unread_delivery: 0,
-        notif_unread_inbound: 0,
-        notif_unread_picked: 0,
-      });
+      if (!summaryEverOk.current) {
+        setSummary({
+          notifications_unread: 0,
+          orders_unseen: 0,
+          inbound_putaway_pending: 0,
+          notif_unread_orders: 0,
+          notif_unread_delivery: 0,
+          notif_unread_inbound: 0,
+          notif_unread_picked: 0,
+        });
+      }
+      setSummaryErr('Home counts could not refresh. Your last counts are kept when possible.');
     }
-  }, []);
+  }, [roleLabel, perms.can_upload_outbound, perms.can_confirm_picked]);
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
       const run = async () => {
         if (!alive) return;
+        await refreshPushRegistration();
         await refreshSummary();
       };
       void run();
@@ -175,8 +259,15 @@ export default function HomeScreen({ navigation }: Props) {
         alive = false;
         clearInterval(t);
       };
-    }, [refreshSummary])
+    }, [refreshSummary, refreshPushRegistration, roleLabel, perms.can_upload_outbound, perms.can_confirm_picked])
   );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void refreshPushRegistration();
+    });
+    return () => sub.remove();
+  }, [refreshPushRegistration]);
 
   useEffect(() => {
     let sub: { remove: () => void } | undefined;
@@ -230,6 +321,22 @@ export default function HomeScreen({ navigation }: Props) {
 
   const visibleActions = useMemo(() => {
     return ACTIONS.filter((item) => {
+      if (item.key === 'sendForPickup') {
+        if (!permissionsLoaded) return false;
+        const r = String(roleLabel || '').toLowerCase();
+        return (
+          r === 'admin' ||
+          r === 'manager' ||
+          r === 'checker' ||
+          !!perms.can_upload_outbound ||
+          !!perms.can_confirm_picked
+        );
+      }
+      if (item.key === 'orders') {
+        if (!permissionsLoaded) return false;
+        const r = String(roleLabel || '').toLowerCase();
+        return r === 'admin' || r === 'manager' || r === 'checker' || !!perms.can_pick_orders || !!perms.can_view_orders;
+      }
       if (item.key === 'delivery') {
         if (!permissionsLoaded) return false;
         const r = String(roleLabel || '').toLowerCase();
@@ -248,6 +355,11 @@ export default function HomeScreen({ navigation }: Props) {
         if (!permissionsLoaded) return true;
         return !!(perms.can_pick_orders || perms.can_view_stock_by_rack);
       }
+      if (item.key === 'shipments' || item.key === 'receiving') {
+        if (!permissionsLoaded) return false;
+        const r = String(roleLabel || '').toLowerCase();
+        return r === 'admin' || !!perms.can_receive_stock;
+      }
       return true;
     });
   }, [perms, permissionsLoaded, roleLabel]);
@@ -258,6 +370,16 @@ export default function HomeScreen({ navigation }: Props) {
     const recvAlerts = summary.inbound_putaway_pending + (summary.notif_unread_inbound ?? 0);
     const pickedAlerts = summary.notif_unread_picked ?? 0;
     return visibleActions.map((item) => {
+      if (item.key === 'sendForPickup') {
+        return {
+          ...item,
+          badge: awaitingSendTotal,
+          subtitle:
+            awaitingSendTotal > 0
+              ? `${awaitingSendTotal} ready to send for pick`
+              : item.subtitle,
+        };
+      }
       if (item.key === 'orders') {
         return {
           ...item,
@@ -298,6 +420,7 @@ export default function HomeScreen({ navigation }: Props) {
     });
   }, [
     visibleActions,
+    awaitingSendTotal,
     summary.orders_unseen,
     summary.inbound_putaway_pending,
     summary.notif_unread_orders,
@@ -316,6 +439,11 @@ export default function HomeScreen({ navigation }: Props) {
         ]}
         showsVerticalScrollIndicator={false}
       >
+        {summaryErr ? (
+          <View style={styles.summaryWarn}>
+            <Text style={styles.summaryWarnText}>{summaryErr}</Text>
+          </View>
+        ) : null}
         <View style={styles.hero}>
           <View style={styles.heroTop}>
             <Image
@@ -372,10 +500,16 @@ export default function HomeScreen({ navigation }: Props) {
           </View>
         </View>
 
-        <View style={styles.alertBanner}>
+        <Pressable
+          style={({ pressed }) => [styles.alertBanner, pressed && styles.tilePressed]}
+          onPress={onPushBannerPress}
+          disabled={pushTesting}
+          accessibilityRole="button"
+          accessibilityLabel="Push alerts status. Tap to register and send test notification."
+        >
           <Ionicons name="notifications-outline" size={18} color={palette.warningText} />
-          <Text style={styles.alertText}>{pushNote}</Text>
-        </View>
+          <Text style={styles.alertText}>{pushTesting ? 'Sending test push…' : pushNote}</Text>
+        </Pressable>
 
         <Text style={styles.sectionLabel}>Quick actions</Text>
         <View style={styles.grid}>
@@ -448,6 +582,15 @@ function createHomeStyles(c: ThemeDefinition) {
     screen: { flex: 1, backgroundColor: c.background },
     scroll: { flex: 1 },
     scrollContent: { paddingHorizontal: 20, paddingTop: 8 },
+    summaryWarn: {
+      marginBottom: 12,
+      padding: 10,
+      borderRadius: 10,
+      backgroundColor: c.warningBg,
+      borderWidth: 1,
+      borderColor: c.warningBorder,
+    },
+    summaryWarnText: { fontSize: 11, color: c.warningText, lineHeight: 16 },
     hero: { marginBottom: 20 },
     heroTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
     brandMark: { width: 48, height: 48, borderRadius: 12 },

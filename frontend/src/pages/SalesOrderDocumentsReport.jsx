@@ -165,7 +165,7 @@ export default function SalesOrderDocumentsReport() {
           {loading ? 'Loading…' : 'Run report'}
         </button>
         <Link className="btn-secondary" to="/sales-order-documents">
-          Open Sales Order Documents
+          Open Document Center
         </Link>
       </div>
       {soSummary.length > 0 ? (

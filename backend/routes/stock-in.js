@@ -7,6 +7,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 
 const { normalizeExcelRows } = require('../utils/excelDates');
 const { readFirstSheetAsObjects } = require('../utils/readXlsxFirstSheetExceljs');
 const { resolveWarehouseIdForRequest } = require('../services/warehouseContext');
+const { normalizeDateValue } = require('../lib/safeDateSql');
 
 function pick(row, ...names) {
   for (const n of names) {
@@ -39,11 +40,13 @@ function normalizeRow(row) {
   const source_type = pick(row, 'source_type', 'Source Type') || row.source_type;
   const reference_no = pick(row, 'reference_no', 'Reference No', 'Reference') || row.reference_no;
   const remarks = pick(row, 'remarks', 'Remarks') || row.remarks;
+  const vendor_id_raw = pick(row, 'vendor_id', 'Vendor ID', 'Vendor Id') ?? row.vendor_id;
+  const vendor_id =
+    vendor_id_raw === '' || vendor_id_raw == null ? null : Number(vendor_id_raw);
+  const vendor_name = pick(row, 'vendor_name', 'Vendor Name') || row.vendor_name;
+  const uom = pick(row, 'uom', 'UOM', 'Uom') || row.uom;
 
-  const td =
-    transaction_date !== undefined && transaction_date !== null && transaction_date !== ''
-      ? String(transaction_date).trim().slice(0, 10)
-      : '';
+  const td = normalizeDateValue(transaction_date);
 
   return {
     transaction_date: td,
@@ -55,6 +58,9 @@ function normalizeRow(row) {
     source_type: source_type || null,
     reference_no: reference_no || null,
     remarks: remarks || null,
+    vendor_id: vendor_id != null && Number.isFinite(vendor_id) ? vendor_id : null,
+    vendor_name: vendor_name ? String(vendor_name).trim() : null,
+    uom: uom ? String(uom).trim() : null,
     warehouse_id: Number(pick(row, 'warehouse_id', 'Warehouse ID', 'Warehouse Id') || row.warehouse_id) || null,
   };
 }
@@ -113,7 +119,10 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
              qty_in = ?,
              source_type = ?,
              reference_no = ?,
-             remarks = ?
+             remarks = ?,
+             vendor_id = ?,
+             vendor_name = ?,
+             uom = ?
          WHERE id = ?`,
         [
           r.sap_part_number,
@@ -122,6 +131,9 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
           r.source_type,
           r.reference_no,
           r.remarks,
+          r.vendor_id,
+          r.vendor_name,
+          r.uom,
           existing.id,
         ],
         (err) => (err ? reject(err) : resolve())
@@ -131,8 +143,8 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO stock_in
-          (transaction_date, part_number, sap_part_number, description, rack_location, qty_in, source_type, reference_no, remarks, warehouse_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (transaction_date, part_number, sap_part_number, description, rack_location, qty_in, source_type, reference_no, remarks, warehouse_id, vendor_id, vendor_name, uom)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           r.transaction_date,
           r.part_number,
@@ -144,6 +156,9 @@ async function applyStockIn(db, row, { updateExisting = false } = {}) {
           r.reference_no,
           r.remarks,
           r.warehouse_id,
+          r.vendor_id,
+          r.vendor_name,
+          r.uom,
         ],
         (err) => (err ? reject(err) : resolve())
       );
@@ -252,7 +267,14 @@ async function updateStockByRackInDelta(db, { part_number, rack_location, wareho
            first_entry_date = COALESCE(first_entry_date, ?),
            last_updated = CURRENT_TIMESTAMP
        WHERE id = ?`,
-      [sap_part_number || null, description || null, nextTotalIn, nextAvailable, transaction_date || null, current.id],
+      [
+        sap_part_number || null,
+        description || null,
+        nextTotalIn,
+        nextAvailable,
+        normalizeDateValue(transaction_date),
+        current.id,
+      ],
       (err) => (err ? reject(err) : resolve())
     );
   });
@@ -334,7 +356,10 @@ router.put('/:id', async (req, res) => {
              qty_in = ?,
              source_type = ?,
              reference_no = ?,
-             remarks = ?
+             remarks = ?,
+             vendor_id = ?,
+             vendor_name = ?,
+             uom = ?
          WHERE id = ?`,
         [
           updated.transaction_date,
@@ -344,6 +369,9 @@ router.put('/:id', async (req, res) => {
           updated.source_type,
           updated.reference_no,
           updated.remarks,
+          updated.vendor_id,
+          updated.vendor_name,
+          updated.uom,
           id,
         ],
         (err) => (err ? reject(err) : resolve())

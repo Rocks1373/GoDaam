@@ -13,8 +13,11 @@ const DOC_TYPES = [
   { id: 'OTHER', label: 'Other' },
 ];
 
+// TODO: Re-enable only after the local scanner agent is production-safe.
+const SCANNER_AGENT_ENABLED = false;
+
 /**
- * Local scanner workflow + fallback file upload (no browser TWAIN).
+ * Document upload workflow. Scanner-agent controls are disabled for production.
  */
 export default function ScanDocumentPanel({
   warehouseId,
@@ -27,7 +30,7 @@ export default function ScanDocumentPanel({
   customerName = '',
   whOk = true,
   onSuccess,
-  title = 'Scan document',
+  title = 'Upload document',
   className = '',
 }) {
   const [agentUrl, setAgentUrl] = useState(() => defaultScannerAgentUrl);
@@ -44,6 +47,8 @@ export default function ScanDocumentPanel({
   const [cust, setCust] = useState(customerName);
   const [acc, setAcc] = useState('');
   const [docType, setDocType] = useState('DELIVERY_NOTE');
+  const [dup, setDup] = useState(null);
+  const [pendingFile, setPendingFile] = useState(null);
 
   useEffect(() => {
     setSo(salesOrderNumber || '');
@@ -56,6 +61,10 @@ export default function ScanDocumentPanel({
   }, [salesOrderNumber, outboundNumber, dnNumber, invoiceNumber, customerPo, gappPo, customerName]);
 
   const probe = useCallback(async () => {
+    if (!SCANNER_AGENT_ENABLED) {
+      setAgentReachable(false);
+      return;
+    }
     setChecking(true);
     try {
       const r = await scannerAgentHealth(agentUrl);
@@ -69,7 +78,11 @@ export default function ScanDocumentPanel({
   }, [agentUrl]);
 
   useEffect(() => {
-    void probe();
+    if (SCANNER_AGENT_ENABLED) {
+      void probe();
+    } else {
+      setAgentReachable(false);
+    }
   }, [probe]);
 
   const needsExtra = useMemo(() => {
@@ -117,6 +130,10 @@ export default function ScanDocumentPanel({
   };
 
   const runScan = async () => {
+    if (!SCANNER_AGENT_ENABLED) {
+      toast.message('Scanner agent is disabled. Upload a PDF or image instead.');
+      return;
+    }
     try {
       const payload = buildScanPayload();
       setScanBusy(true);
@@ -130,7 +147,7 @@ export default function ScanDocumentPanel({
     }
   };
 
-  const runFallbackUpload = async (file) => {
+  const runFallbackUpload = async (file, duplicate_action) => {
     if (!file) return;
     try {
       const payload = buildScanPayload();
@@ -147,10 +164,23 @@ export default function ScanDocumentPanel({
       if (payload.gapp_po) fd.append('gapp_po', payload.gapp_po);
       if (payload.customer_name) fd.append('customer_name', payload.customer_name);
       if (payload.pod_type) fd.append('pod_type', payload.pod_type);
-      await salesOrderDocumentsApi.upload(fd);
+      if (duplicate_action) fd.append('duplicate_action', duplicate_action);
+      const res = await salesOrderDocumentsApi.upload(fd);
+      if (res?.conflict) {
+        setDup(res.existing);
+        setPendingFile(file);
+        return;
+      }
       toast.success('Uploaded');
+      setDup(null);
+      setPendingFile(null);
       onSuccess?.();
     } catch (e) {
+      if (e.response?.status === 409 && e.response?.data?.conflict) {
+        setDup(e.response.data.existing);
+        setPendingFile(file);
+        return;
+      }
       toast.error(e.response?.data?.error || e.message || 'Upload failed');
     }
   };
@@ -161,32 +191,33 @@ export default function ScanDocumentPanel({
     <div className={`rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 text-[11px] ${className}`}>
       <div className="font-bold text-indigo-950 mb-1">{title}</div>
       <p className="text-gray-600 text-[10px] mb-2">
-        Physical scanners are driven by the{' '}
-        <strong>Local Scanner Agent</strong> on this PC (<code className="text-[10px]">scanner-agent/</code> in the repo).
-        The browser only sends a job to <code className="text-[10px]">127.0.0.1</code>; it does not access TWAIN/WIA.
+        Scanner-agent integration is temporarily disabled in production. Upload a PDF or image below to attach documents to
+        the sales order folder.
       </p>
 
-      <div className="grid sm:grid-cols-2 gap-2 mb-2">
-        <label className="flex flex-col gap-0.5 text-[10px] font-bold text-gray-700">
-          Agent URL
-          <input className="input-field font-normal" value={agentUrl} onChange={(e) => setAgentUrl(e.target.value)} />
-        </label>
-        <div className="flex items-end gap-2">
-          <span className="text-[10px] text-gray-600">
-            Status:{' '}
-            {checking ? (
-              'Checking…'
-            ) : agentReachable ? (
-              <span className="text-emerald-700 font-semibold">Agent online</span>
-            ) : (
-              <span className="text-amber-800 font-semibold">Offline — file upload below</span>
-            )}
-          </span>
-          <button type="button" className="btn-secondary !py-0.5 !px-2 text-[10px]" onClick={() => void probe()} disabled={checking}>
-            Recheck
-          </button>
+      {SCANNER_AGENT_ENABLED ? (
+        <div className="grid sm:grid-cols-2 gap-2 mb-2">
+          <label className="flex flex-col gap-0.5 text-[10px] font-bold text-gray-700">
+            Agent URL
+            <input className="input-field font-normal" value={agentUrl} onChange={(e) => setAgentUrl(e.target.value)} />
+          </label>
+          <div className="flex items-end gap-2">
+            <span className="text-[10px] text-gray-600">
+              Status:{' '}
+              {checking ? (
+                'Checking...'
+              ) : agentReachable ? (
+                <span className="text-emerald-700 font-semibold">Agent online</span>
+              ) : (
+                <span className="text-amber-800 font-semibold">Offline - file upload below</span>
+              )}
+            </span>
+            <button type="button" className="btn-secondary !py-0.5 !px-2 text-[10px]" onClick={() => void probe()} disabled={checking}>
+              Recheck
+            </button>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2 mb-2">
         <label className="flex flex-col gap-0.5 text-[10px] font-bold text-gray-700">
@@ -237,17 +268,19 @@ export default function ScanDocumentPanel({
       </div>
 
       <div className="flex flex-wrap items-center gap-2 mb-2">
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={scanBusy || checking || !agentReachable}
-          onClick={() => void runScan()}
-          title={!agentReachable ? 'Start Local Scanner Agent on this PC' : ''}
-        >
-          {scanBusy ? 'Scanning & uploading…' : 'Scan document (local agent)'}
-        </button>
+        {SCANNER_AGENT_ENABLED ? (
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={scanBusy || checking || !agentReachable}
+            onClick={() => void runScan()}
+            title={!agentReachable ? 'Start Local Scanner Agent on this PC' : ''}
+          >
+            {scanBusy ? 'Scanning & uploading...' : 'Scan document (local agent)'}
+          </button>
+        ) : null}
         <label className="btn-secondary cursor-pointer !py-1 !px-2">
-          Upload file instead
+          Upload document file
           <input
             type="file"
             className="hidden"
@@ -260,6 +293,24 @@ export default function ScanDocumentPanel({
           />
         </label>
       </div>
+
+      {dup ? (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px]">
+          <div className="font-bold text-amber-950">File already exists</div>
+          <p className="mt-1 font-mono break-all">{dup.stored_file_name}</p>
+          <div className="flex flex-wrap gap-2 mt-2">
+            <button type="button" className="btn-primary !py-1 !px-2" onClick={() => pendingFile && void runFallbackUpload(pendingFile, 'replace')}>
+              Replace
+            </button>
+            <button type="button" className="btn-secondary !py-1 !px-2" onClick={() => pendingFile && void runFallbackUpload(pendingFile, 'append')}>
+              Append (second name)
+            </button>
+            <button type="button" className="btn-secondary !py-1 !px-2" onClick={() => { setDup(null); setPendingFile(null); }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

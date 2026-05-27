@@ -4,7 +4,7 @@ const XLSX = require('xlsx');
 const { promisify } = require('util');
 
 const db = require('../db');
-
+const { runDb } = require('../utils/dbRun');
 const { normalizeExcelRows } = require('../utils/excelDates');
 
 const router = express.Router();
@@ -174,7 +174,8 @@ router.put('/:id', async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
     const p = normalizeVendor(req.body || {});
-    const r = await dbRun(
+    const { changes } = await runDb(
+      db,
       `UPDATE vendors SET
         vendor_number = ?,
         vendor_name = ?,
@@ -187,7 +188,7 @@ router.put('/:id', async (req, res) => {
        WHERE id = ?`,
       [p.vendor_number, p.vendor_name, p.contact_person, p.phone_number, p.email, p.remarks, p.is_active, id]
     );
-    if (!r.changes) return res.status(404).json({ error: 'Vendor not found' });
+    if (!changes) return res.status(404).json({ error: 'Vendor not found' });
     res.json(await dbGet(`SELECT * FROM vendors WHERE id = ?`, [id]));
   } catch (e) {
     if (String(e.message || '').includes('UNIQUE constraint failed: vendors.vendor_number')) {
@@ -202,8 +203,12 @@ router.delete('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
-    const r = await dbRun(`UPDATE vendors SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [id]);
-    res.json({ ok: true, changes: r.changes || 0 });
+    const { changes } = await runDb(
+      db,
+      `UPDATE vendors SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [id]
+    );
+    res.json({ ok: true, changes: changes || 0 });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

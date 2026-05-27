@@ -1,11 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Search, Upload, Copy, Eye, Package, Truck, GitCompare, Plus } from 'lucide-react';
+import { Search, Upload, Copy, Eye, Package, Truck, GitCompare, Plus, FileDown } from 'lucide-react';
 import { toast } from 'sonner';
-import { mainStockApi, inboundApi, soldOutApi, stockComparisonApi, vendorItemsApi, vendorsApi } from '../services/api';
+import { mainStockApi, inboundApi, soldOutApi, stockComparisonApi, vendorsApi } from '../services/api';
+
+async function fetchMainStockPartPrefixSuggestions(q) {
+  const rows = await mainStockApi.search(q, { partPrefix: true });
+  const seen = new Set();
+  const out = [];
+  for (const r of rows || []) {
+    const part_number = String(r.part_number || '').trim();
+    if (!part_number) continue;
+    const key = part_number.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      id: r.id,
+      part_number,
+      sap_part_number: r.sap_part_number || '',
+      description: r.description || '',
+      uom: r.uom || '',
+      vendor_id: r.vendor_id ?? null,
+      vendor_number: r.vendor_number || '',
+      vendor_name: r.vendor_name || '',
+    });
+  }
+  return out.slice(0, 30);
+}
 import { formatDateDDMMYYYY } from '../utils/dateDisplay';
 import { reportUploadResult, reportUploadError } from '../utils/uploadErrorReport';
 import { useTableSort } from '../hooks/useTableSort';
 import SortTh from '../components/SortTh';
+import InboundFilterAutocomplete from '../components/InboundFilterAutocomplete';
+import InboundUploadValidation from '../components/InboundUploadValidation';
+import { exportJsonToExcel } from '../utils/exportExcel';
 
 function downloadCsvFile(filename, headers, rows) {
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
@@ -115,12 +142,47 @@ function parseMainStockPaste(text) {
 
 function parseInboundPaste(text) {
   const lines = text.trim().split('\n').filter((l) => l.trim());
-  return lines.map((line) => {
+  const first = (lines[0] || '').toLowerCase();
+  const hasNewHeader = first.includes('vendor') && first.includes('part');
+  const hasLegacyHeader = first.includes('batch') && first.includes('part');
+  const hasHeader = hasNewHeader || hasLegacyHeader;
+  const dataLines = hasHeader ? lines.slice(1) : lines;
+  return dataLines.map((line) => {
     const cols = line.includes('\t') ? line.split('\t') : line.split(',').map((c) => c.trim());
+    if (hasNewHeader || (cols.length >= 6 && cols.length <= 11)) {
+      return {
+        vendor_number: cols[0],
+        vendor_name: cols[1],
+        part_number: cols[2],
+        description: cols[3],
+        quantity: parseFloat(cols[4]) || 0,
+        uom: cols[5] || '',
+        size: cols[6] || '',
+        weight: cols[7] || '',
+        local_po: cols[8] || '',
+        vendor_invoice: cols[9] || '',
+        sap_bill: cols[10] || '',
+      };
+    }
+    if (cols.length >= 10) {
+      return {
+        'Batch/Vendor Name': cols[0],
+        'Local PO': cols[1],
+        'SAP PO': cols[2],
+        'SAP Invoice Number': cols[3],
+        'Part Number': cols[4],
+        'SAP Part Number': cols[5] || '',
+        Description: cols[6],
+        'Inbound Qty': parseFloat(cols[7]) || 0,
+        'Received Date': cols[8] || '',
+        Remarks: cols[9] || '',
+      };
+    }
     return {
       'Batch/Vendor Name': cols[0],
-      'Invoice No.': cols[1],
-      'PO Number': cols[2],
+      'Local PO': '',
+      'SAP PO': cols[2] || '',
+      'SAP Invoice Number': cols[1] || '',
       'Part Number': cols[3],
       'SAP Part Number': cols[4] || '',
       Description: cols[5],
@@ -160,6 +222,10 @@ export default function MainStock() {
   const [tab, setTab] = useState('stock');
   const [stocks, setStocks] = useState([]);
   const [inboundRows, setInboundRows] = useState([]);
+  const [inboundFilterLpo, setInboundFilterLpo] = useState('');
+  const [inboundFilterSapPo, setInboundFilterSapPo] = useState('');
+  const [inboundFilterInvoice, setInboundFilterInvoice] = useState('');
+  const [inboundFilterPart, setInboundFilterPart] = useState('');
   const [soldRows, setSoldRows] = useState([]);
   const [reportRows, setReportRows] = useState([]);
   const [reportFilter, setReportFilter] = useState('all');
@@ -208,6 +274,78 @@ export default function MainStock() {
     remarks: '',
   });
 
+  const [inboundSingleOpen, setInboundSingleOpen] = useState(false);
+  const [inboundSingleForm, setInboundSingleForm] = useState({
+    vendor_id: '',
+    vendor_number: '',
+    vendor_name: '',
+    part_number: '',
+    sap_part_number: '',
+    description: '',
+    uom: '',
+    quantity: '',
+    lpo: '',
+    sap_po: '',
+    invoice_no: '',
+    received_date: new Date().toISOString().slice(0, 10),
+    remarks: '',
+  });
+  const [inboundPartSearch, setInboundPartSearch] = useState('');
+  const [inboundPartSuggestions, setInboundPartSuggestions] = useState([]);
+
+  const [outboundSingleOpen, setOutboundSingleOpen] = useState(false);
+  const [outboundSingleForm, setOutboundSingleForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    po: '',
+    customer_po: '',
+    invoice_no: '',
+    customer_name: '',
+    delivery_address: '',
+    part_number: '',
+    sap_part_number: '',
+    description: '',
+    outbound_qty: '',
+    delivery: '',
+    sales_doc: '',
+    status: 'Delivered',
+    remarks: '',
+  });
+  const [outboundPartSearch, setOutboundPartSearch] = useState('');
+  const [outboundPartSuggestions, setOutboundPartSuggestions] = useState([]);
+
+  const emptyInboundSingleForm = () => ({
+    vendor_id: '',
+    vendor_number: '',
+    vendor_name: '',
+    part_number: '',
+    sap_part_number: '',
+    description: '',
+    uom: '',
+    quantity: '',
+    lpo: '',
+    sap_po: '',
+    invoice_no: '',
+    received_date: new Date().toISOString().slice(0, 10),
+    remarks: '',
+  });
+
+  const emptyOutboundSingleForm = () => ({
+    date: new Date().toISOString().slice(0, 10),
+    po: '',
+    customer_po: '',
+    invoice_no: '',
+    customer_name: '',
+    delivery_address: '',
+    part_number: '',
+    sap_part_number: '',
+    description: '',
+    outbound_qty: '',
+    delivery: '',
+    sales_doc: '',
+    status: 'Delivered',
+    remarks: '',
+  });
+
   const fileStockRef = useRef(null);
   const fileInboundRef = useRef(null);
   const fileSoldRef = useRef(null);
@@ -229,15 +367,31 @@ export default function MainStock() {
     }
   };
 
+  const inboundListParams = useCallback(() => {
+    const p = {};
+    if (inboundFilterLpo.trim()) p.lpo = inboundFilterLpo.trim();
+    if (inboundFilterSapPo.trim()) p.sap_po = inboundFilterSapPo.trim();
+    if (inboundFilterInvoice.trim()) p.invoice = inboundFilterInvoice.trim();
+    if (inboundFilterPart.trim()) p.part_number = inboundFilterPart.trim();
+    return p;
+  }, [inboundFilterLpo, inboundFilterSapPo, inboundFilterInvoice, inboundFilterPart]);
+
   const loadInbound = async () => {
     setLoading(true);
     try {
-      setInboundRows(await inboundApi.list());
+      setInboundRows(await inboundApi.list(inboundListParams()));
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
+  };
+
+  const clearInboundFilters = () => {
+    setInboundFilterLpo('');
+    setInboundFilterSapPo('');
+    setInboundFilterInvoice('');
+    setInboundFilterPart('');
   };
 
   const loadSold = async () => {
@@ -303,6 +457,172 @@ export default function MainStock() {
     refreshVendors();
   }, []);
 
+  const onInboundVendorPick = (vendorId) => {
+    const v = vendors.find((x) => String(x.id) === String(vendorId));
+    setInboundSingleForm((f) => ({
+      ...f,
+      vendor_id: vendorId,
+      vendor_number: v?.vendor_number || '',
+      vendor_name: v?.vendor_name || '',
+    }));
+  };
+
+  const applyInboundPartSuggestion = (s) => {
+    setInboundSingleForm((f) => ({
+      ...f,
+      part_number: s.part_number,
+      sap_part_number: s.sap_part_number || '',
+      description: s.description || '',
+      uom: s.uom || '',
+      vendor_id: s.vendor_id != null ? String(s.vendor_id) : f.vendor_id,
+      vendor_number: s.vendor_number || f.vendor_number,
+      vendor_name: s.vendor_name || f.vendor_name,
+    }));
+    setInboundPartSearch(s.part_number);
+    setInboundPartSuggestions([]);
+  };
+
+  const openInboundSingle = () => {
+    setInboundSingleForm(emptyInboundSingleForm());
+    setInboundPartSearch('');
+    setInboundPartSuggestions([]);
+    refreshVendors();
+    setInboundSingleOpen(true);
+  };
+
+function cleanInboundPartNumber(value) {
+  let s = String(value || '').trim();
+  for (const sep of [' — ', ' – ', ' | ']) {
+    const i = s.indexOf(sep);
+    if (i > 0) {
+      s = s.slice(0, i).trim();
+      break;
+    }
+  }
+  return s;
+}
+
+  const submitInboundSingle = async () => {
+    const f = inboundSingleForm;
+    const qty = Number(String(f.quantity || '').replace(/,/g, ''));
+    const partNumber = cleanInboundPartNumber(f.part_number);
+    if (!f.vendor_number.trim()) return alert('Vendor is required');
+    if (!partNumber) return alert('Part number is required');
+    if (!f.description.trim()) return alert('Description is required');
+    if (!f.uom.trim()) return alert('UOM is required');
+    if (!Number.isFinite(qty) || qty <= 0) return alert('Inbound quantity must be > 0');
+
+    const row = {
+      vendor_number: f.vendor_number.trim(),
+      vendor_name: f.vendor_name.trim(),
+      part_number: partNumber,
+      description: f.description.trim(),
+      quantity: qty,
+      uom: f.uom.trim(),
+      'SAP Part Number': f.sap_part_number.trim(),
+      'Local PO': f.lpo.trim(),
+      'SAP PO': f.sap_po.trim(),
+      'SAP Invoice Number': f.invoice_no.trim(),
+      'Received Date': f.received_date || '',
+      Remarks: f.remarks.trim(),
+    };
+
+    try {
+      await inboundApi.createSingle(row);
+      setInboundSingleOpen(false);
+      await loadInbound();
+      alert('Inbound line saved.');
+    } catch (e) {
+      const data = e?.response?.data;
+      if (data?.missing_parts?.length) {
+        alert(
+          `${data.reject_message || 'Part not in item master.'}\nMissing: ${data.missing_parts.map((m) => m.part_number).join(', ')}`
+        );
+      } else {
+        alert(data?.error || e.message);
+      }
+    }
+  };
+
+  const openOutboundSingle = () => {
+    setOutboundSingleForm(emptyOutboundSingleForm());
+    setOutboundPartSearch('');
+    setOutboundPartSuggestions([]);
+    setOutboundSingleOpen(true);
+  };
+
+  const submitOutboundSingle = async () => {
+    const f = outboundSingleForm;
+    const qty = Number(String(f.outbound_qty || '').replace(/,/g, ''));
+    if (!f.part_number.trim()) return alert('Part number is required');
+    if (!Number.isFinite(qty) || qty <= 0) return alert('Outbound quantity must be > 0');
+
+    const row = {
+      DATE: f.date || '',
+      PO: f.po.trim(),
+      'CUSTOMER PO': f.customer_po.trim(),
+      'Invoice No.': f.invoice_no.trim(),
+      Invoice: f.invoice_no.trim(),
+      'Customer Name': f.customer_name.trim(),
+      'Delivery Address': f.delivery_address.trim(),
+      'Part Number': f.part_number.trim(),
+      'SAP Part Number': f.sap_part_number.trim(),
+      Description: f.description.trim(),
+      'Outbound Qty': qty,
+      Delivery: f.delivery.trim(),
+      'Sales Doc': f.sales_doc.trim(),
+      Status: f.status.trim(),
+      Remarks: f.remarks.trim(),
+    };
+
+    try {
+      const res = await soldOutApi.create(row);
+      setOutboundSingleOpen(false);
+      await loadSold();
+      if (res?.shortage_warnings?.length) {
+        alert(`Saved with stock shortages: ${JSON.stringify(res.shortage_warnings)}`);
+      } else {
+        alert('Outbound line saved.');
+      }
+    } catch (e) {
+      alert(e?.response?.data?.error || e.message);
+    }
+  };
+
+  useEffect(() => {
+    if (!inboundSingleOpen) return;
+    const q = inboundPartSearch.trim();
+    if (!q) {
+      setInboundPartSuggestions([]);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        setInboundPartSuggestions(await fetchMainStockPartPrefixSuggestions(q));
+      } catch {
+        setInboundPartSuggestions([]);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [inboundPartSearch, inboundSingleOpen]);
+
+  useEffect(() => {
+    if (!outboundSingleOpen) return;
+    const q = outboundPartSearch.trim();
+    if (!q) {
+      setOutboundPartSuggestions([]);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        setOutboundPartSuggestions(await fetchMainStockPartPrefixSuggestions(q));
+      } catch {
+        setOutboundPartSuggestions([]);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [outboundPartSearch, outboundSingleOpen]);
+
   useEffect(() => {
     if (!stockInOpen) return;
     const q = stockInPn.trim();
@@ -312,44 +632,7 @@ export default function MainStock() {
     }
     const t = setTimeout(async () => {
       try {
-        const [ms, vi] = await Promise.all([mainStockApi.search(q), vendorItemsApi.search(q)]);
-        const list = [];
-        for (const r of ms || []) {
-          list.push({
-            source: 'main_stock',
-            id: r.id,
-            part_number: r.part_number,
-            sap_part_number: r.sap_part_number || '',
-            description: r.description || '',
-            vendor_id: r.vendor_id ?? null,
-            vendor_number: r.vendor_number || '',
-            vendor_name: r.vendor_name || '',
-            uom: r.uom || '',
-          });
-        }
-        for (const r of vi || []) {
-          list.push({
-            source: 'vendor_items',
-            id: r.id,
-            part_number: r.part_number,
-            sap_part_number: r.sap_part_number || '',
-            description: r.description || '',
-            vendor_id: r.vendor_id ?? null,
-            vendor_number: r.vendor_number || '',
-            vendor_name: r.vendor_name || '',
-            uom: r.uom || '',
-          });
-        }
-        // Dedupe by source+id (keep both sources)
-        const seen = new Set();
-        const out = [];
-        for (const r of list) {
-          const k = `${r.source}:${r.id}`;
-          if (seen.has(k)) continue;
-          seen.add(k);
-          out.push(r);
-        }
-        setStockInSuggestions(out.slice(0, 30));
+        setStockInSuggestions(await fetchMainStockPartPrefixSuggestions(q));
       } catch (e) {
         console.error(e);
         setStockInSuggestions([]);
@@ -432,7 +715,20 @@ export default function MainStock() {
         await mainStockApi.bulkPaste(parseMainStockPaste(bulkData));
         await loadStock(search);
       } else if (bulkMode === 'inbound') {
-        await inboundApi.bulkPaste(parseInboundPaste(bulkData));
+        const rows = parseInboundPaste(bulkData);
+        let validation;
+        try {
+          validation = await inboundApi.validateRows(rows, 'bulk-paste');
+        } catch (e) {
+          const data = e?.response?.data;
+          if (data?.validation_id) validation = data;
+          else throw e;
+        }
+        if (!validation?.valid) {
+          alert(validation?.reject_message || 'Validation failed — fix missing parts first.');
+          return;
+        }
+        await inboundApi.bulkPaste(rows, validation.validation_id);
         await loadInbound();
       } else {
         const res = await soldOutApi.bulkPaste(parseSoldOutPaste(bulkData));
@@ -450,7 +746,7 @@ export default function MainStock() {
     bulkMode === 'stock'
       ? 'Tab or comma (or paste with header row): Vendor Number | Vendor Name | SAP PN | Part # | Desc | Received | Sold Out | Pending | [Available Qty] | UOM | Remarks — Legacy 12+ cols with Product still supported.'
       : bulkMode === 'inbound'
-        ? 'Tab or comma: Batch/Vendor | Invoice | PO | Part # | SAP PN | Desc | Inbound Qty | Received Date | Remarks'
+        ? 'Tab or comma: vendor_number | vendor_name | part_number | description | quantity | uom | [size] | [weight] — or legacy Batch/Vendor columns'
         : 'Tab or comma: DATE | PO | CUSTOMER PO | Invoice No | Invoice | Customer | Address | GPS | Part # | SAP PN | Desc | Outbound Qty | Delivery | Sales Doc | Status | Remarks';
 
   return (
@@ -521,8 +817,9 @@ export default function MainStock() {
                 'inbound-template.csv',
                 [
                   'Batch/Vendor Name',
-                  'Invoice No.',
-                  'PO Number',
+                  'Local PO',
+                  'SAP PO',
+                  'SAP Invoice Number',
                   'Part Number',
                   'SAP Part Number',
                   'Description',
@@ -532,9 +829,10 @@ export default function MainStock() {
                 ],
                 [
                   {
-                    'Batch/Vendor Name': 'C779-C788',
-                    'Invoice No.': '9010104400',
-                    'PO Number': '5500001206',
+                    'Batch/Vendor Name': 'C779-C788 | Schneider',
+                    'Local PO': 'LPO-2026-001',
+                    'SAP PO': '5500001206',
+                    'SAP Invoice Number': '9010104400',
                     'Part Number': '760241056',
                     'SAP Part Number': '760241056',
                     Description: 'O-012-LN-8W-M12BK/2C',
@@ -640,7 +938,7 @@ export default function MainStock() {
                     setStockInPn(e.target.value);
                     setStockInSelected(null);
                   }}
-                  placeholder="Type part number…"
+                  placeholder="Type part number — suggestions start with what you type"
                 />
               </label>
 
@@ -650,7 +948,7 @@ export default function MainStock() {
                   <div className="max-h-48 overflow-y-auto">
                     {stockInSuggestions.map((s) => (
                       <button
-                        key={`${s.source}-${s.id}`}
+                        key={s.part_number}
                         type="button"
                         className="w-full text-left px-3 py-2 hover:bg-gray-50 border-t text-[11px]"
                         onClick={() => {
@@ -663,10 +961,8 @@ export default function MainStock() {
                         }}
                       >
                         <div className="font-semibold text-gray-900">
-                          {s.part_number} {s.sap_part_number ? `| ${s.sap_part_number}` : ''} | {s.description || ''}
-                        </div>
-                        <div className="text-gray-600">
-                          {s.vendor_name ? `Vendor: ${s.vendor_name}` : 'Vendor: -'} {s.source === 'main_stock' ? '(Main Stock)' : '(Vendor Items)'}
+                          {s.part_number}
+                          {s.description ? ` — ${s.description}` : ''}
                         </div>
                       </button>
                     ))}
@@ -950,6 +1246,31 @@ export default function MainStock() {
       {tab === 'stock' && (
         <>
           <div className="flex flex-wrap gap-1.5 mb-2 justify-end">
+            <button
+              type="button"
+              className="btn-secondary flex items-center gap-1 text-[11px]"
+              onClick={() =>
+                exportJsonToExcel(
+                  stockDisplay.map((r) => ({
+                    'Part Number': r.part_number,
+                    'SAP Part Number': r.sap_part_number,
+                    Description: r.description,
+                    'Received Qty': r.received_qty,
+                    'Sold Out Qty': r.sold_out_qty ?? r.issued_qty,
+                    'Pending Delivery Qty': r.pending_delivery_qty,
+                    'Available Qty': r.available_qty,
+                    'SAP Qty': r.sap_qty,
+                    UOM: r.uom,
+                    Remarks: r.remarks,
+                  })),
+                  'main-stock-export.xlsx',
+                  'Main Stock'
+                )
+              }
+            >
+              <FileDown size={14} />
+              Export Excel
+            </button>
             <label className="btn-secondary flex items-center gap-1 cursor-pointer text-[11px]">
               <Upload size={14} />
               Upload Excel/CSV
@@ -1060,37 +1381,97 @@ export default function MainStock() {
 
       {tab === 'inbound' && (
         <>
-          <p className="text-[11px] text-gray-600 mb-2">
-            Inbound increases Main Stock only. Does not touch Stock by Rack.
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <p className="text-[11px] text-gray-600">
+              Inbound increases Main Stock only. All part numbers must exist in item master or main stock before upload.
+            </p>
+            <button type="button" className="btn-primary flex items-center gap-1 text-[11px] shrink-0" onClick={openInboundSingle}>
+              <Plus size={14} />
+              Add Inbound
+            </button>
+          </div>
+          <InboundUploadValidation
+            onUploadComplete={(summary) => {
+              loadInbound();
+              reportUploadResult(summary, { label: 'Inbound upload', filenamePrefix: 'inbound-upload' });
+            }}
+          />
           <div className="flex flex-wrap gap-1.5 mb-2">
-            <label className="btn-secondary flex items-center gap-1 cursor-pointer text-[11px]">
-              <Upload size={14} />
-              Upload
-              <input
-                ref={fileInboundRef}
-                type="file"
-                accept=".xlsx,.xls,.csv,.txt"
-                className="hidden"
-                onChange={async (e) => {
-                  const f = e.target.files?.[0];
-                  if (!f) return;
-                  try {
-                    const summary = await inboundApi.upload(f);
-                    await loadInbound();
-                    reportUploadResult(summary, { label: 'Inbound upload', filenamePrefix: 'inbound-upload' });
-                  } catch (err) {
-                    reportUploadError(err, { label: 'Inbound upload', filenamePrefix: 'inbound-upload' });
-                  } finally {
-                    e.target.value = '';
-                  }
-                }}
-              />
-            </label>
+            <button
+              type="button"
+              className="btn-secondary flex items-center gap-1 text-[11px]"
+              onClick={() =>
+                exportJsonToExcel(
+                  inboundDisplay.map((r) => ({
+                    'Vendor batch': r.batch_vendor_name,
+                    LPO: r.lpo,
+                    'SAP PO': r.sap_po || r.po_number,
+                    Invoice: r.invoice_no,
+                    'Part Number': r.part_number,
+                    'SAP Part Number': r.sap_part_number,
+                    Description: r.description,
+                    'Inbound Qty': r.inbound_qty,
+                    'Received Date': r.received_date,
+                    Remarks: r.remarks,
+                  })),
+                  'inbound-export.xlsx',
+                  'Inbound'
+                )
+              }
+            >
+              <FileDown size={14} />
+              Export Excel
+            </button>
             <button type="button" className="btn-secondary flex items-center gap-1 text-[11px]" onClick={() => openBulk('inbound')}>
               <Copy size={14} />
               Bulk paste
             </button>
+            <button type="button" className="btn-secondary text-[11px]" onClick={() => inboundApi.downloadTemplateXlsx()}>
+              Download template
+            </button>
+          </div>
+          <div className="rounded-lg border border-gray-200 bg-white p-3 mb-2">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+              <InboundFilterAutocomplete
+                label="LPO"
+                value={inboundFilterLpo}
+                onChange={setInboundFilterLpo}
+                fetchSuggestions={(q) => inboundApi.filterSuggestions('lpo', q)}
+              />
+              <InboundFilterAutocomplete
+                label="SAP PO"
+                value={inboundFilterSapPo}
+                onChange={setInboundFilterSapPo}
+                fetchSuggestions={(q) => inboundApi.filterSuggestions('sap_po', q)}
+              />
+              <InboundFilterAutocomplete
+                label="Invoice"
+                value={inboundFilterInvoice}
+                onChange={setInboundFilterInvoice}
+                fetchSuggestions={(q) => inboundApi.filterSuggestions('invoice', q)}
+              />
+              <InboundFilterAutocomplete
+                label="Part #"
+                value={inboundFilterPart}
+                onChange={setInboundFilterPart}
+                fetchSuggestions={(q) => inboundApi.filterSuggestions('part', q)}
+              />
+              <div className="flex items-end gap-2">
+                <button type="button" className="btn-primary text-[11px] flex-1" onClick={() => loadInbound()}>
+                  Apply
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary text-[11px]"
+                  onClick={() => {
+                    clearInboundFilters();
+                    setTimeout(() => loadInbound(), 0);
+                  }}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
           </div>
           <div className="table-container">
             <table className="min-w-full divide-y divide-gray-200 text-[11px]">
@@ -1099,11 +1480,14 @@ export default function MainStock() {
                   <SortTh columnKey="batch_vendor_name" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
                     Vendor batch
                   </SortTh>
+                  <SortTh columnKey="lpo" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
+                    LPO
+                  </SortTh>
+                  <SortTh columnKey="sap_po" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
+                    SAP PO
+                  </SortTh>
                   <SortTh columnKey="invoice_no" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
                     Invoice
-                  </SortTh>
-                  <SortTh columnKey="po_number" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
-                    PO
                   </SortTh>
                   <SortTh columnKey="part_number" sortKey={sortInboundKey} direction={dirInbound} onSort={sortInbound}>
                     Part #
@@ -1119,7 +1503,7 @@ export default function MainStock() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="tbl-td">
+                    <td colSpan={7} className="tbl-td">
                       Loading…
                     </td>
                   </tr>
@@ -1127,8 +1511,9 @@ export default function MainStock() {
                 {inboundDisplay.map((r) => (
                   <tr key={r.id} className="hover:bg-gray-50">
                     <td className="tbl-td">{r.batch_vendor_name}</td>
-                    <td className="tbl-td-nowrap">{r.invoice_no}</td>
-                    <td className="tbl-td-nowrap">{r.po_number}</td>
+                    <td className="tbl-td-nowrap">{r.lpo || '—'}</td>
+                    <td className="tbl-td-nowrap">{r.sap_po || r.po_number || '—'}</td>
+                    <td className="tbl-td-nowrap">{r.invoice_no || '—'}</td>
                     <td className="tbl-td font-mono">{r.part_number}</td>
                     <td className="tbl-td">{r.inbound_qty}</td>
                     <td className="tbl-td-nowrap">{formatDateDDMMYYYY(r.received_date)}</td>
@@ -1142,10 +1527,16 @@ export default function MainStock() {
 
       {tab === 'soldout' && (
         <>
-          <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-100 rounded-md px-2 py-1.5 mb-2">
-            Upload logs Sold Out lines. Rows with Status = Delivered deduct Main Stock (sold_out_qty) when sufficient quantity;
-            shortages are reported without forcing negative stock.
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-100 rounded-md px-2 py-1.5 flex-1">
+              Upload logs Sold Out lines. Rows with Status = Delivered deduct Main Stock (sold_out_qty) when sufficient quantity;
+              shortages are reported without forcing negative stock.
+            </p>
+            <button type="button" className="btn-primary flex items-center gap-1 text-[11px] shrink-0" onClick={openOutboundSingle}>
+              <Plus size={14} />
+              Add Outbound
+            </button>
+          </div>
           <div className="flex flex-wrap gap-1.5 mb-2">
             <label className="btn-secondary flex items-center gap-1 cursor-pointer text-[11px]">
               <Upload size={14} />
@@ -1171,6 +1562,33 @@ export default function MainStock() {
                 }}
               />
             </label>
+            <button
+              type="button"
+              className="btn-secondary flex items-center gap-1 text-[11px]"
+              onClick={() =>
+                exportJsonToExcel(
+                  soldDisplay.map((r) => ({
+                    Date: r.date,
+                    'Part Number': r.part_number,
+                    'SAP Part Number': r.sap_part_number,
+                    Description: r.description,
+                    'Outbound Qty': r.outbound_qty ?? r.sold_qty,
+                    Status: r.status,
+                    'Invoice Number': r.invoice_number,
+                    Delivery: r.delivery,
+                    'Sales Doc': r.sales_doc,
+                    'Customer PO': r.customer_po,
+                    Customer: r.customer_name,
+                    Remarks: r.remarks,
+                  })),
+                  'outbound-sold-out-export.xlsx',
+                  'Outbound'
+                )
+              }
+            >
+              <FileDown size={14} />
+              Export Excel
+            </button>
             <button type="button" className="btn-secondary flex items-center gap-1 text-[11px]" onClick={() => openBulk('soldout')}>
               <Copy size={14} />
               Bulk paste
@@ -1313,6 +1731,327 @@ export default function MainStock() {
           </div>
         </>
       )}
+
+      {inboundSingleOpen ? (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50 dn-no-print">
+          <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[86vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold">Add Inbound — single line</h3>
+                <p className="text-[11px] text-gray-600 mt-1">Part must exist in item master. Updates Main Stock received qty.</p>
+              </div>
+              <button type="button" className="btn-secondary" onClick={() => setInboundSingleOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Vendor
+                <select
+                  className="input-field mt-1"
+                  value={inboundSingleForm.vendor_id}
+                  onChange={(e) => onInboundVendorPick(e.target.value)}
+                >
+                  <option value="">Select vendor…</option>
+                  {vendors.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.vendor_name} {v.vendor_number ? `(${v.vendor_number})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Part Number
+                <input
+                  className="input-field mt-1"
+                  value={inboundPartSearch}
+                  onChange={(e) => {
+                    setInboundPartSearch(e.target.value);
+                    setInboundSingleForm((f) => ({ ...f, part_number: e.target.value }));
+                  }}
+                  placeholder="Type part number — suggestions start with what you type"
+                />
+              </label>
+              {inboundPartSuggestions.length ? (
+                <div className="sm:col-span-2 border rounded-md overflow-hidden max-h-40 overflow-y-auto">
+                  {inboundPartSuggestions.map((s) => (
+                    <button
+                      key={s.part_number}
+                      type="button"
+                      className="w-full text-left px-3 py-2 hover:bg-gray-50 border-t text-[11px]"
+                      onClick={() => applyInboundPartSuggestion(s)}
+                    >
+                      <span className="font-semibold">{s.part_number}</span>
+                      {s.description ? ` — ${s.description}` : ''}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <label className="text-[11px] font-bold">
+                Inbound Qty
+                <input
+                  className="input-field mt-1"
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={inboundSingleForm.quantity}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, quantity: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Description
+                <input
+                  className="input-field mt-1"
+                  value={inboundSingleForm.description}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, description: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                UOM
+                <input
+                  className="input-field mt-1"
+                  value={inboundSingleForm.uom}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, uom: e.target.value }))}
+                  placeholder="e.g. PCS"
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                SAP Part Number
+                <input
+                  className="input-field mt-1"
+                  value={inboundSingleForm.sap_part_number}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, sap_part_number: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Local PO
+                <input
+                  className="input-field mt-1"
+                  value={inboundSingleForm.lpo}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, lpo: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                SAP PO
+                <input
+                  className="input-field mt-1"
+                  value={inboundSingleForm.sap_po}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, sap_po: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                SAP Invoice
+                <input
+                  className="input-field mt-1"
+                  value={inboundSingleForm.invoice_no}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, invoice_no: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Received Date
+                <input
+                  className="input-field mt-1"
+                  type="date"
+                  value={inboundSingleForm.received_date}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, received_date: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Remarks
+                <input
+                  className="input-field mt-1"
+                  value={inboundSingleForm.remarks}
+                  onChange={(e) => setInboundSingleForm((f) => ({ ...f, remarks: e.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button type="button" className="btn-secondary" onClick={() => setInboundSingleOpen(false)}>
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={submitInboundSingle}>
+                Save Inbound
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {outboundSingleOpen ? (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50 dn-no-print">
+          <div className="bg-white rounded-xl p-6 w-full max-w-3xl max-h-[86vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-bold">Add Outbound — single line</h3>
+                <p className="text-[11px] text-gray-600 mt-1">
+                  Status Delivered deducts Main Stock when quantity is available.
+                </p>
+              </div>
+              <button type="button" className="btn-secondary" onClick={() => setOutboundSingleOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
+              <label className="text-[11px] font-bold">
+                Date
+                <input
+                  className="input-field mt-1"
+                  type="date"
+                  value={outboundSingleForm.date}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, date: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Status
+                <select
+                  className="input-field mt-1"
+                  value={outboundSingleForm.status}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, status: e.target.value }))}
+                >
+                  <option value="Delivered">Delivered</option>
+                  <option value="Pending">Pending</option>
+                  <option value="Open">Open</option>
+                </select>
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Part Number search
+                <input
+                  className="input-field mt-1"
+                  value={outboundPartSearch}
+                  onChange={(e) => {
+                    setOutboundPartSearch(e.target.value);
+                    setOutboundSingleForm((f) => ({ ...f, part_number: e.target.value }));
+                  }}
+                  placeholder="Type part number — suggestions start with what you type"
+                />
+              </label>
+              {outboundPartSuggestions.length ? (
+                <div className="sm:col-span-2 border rounded-md overflow-hidden max-h-40 overflow-y-auto">
+                  {outboundPartSuggestions.map((s) => (
+                    <button
+                      key={s.part_number}
+                      type="button"
+                      className="w-full text-left px-3 py-2 hover:bg-gray-50 border-t text-[11px]"
+                      onClick={() => {
+                        setOutboundSingleForm((f) => ({
+                          ...f,
+                          part_number: s.part_number,
+                          sap_part_number: s.sap_part_number || '',
+                          description: s.description || '',
+                        }));
+                        setOutboundPartSearch(s.part_number);
+                        setOutboundPartSuggestions([]);
+                      }}
+                    >
+                      <span className="font-semibold">{s.part_number}</span>
+                      {s.description ? ` — ${s.description}` : ''}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <label className="text-[11px] font-bold">
+                Outbound Qty
+                <input
+                  className="input-field mt-1"
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={outboundSingleForm.outbound_qty}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, outbound_qty: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                SAP Part Number
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.sap_part_number}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, sap_part_number: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Description
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.description}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, description: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                PO
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.po}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, po: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Customer PO
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.customer_po}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, customer_po: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Invoice No
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.invoice_no}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, invoice_no: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Customer Name
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.customer_name}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, customer_name: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Delivery Address
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.delivery_address}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, delivery_address: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Delivery
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.delivery}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, delivery: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold">
+                Sales Doc
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.sales_doc}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, sales_doc: e.target.value }))}
+                />
+              </label>
+              <label className="text-[11px] font-bold sm:col-span-2">
+                Remarks
+                <input
+                  className="input-field mt-1"
+                  value={outboundSingleForm.remarks}
+                  onChange={(e) => setOutboundSingleForm((f) => ({ ...f, remarks: e.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button type="button" className="btn-secondary" onClick={() => setOutboundSingleOpen(false)}>
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={submitOutboundSingle}>
+                Save Outbound
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {bulkOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">

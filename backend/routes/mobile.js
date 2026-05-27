@@ -2,8 +2,10 @@ const express = require('express');
 const { promisify } = require('util');
 
 const db = require('../db');
+const { runDb } = require('../utils/dbRun');
 const {
   requireAuth,
+  requireApprovedAccount,
   requireMobileAccess,
   requirePermission,
   requireAnyPermission,
@@ -13,6 +15,7 @@ const StockByRackSummary = require('../models/StockByRackSummary');
 const { applyStockIn } = require('./stock-in');
 const MainStock = require('../models/MainStock');
 const { notifyPickProgress, notifyAdminChecker } = require('../services/notificationService');
+const { sendOutboundOrderForPick } = require('../services/outboundSendForPick');
 const { updateInboundBatchStatus } = require('../services/inboundPutawayHelpers');
 const {
   syncBomRequirementPickedFromTransactions,
@@ -24,8 +27,15 @@ const {
   assertExplicitWarehouseParamAllowed,
   resolveReadWarehouseScope,
   userHasWarehouseAccess,
+  resolveInboundBatchListScope,
+  inboundBatchWhereClause,
+  inboundBatchAccessAllowed,
 } = require('../services/warehouseContext');
 const { logAudit } = require('../services/auditLogger');
+const { resolvePickWarehouseId } = require('../lib/pickWarehouseId');
+const { pickedOrderInsertFields, requireOutboundWarehouseId } = require('../services/pickedOrderWrite');
+const { insertPickStockOut } = require('../lib/pickStockOut');
+const { lockSuffix } = require('../lib/rowLock');
 
 const router = express.Router();
 const dbGet = promisify(db.get.bind(db));
@@ -58,13 +68,54 @@ async function mobileWarehouseScope(req, res) {
   return resolveReadWarehouseScope(req);
 }
 
+function canMobilePickQueue(user) {
+  const role = String(user?.role || '').toLowerCase();
+  if (role === 'admin' || role === 'manager' || role === 'checker') return true;
+  const p = user?.permissions || {};
+  return !!(p.can_view_orders || p.can_pick_orders);
+}
+
+function canMobileSendForPick(user) {
+  const role = String(user?.role || '').toLowerCase();
+  if (role === 'admin' || role === 'manager' || role === 'checker') return true;
+  const p = user?.permissions || {};
+  return !!(p.can_upload_outbound || p.can_confirm_picked || p.can_pick_orders);
+}
+
+function requireMobilePickQueue(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  if (canMobilePickQueue(req.user)) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+function requireMobileSendForPick(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  if (canMobileSendForPick(req.user)) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+async function mobileInboundBatchScope(req, res) {
+  const gate = await assertExplicitWarehouseParamAllowed(req);
+  if (!gate.ok) {
+    res.status(gate.status || 403).json({ error: gate.message || 'Forbidden' });
+    return null;
+  }
+  return resolveInboundBatchListScope(req);
+}
+
 router.use(requireMobileAppKey);
 router.use(requireAuth);
 router.use(requireMobileAccess);
 
 router.use('/deliveries', require('./mobile-deliveries'));
+router.use('/pick-proof', require('./mobile-pick-proof'));
 router.use('/driver-deliveries', require('./mobile-driver-deliveries'));
 router.use('/driver-routes', require('./mobile-driver-routes'));
+router.use('/driver-location', require('./mobile-driver-location'));
+router.use('/stock-by-rack', require('./mobile-stock-by-rack'));
+
+const { confirmRackPickForItem } = require('../services/mobileRackStockService');
+const { reversePickTransactions } = require('../services/reversePickTransactions');
 
 /** One round-trip for home badges: unread notifications + unseen pick orders (for pickers). */
 router.get('/summary', async (req, res) => {
@@ -82,8 +133,8 @@ router.get('/summary', async (req, res) => {
     let orders_unseen = 0;
     const whO = scope.mode === 'all' ? { sql: '', p: [] } : { sql: ' AND o.warehouse_id = ? ', p: [scope.warehouseId] };
     const whB = scope.mode === 'all' ? { sql: '', p: [] } : { sql: ' AND b.warehouse_id = ? ', p: [scope.warehouseId] };
-    // Pickers typically have can_pick_orders, not can_view_orders. Either should show the picking queue.
-    if (perm.can_view_orders || perm.can_pick_orders) {
+    // Pickers typically have can_pick_orders; managers/admins use role or can_view_orders.
+    if (canMobilePickQueue(req.user)) {
       const oRow = await dbGet(
         `SELECT COUNT(1) AS c
          FROM outbound_orders o
@@ -226,7 +277,8 @@ router.get(
       const rows = await dbAll(
         `SELECT part_number,
                 MIN(sap_part_number) AS sap_part_number,
-                MIN(description) AS description
+                MIN(description) AS description,
+                MIN(uom) AS uom
          FROM main_stock
          WHERE (UPPER(part_number) LIKE ?
             OR UPPER(COALESCE(sap_part_number, '')) LIKE ?
@@ -396,7 +448,7 @@ async function bumpMainStock(part_number, sap_part_number, description, qtyIn) {
   });
 }
 
-router.get('/orders', requireAnyPermission(['can_view_orders', 'can_pick_orders']), async (req, res) => {
+router.get('/orders', requireMobilePickQueue, async (req, res) => {
   try {
     const scope = await mobileWarehouseScope(req, res);
     if (!scope) return;
@@ -421,7 +473,40 @@ router.get('/orders', requireAnyPermission(['can_view_orders', 'can_pick_orders'
   }
 });
 
-router.post('/orders/:id/seen', requireAnyPermission(['can_view_orders', 'can_pick_orders']), async (req, res) => {
+/** Uploaded / stock-checked orders managers can release to pickers (mobile). */
+router.get('/outbound/awaiting-send-for-pick', requireMobileSendForPick, async (req, res) => {
+  try {
+    const scope = await mobileWarehouseScope(req, res);
+    if (!scope) return;
+    const wh = scope.mode === 'all' ? '' : ' AND o.warehouse_id = ? ';
+    const params = scope.mode === 'all' ? [] : [scope.warehouseId];
+    const rows = await dbAll(
+      `SELECT o.*,
+        (SELECT COALESCE(SUM(required_qty), 0) FROM outbound_items WHERE outbound_id = o.id) AS total_required,
+        (SELECT COALESCE(SUM(picked_qty), 0) FROM outbound_items WHERE outbound_id = o.id) AS total_picked
+       FROM outbound_orders o
+       WHERE o.status IN ('Uploaded', 'Stock Checked') ${wh}
+       ORDER BY o.updated_at DESC`,
+      params
+    );
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post('/outbound/:id/send-for-pick', requireMobileSendForPick, async (req, res) => {
+  try {
+    const orderId = Number(req.params.id);
+    if (!orderId) return res.status(400).json({ error: 'Invalid id' });
+    const result = await sendOutboundOrderForPick(dbRun, dbGet, orderId, req);
+    res.json(result);
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message, code: e.code });
+  }
+});
+
+router.post('/orders/:id/seen', requireMobilePickQueue, async (req, res) => {
   try {
     const orderId = Number(req.params.id);
     const uid = Number(req.user.sub);
@@ -476,9 +561,11 @@ router.get(
            SELECT
              po.outbound_order_id AS order_id,
              po.delivery,
+             COALESCE(o.outbound_number, po.delivery) AS outbound_number,
              po.sales_doc,
              po.customer_reference,
              po.sold_to,
+             COALESCE(o.customer_name, po.name_1) AS customer_name,
              po.name_1,
              po.confirmed_by_user_id,
              po.confirmed_by_user_name,
@@ -486,21 +573,23 @@ router.get(
              o.status AS order_status,
              o.updated_at AS order_updated_at,
              (
-               SELECT GROUP_CONCAT(DISTINCT TRIM(COALESCE(pt.user_name, '')), ', ')
+               SELECT STRING_AGG(DISTINCT TRIM(COALESCE(pt.user_name, '')), ', ')
                FROM picked_transactions pt
                WHERE pt.outbound_order_id = po.outbound_order_id
                  AND TRIM(COALESCE(pt.user_name, '')) != ''
              ) AS picked_by_names
            FROM picked_orders po
            LEFT JOIN outbound_orders o ON o.id = po.outbound_order_id
-           WHERE 1=1 ${wh}
+           WHERE LOWER(TRIM(COALESCE(po.status, ''))) != 'reversed' ${wh}
            UNION ALL
            SELECT
              o.id AS order_id,
              COALESCE(o.delivery, o.outbound_number) AS delivery,
+             o.outbound_number AS outbound_number,
              COALESCE(o.sales_doc, o.sales_order_number) AS sales_doc,
              COALESCE(o.customer_reference, o.customer_po_number) AS customer_reference,
              COALESCE(o.sold_to, o.vendor_name) AS sold_to,
+             COALESCE(o.customer_name, o.name_1) AS customer_name,
              COALESCE(o.name_1, o.customer_name) AS name_1,
              NULL AS confirmed_by_user_id,
              NULL AS confirmed_by_user_name,
@@ -508,14 +597,18 @@ router.get(
              o.status AS order_status,
              o.updated_at AS order_updated_at,
              (
-               SELECT GROUP_CONCAT(DISTINCT TRIM(COALESCE(pt.user_name, '')), ', ')
+               SELECT STRING_AGG(DISTINCT TRIM(COALESCE(pt.user_name, '')), ', ')
                FROM picked_transactions pt
                WHERE pt.outbound_order_id = o.id
                  AND TRIM(COALESCE(pt.user_name, '')) != ''
              ) AS picked_by_names
            FROM outbound_orders o
            WHERE lower(trim(COALESCE(o.status, ''))) IN ('picked', 'checked')
-             AND NOT EXISTS (SELECT 1 FROM picked_orders po2 WHERE po2.outbound_order_id = o.id) ${wh}
+            AND NOT EXISTS (
+              SELECT 1 FROM picked_orders po2
+              WHERE po2.outbound_order_id = o.id
+                AND LOWER(TRIM(COALESCE(po2.status, ''))) != 'reversed'
+            ) ${wh}
          ) AS picked_union
          ORDER BY datetime(COALESCE(picked_union.confirmed_at, picked_union.order_updated_at)) DESC
          LIMIT ?`,
@@ -535,7 +628,10 @@ router.get(
     try {
       const orderId = Number(req.params.id);
       if (!orderId) return res.status(400).json({ error: 'Invalid id' });
-      let po = await dbGet(`SELECT * FROM picked_orders WHERE outbound_order_id = ?`, [orderId]);
+      let po = await dbGet(
+        `SELECT * FROM picked_orders WHERE outbound_order_id = ? AND LOWER(TRIM(COALESCE(status, ''))) != 'reversed'`,
+        [orderId]
+      );
       const order = await dbGet(`SELECT * FROM outbound_orders WHERE id = ?`, [orderId]);
       if (!order) return res.status(404).json({ error: 'Order not found' });
       const role = String(req.user?.role || '').toLowerCase();
@@ -573,7 +669,7 @@ router.get(
   }
 );
 
-router.get('/orders/:id', requireAnyPermission(['can_view_orders', 'can_pick_orders']), async (req, res) => {
+router.get('/orders/:id', requireMobilePickQueue, async (req, res) => {
   try {
     const orderId = Number(req.params.id);
     const order = await dbGet('SELECT * FROM outbound_orders WHERE id = ?', [orderId]);
@@ -624,7 +720,7 @@ router.get('/orders/:id', requireAnyPermission(['can_view_orders', 'can_pick_ord
 
 router.get(
   '/orders/:id/bom-requirements',
-  requireAnyPermission(['can_view_orders', 'can_pick_orders']),
+  requireMobilePickQueue,
   async (req, res) => {
     try {
       const orderId = Number(req.params.id);
@@ -640,7 +736,7 @@ router.get(
 /** Main stock + stock-by-rack rows per pick line (read-only reference for mobile). Optional rack_q filters rack_location. */
 router.get(
   '/orders/:id/stock-overview',
-  requireAnyPermission(['can_view_orders', 'can_pick_orders']),
+  requireMobilePickQueue,
   async (req, res) => {
   try {
     const orderId = Number(req.params.id);
@@ -847,10 +943,10 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
       throw new Error('Picking closed for this order');
     }
 
-    const item = await dbGet(`SELECT * FROM outbound_items WHERE id = ? AND outbound_id = ?`, [
-      outbound_item_id,
-      outbound_order_id,
-    ]);
+    const item = await dbGet(
+      `SELECT * FROM outbound_items WHERE id = ? AND outbound_id = ?${lockSuffix()}`,
+      [outbound_item_id, outbound_order_id]
+    );
     if (!item) throw new Error('Item not found');
 
     const sug = await dbGet(
@@ -863,6 +959,11 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
       await dbRun('ROLLBACK');
       return res.status(400).json({ error: 'Wrong rack. Please scan suggested rack.' });
     }
+
+    const rackRowLocked = await dbGet(`SELECT * FROM stock_by_rack WHERE id = ?${lockSuffix()}`, [
+      sug.stock_by_rack_id,
+    ]);
+    if (!rackRowLocked) throw new Error('Stock rack row missing');
 
     const bomReqId = Number(sug.outbound_bom_requirement_id) || 0;
     const obr = bomReqId ? await dbGet(`SELECT * FROM outbound_bom_requirements WHERE id = ?`, [bomReqId]) : null;
@@ -883,10 +984,8 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
         [outbound_item_id]
       );
       const pickedFromTx = Number(sumTx?.s) || 0;
-      const pickedColumn = Number(item.picked_qty) || 0;
-      const already = Math.max(pickedFromTx, pickedColumn);
       const required = Number(item.required_qty) || 0;
-      remaining = Math.max(0, required - already);
+      remaining = Math.max(0, required - pickedFromTx);
     }
     if (picked_qty > remaining) {
       await dbRun('ROLLBACK');
@@ -900,13 +999,15 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
     const fifoAlready = Number(sumFifo?.s) || 0;
     const fifoCap = Number(sug.suggested_qty) || 0;
     const fifoRemaining = Math.max(0, fifoCap - fifoAlready);
-    const mustPickExact = Math.min(remaining, fifoRemaining);
+    const maxForThisFifo = Math.min(remaining, fifoRemaining);
     const qtyEps = 1e-6;
-    if (Math.abs(picked_qty - mustPickExact) > qtyEps) {
+    if (picked_qty - maxForThisFifo > qtyEps) {
       await dbRun('ROLLBACK');
       return res.status(400).json({
-        error: 'Must pick exact suggested quantity for this rack',
-        required_qty_for_rack_now: mustPickExact,
+        error: 'Quantity exceeds what can be picked from this rack for the line',
+        max_pick_qty: maxForThisFifo,
+        remaining_qty: remaining,
+        fifo_remaining_on_rack: fifoRemaining,
       });
     }
     if (fifoAlready + picked_qty > fifoCap) {
@@ -917,8 +1018,7 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
       });
     }
 
-    const rackRow = await dbGet(`SELECT * FROM stock_by_rack WHERE id = ?`, [sug.stock_by_rack_id]);
-    if (!rackRow) throw new Error('Stock rack row missing');
+    const rackRow = rackRowLocked;
     const rackAvail = Number(rackRow.available_qty) || 0;
     if (picked_qty > rackAvail) {
       await dbRun('ROLLBACK');
@@ -930,14 +1030,21 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
     const desc = obr ? obr.child_description || '' : item.description;
     const isBomPick = obr ? 1 : 0;
 
+    const warehouseId = resolvePickWarehouseId({ order, rackRow, fifoSuggestion: sug });
+    if (!warehouseId) {
+      await dbRun('ROLLBACK');
+      return res.status(400).json({ error: 'Order warehouse is not set; cannot record pick.' });
+    }
+
     await dbRun(
       `INSERT INTO picked_transactions (
-        outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
+        warehouse_id, outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
         material, sap_part_number, description, rack_location, picked_qty, device_id,
         picked_method, is_manual_pick, manual_pick_reason, picked_by_role,
         outbound_bom_requirement_id, parent_part_number, child_part_number, is_bom_pick, child_qty_per_parent
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Mobile', 0, NULL, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Mobile', 0, NULL, ?, ?, ?, ?, ?, ?)`,
       [
+        warehouseId,
         outbound_order_id,
         outbound_item_id,
         fifo_suggestion_id,
@@ -967,38 +1074,25 @@ router.post('/picking/confirm-item', requirePermission('can_pick_orders'), async
 
     const today = new Date().toISOString().slice(0, 10);
     const deliveryRef = order.delivery || order.outbound_number || String(outbound_order_id);
-    await dbRun(
-      `INSERT INTO stock_out (
-        transaction_date, part_number, sap_part_number, description, rack_location,
-        qty_out, outbound_number, reference_no, remarks
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        today,
-        rackRow.part_number,
-        rackRow.sap_part_number || '',
-        rackRow.description || '',
-        sug.rack_location,
-        picked_qty,
-        deliveryRef,
-        `pick_tx_fifo_${fifo_suggestion_id}`,
-        `picker:${user_name}`,
-      ]
-    );
+    await insertPickStockOut(dbRun, {
+      warehouseId,
+      transaction_date: today,
+      part_number: rackRow.part_number,
+      sap_part_number: rackRow.sap_part_number || '',
+      description: rackRow.description || '',
+      rack_location: sug.rack_location,
+      qty_out: picked_qty,
+      outbound_number: deliveryRef,
+      reference_no: `pick_tx_fifo_${fifo_suggestion_id}`,
+      remarks: `picker:${user_name}`,
+    });
 
     if (obr) {
       await syncBomRequirementPickedFromTransactions(dbRun, dbGet, dbAll, outbound_item_id);
       await recomputeParentPickedFromBom(dbGet, dbAll, dbRun, outbound_item_id);
     } else {
-      const sumTx2 = await dbGet(
-        `SELECT COALESCE(SUM(picked_qty), 0) AS s FROM picked_transactions
-         WHERE outbound_item_id = ? AND COALESCE(is_bom_pick, 0) = 0`,
-        [outbound_item_id]
-      );
-      const pickedFromTx2 = Number(sumTx2?.s) || 0;
-      const pickedColumn2 = Number(item.picked_qty) || 0;
-      const already2 = Math.max(pickedFromTx2, pickedColumn2);
-      const newPicked = already2 + picked_qty;
-      await dbRun(`UPDATE outbound_items SET picked_qty = ? WHERE id = ?`, [newPicked, outbound_item_id]);
+      const { syncOutboundItemPickedFromTransactions } = require('../services/outboundPickedQtySync');
+      await syncOutboundItemPickedFromTransactions(dbRun, dbGet, outbound_item_id);
     }
 
     const nextStatus = order.status === 'Sent For Pick' ? 'Picking' : order.status;
@@ -1077,19 +1171,10 @@ router.post('/picking/confirm-item-from-rack', requirePermission('can_pick_order
       throw new Error('Picking closed for this order');
     }
 
-    const fifoLeft = await fifoRemainingCapacityForItem(outbound_order_id, outbound_item_id);
-    if (fifoLeft > QTY_EPS) {
-      await dbRun('ROLLBACK');
-      return res.status(400).json({
-        error: 'FIFO suggestions still apply for this line — use the normal pick flow',
-        fifo_remaining_qty: fifoLeft,
-      });
-    }
-
-    const item = await dbGet(`SELECT * FROM outbound_items WHERE id = ? AND outbound_id = ?`, [
-      outbound_item_id,
-      outbound_order_id,
-    ]);
+    const item = await dbGet(
+      `SELECT * FROM outbound_items WHERE id = ? AND outbound_id = ?${lockSuffix()}`,
+      [outbound_item_id, outbound_order_id]
+    );
     if (!item) throw new Error('Item not found');
 
     const obrList = await dbAll(
@@ -1104,7 +1189,7 @@ router.post('/picking/confirm-item-from-rack', requirePermission('can_pick_order
         return res.status(400).json({ error: 'outbound_bom_requirement_id required for BOM order lines' });
       }
       obr = await dbGet(
-        `SELECT * FROM outbound_bom_requirements WHERE id = ? AND outbound_item_id = ? AND outbound_order_id = ?`,
+        `SELECT * FROM outbound_bom_requirements WHERE id = ? AND outbound_item_id = ? AND outbound_order_id = ?${lockSuffix()}`,
         [outbound_bom_requirement_id, outbound_item_id, outbound_order_id]
       );
       if (!obr) {
@@ -1115,6 +1200,8 @@ router.post('/picking/confirm-item-from-rack', requirePermission('can_pick_order
       await dbRun('ROLLBACK');
       return res.status(400).json({ error: 'outbound_bom_requirement_id must not be set for non-BOM lines' });
     }
+
+    const rackRow = await dbGet(`SELECT * FROM stock_by_rack WHERE id = ?${lockSuffix()}`, [stock_by_rack_id]);
 
     let remaining;
     if (obr) {
@@ -1132,17 +1219,13 @@ router.post('/picking/confirm-item-from-rack', requirePermission('can_pick_order
         [outbound_item_id]
       );
       const pickedFromTx = Number(sumTx?.s) || 0;
-      const pickedColumn = Number(item.picked_qty) || 0;
-      const already = Math.max(pickedFromTx, pickedColumn);
       const required = Number(item.required_qty) || 0;
-      remaining = Math.max(0, required - already);
+      remaining = Math.max(0, required - pickedFromTx);
     }
     if (remaining <= QTY_EPS) {
       await dbRun('ROLLBACK');
       return res.status(400).json({ error: 'Nothing left to pick for this line' });
     }
-
-    const rackRow = await dbGet(`SELECT * FROM stock_by_rack WHERE id = ?`, [stock_by_rack_id]);
     if (!rackRow) throw new Error('Rack row not found');
     if (normRack(scanned_rack) !== normRack(rackRow.rack_location)) {
       await dbRun('ROLLBACK');
@@ -1183,14 +1266,21 @@ router.post('/picking/confirm-item-from-rack', requirePermission('can_pick_order
     const isBomPick = obr ? 1 : 0;
     const bomReqId = obr ? obr.id : null;
 
+    const warehouseIdFromRack = resolvePickWarehouseId({ order, rackRow });
+    if (!warehouseIdFromRack) {
+      await dbRun('ROLLBACK');
+      return res.status(400).json({ error: 'Order warehouse is not set; cannot record pick.' });
+    }
+
     await dbRun(
       `INSERT INTO picked_transactions (
-        outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
+        warehouse_id, outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
         material, sap_part_number, description, rack_location, picked_qty, device_id,
         picked_method, is_manual_pick, manual_pick_reason, picked_by_role,
         outbound_bom_requirement_id, parent_part_number, child_part_number, is_bom_pick, child_qty_per_parent
-      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'Mobile', 1, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'Mobile', 1, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        warehouseIdFromRack,
         outbound_order_id,
         outbound_item_id,
         req.user.sub,
@@ -1220,38 +1310,25 @@ router.post('/picking/confirm-item-from-rack', requirePermission('can_pick_order
 
     const today = new Date().toISOString().slice(0, 10);
     const deliveryRef = order.delivery || order.outbound_number || String(outbound_order_id);
-    await dbRun(
-      `INSERT INTO stock_out (
-        transaction_date, part_number, sap_part_number, description, rack_location,
-        qty_out, outbound_number, reference_no, remarks
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        today,
-        rackRow.part_number,
-        rackRow.sap_part_number || '',
-        rackRow.description || '',
-        rackRow.rack_location,
-        picked_qty,
-        deliveryRef,
-        `mobile_no_fifo_rack_${rackRow.id}`,
-        `picker:${user_name}`,
-      ]
-    );
+    await insertPickStockOut(dbRun, {
+      warehouseId: warehouseIdFromRack,
+      transaction_date: today,
+      part_number: rackRow.part_number,
+      sap_part_number: rackRow.sap_part_number || '',
+      description: rackRow.description || '',
+      rack_location: rackRow.rack_location,
+      qty_out: picked_qty,
+      outbound_number: deliveryRef,
+      reference_no: `mobile_no_fifo_rack_${rackRow.id}`,
+      remarks: `picker:${user_name}`,
+    });
 
     if (obr) {
       await syncBomRequirementPickedFromTransactions(dbRun, dbGet, dbAll, outbound_item_id);
       await recomputeParentPickedFromBom(dbGet, dbAll, dbRun, outbound_item_id);
     } else {
-      const sumTx2 = await dbGet(
-        `SELECT COALESCE(SUM(picked_qty), 0) AS s FROM picked_transactions
-         WHERE outbound_item_id = ? AND COALESCE(is_bom_pick, 0) = 0`,
-        [outbound_item_id]
-      );
-      const pickedFromTx2 = Number(sumTx2?.s) || 0;
-      const pickedColumn2 = Number(item.picked_qty) || 0;
-      const already2 = Math.max(pickedFromTx2, pickedColumn2);
-      const newPicked = already2 + picked_qty;
-      await dbRun(`UPDATE outbound_items SET picked_qty = ? WHERE id = ?`, [newPicked, outbound_item_id]);
+      const { syncOutboundItemPickedFromTransactions } = require('../services/outboundPickedQtySync');
+      await syncOutboundItemPickedFromTransactions(dbRun, dbGet, outbound_item_id);
     }
 
     const nextStatus = order.status === 'Sent For Pick' ? 'Picking' : order.status;
@@ -1430,14 +1507,16 @@ router.post('/picking/confirm-item-with-new-rack', requirePermission('can_pick_o
         });
       }
     } else {
-      await dbRun(
+      const rackEntryDate = new Date().toISOString().slice(0, 10);
+      const { lastID: rackId } = await runDb(
+        db,
         `INSERT INTO stock_by_rack (
           part_number, sap_part_number, description, rack_location,
           total_in_qty, total_out_qty, available_qty, first_entry_date, last_updated
-        ) VALUES (?, ?, ?, ?, ?, 0, ?, date('now'), CURRENT_TIMESTAMP)`,
-        [mat, sap || null, desc || null, rack_location, picked_qty, picked_qty]
+        ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, CURRENT_TIMESTAMP)`,
+        [mat, sap || null, desc || null, rack_location, picked_qty, picked_qty, rackEntryDate]
       );
-      rackRow = await dbGet(`SELECT * FROM stock_by_rack WHERE id = (SELECT last_insert_rowid())`);
+      rackRow = await dbGet(`SELECT * FROM stock_by_rack WHERE id = ?`, [rackId]);
       if (!rackRow) throw new Error('Failed to create stock_by_rack row');
     }
 
@@ -1451,14 +1530,21 @@ router.post('/picking/confirm-item-with-new-rack', requirePermission('can_pick_o
     const isBomPick = obr ? 1 : 0;
     const bomReqId = obr ? obr.id : null;
 
+    const warehouseIdNewRack = resolvePickWarehouseId({ order, rackRow });
+    if (!warehouseIdNewRack) {
+      await dbRun('ROLLBACK');
+      return res.status(400).json({ error: 'Order warehouse is not set; cannot record pick.' });
+    }
+
     await dbRun(
       `INSERT INTO picked_transactions (
-        outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
+        warehouse_id, outbound_order_id, outbound_item_id, fifo_suggestion_id, user_id, user_name,
         material, sap_part_number, description, rack_location, picked_qty, device_id,
         picked_method, is_manual_pick, manual_pick_reason, picked_by_role,
         outbound_bom_requirement_id, parent_part_number, child_part_number, is_bom_pick, child_qty_per_parent
-      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'Mobile', 1, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'Mobile', 1, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        warehouseIdNewRack,
         outbound_order_id,
         outbound_item_id,
         req.user.sub,
@@ -1488,38 +1574,25 @@ router.post('/picking/confirm-item-with-new-rack', requirePermission('can_pick_o
 
     const today = new Date().toISOString().slice(0, 10);
     const deliveryRef = order.delivery || order.outbound_number || String(outbound_order_id);
-    await dbRun(
-      `INSERT INTO stock_out (
-        transaction_date, part_number, sap_part_number, description, rack_location,
-        qty_out, outbound_number, reference_no, remarks
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        today,
-        rackRow.part_number,
-        rackRow.sap_part_number || '',
-        rackRow.description || '',
-        rackLocStored,
-        picked_qty,
-        deliveryRef,
-        `mobile_new_rack_pick_${rackRow.id}`,
-        `picker:${user_name}`,
-      ]
-    );
+    await insertPickStockOut(dbRun, {
+      warehouseId: warehouseIdNewRack,
+      transaction_date: today,
+      part_number: rackRow.part_number,
+      sap_part_number: rackRow.sap_part_number || '',
+      description: rackRow.description || '',
+      rack_location: rackLocStored,
+      qty_out: picked_qty,
+      outbound_number: deliveryRef,
+      reference_no: `mobile_new_rack_pick_${rackRow.id}`,
+      remarks: `picker:${user_name}`,
+    });
 
     if (obr) {
       await syncBomRequirementPickedFromTransactions(dbRun, dbGet, dbAll, outbound_item_id);
       await recomputeParentPickedFromBom(dbGet, dbAll, dbRun, outbound_item_id);
     } else {
-      const sumTx2 = await dbGet(
-        `SELECT COALESCE(SUM(picked_qty), 0) AS s FROM picked_transactions
-         WHERE outbound_item_id = ? AND COALESCE(is_bom_pick, 0) = 0`,
-        [outbound_item_id]
-      );
-      const pickedFromTx2 = Number(sumTx2?.s) || 0;
-      const pickedColumn2 = Number(item.picked_qty) || 0;
-      const already2 = Math.max(pickedFromTx2, pickedColumn2);
-      const newPicked = already2 + picked_qty;
-      await dbRun(`UPDATE outbound_items SET picked_qty = ? WHERE id = ?`, [newPicked, outbound_item_id]);
+      const { syncOutboundItemPickedFromTransactions } = require('../services/outboundPickedQtySync');
+      await syncOutboundItemPickedFromTransactions(dbRun, dbGet, outbound_item_id);
     }
 
     const nextStatus = order.status === 'Sent For Pick' ? 'Picking' : order.status;
@@ -1561,7 +1634,10 @@ router.post('/picking/confirm-item-with-new-rack', requirePermission('can_pick_o
   }
 });
 
-router.post('/picking/confirm-order', requirePermission('can_pick_orders'), async (req, res) => {
+router.post(
+  '/picking/confirm-order',
+  requireAnyPermission(['can_pick_orders', 'can_confirm_order_picked_mobile']),
+  async (req, res) => {
   const outbound_order_id = Number(req.body?.outbound_order_id);
   if (!outbound_order_id) return res.status(400).json({ error: 'outbound_order_id required' });
 
@@ -1571,6 +1647,11 @@ router.post('/picking/confirm-order', requirePermission('can_pick_orders'), asyn
 
     const order = await dbGet(`SELECT * FROM outbound_orders WHERE id = ?`, [outbound_order_id]);
     if (!order) return res.status(404).json({ error: 'Order not found' });
+    try {
+      requireOutboundWarehouseId(order, 'confirm picked on mobile');
+    } catch (whErr) {
+      return res.status(whErr.status || 400).json({ error: whErr.message, code: whErr.code });
+    }
 
     const items = await listOutboundItemsWithPickTotals(outbound_order_id);
     const shortfalls = [];
@@ -1604,9 +1685,11 @@ router.post('/picking/confirm-order', requirePermission('can_pick_orders'), asyn
 
     /** Outbound row was set Picked without picked_orders (legacy / admin / reverse-delivery). */
     if (stLo === 'picked' || stLo === 'checked') {
-      const existingPo = await dbGet(`SELECT 1 AS x FROM picked_orders WHERE outbound_order_id = ?`, [
-        outbound_order_id,
-      ]);
+      const existingPo = await dbGet(
+        `SELECT 1 AS x FROM picked_orders
+         WHERE outbound_order_id = ? AND LOWER(TRIM(COALESCE(status, ''))) != 'reversed'`,
+        [outbound_order_id]
+      );
       if (existingPo?.x != null) {
         return res.status(400).json({ error: 'Order already confirmed' });
       }
@@ -1617,26 +1700,28 @@ router.post('/picking/confirm-order', requirePermission('can_pick_orders'), asyn
           shortfalls,
         });
       }
+      const poFields = pickedOrderInsertFields(order);
       await dbRun('BEGIN IMMEDIATE');
       await dbRun(
         `INSERT INTO picked_orders (
-          outbound_order_id, delivery, sales_doc, customer_reference, sold_to, name_1,
+          outbound_order_id, warehouse_id, delivery, sales_doc, customer_reference, sold_to, name_1,
           confirmed_by_user_id, confirmed_by_user_name, confirmed_at, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Picked')`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Picked')`,
         [
           outbound_order_id,
-          order.delivery || order.outbound_number,
-          order.sales_doc || order.sales_order_number,
-          order.customer_reference || order.customer_po_number,
-          order.sold_to || order.vendor_name,
-          order.name_1 || order.customer_name,
+          poFields.warehouseId,
+          poFields.delivery,
+          poFields.salesDoc,
+          poFields.customerRef,
+          poFields.soldTo,
+          poFields.name1,
           req.user.sub,
           user_name,
         ]
       );
       await dbRun('COMMIT');
       logAudit({
-        warehouse_id: order.warehouse_id,
+        warehouse_id: poFields.warehouseId,
         req,
         module_name: 'PICKING',
         action_type: 'PICK_CONFIRMED',
@@ -1685,19 +1770,21 @@ router.post('/picking/confirm-order', requirePermission('can_pick_orders'), asyn
       });
     }
 
+    const poFields = pickedOrderInsertFields(order);
     await dbRun('BEGIN IMMEDIATE');
     await dbRun(
       `INSERT INTO picked_orders (
-        outbound_order_id, delivery, sales_doc, customer_reference, sold_to, name_1,
+        outbound_order_id, warehouse_id, delivery, sales_doc, customer_reference, sold_to, name_1,
         confirmed_by_user_id, confirmed_by_user_name, confirmed_at, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Picked')`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'Picked')`,
       [
         outbound_order_id,
-        order.delivery || order.outbound_number,
-        order.sales_doc || order.sales_order_number,
-        order.customer_reference || order.customer_po_number,
-        order.sold_to || order.vendor_name,
-        order.name_1 || order.customer_name,
+        poFields.warehouseId,
+        poFields.delivery,
+        poFields.salesDoc,
+        poFields.customerRef,
+        poFields.soldTo,
+        poFields.name1,
         req.user.sub,
         user_name,
       ]
@@ -1708,7 +1795,7 @@ router.post('/picking/confirm-order', requirePermission('can_pick_orders'), asyn
     await dbRun('COMMIT');
 
     logAudit({
-      warehouse_id: order.warehouse_id,
+      warehouse_id: poFields.warehouseId,
       req,
       module_name: 'PICKING',
       action_type: 'PICK_CONFIRMED',
@@ -1745,6 +1832,199 @@ router.post('/picking/confirm-order', requirePermission('can_pick_orders'), asyn
     res.status(400).json({ error: e.message });
   }
 });
+
+/** Multi-rack pick for one outbound line (transaction + row locks). */
+router.post(
+  '/picking/:outbound_item_id/confirm-rack-pick',
+  requireAnyPermission([
+    'can_pick_from_rack_mobile',
+    'can_pick_orders',
+    'can_view_orders',
+    'can_confirm_picked',
+    'can_scan_rack',
+  ]),
+  async (req, res) => {
+    try {
+      const outbound_item_id = Number(req.params.outbound_item_id);
+      const body = req.body || {};
+      const result = await confirmRackPickForItem({
+        req,
+        outbound_order_id: Number(body.outbound_order_id),
+        outbound_item_id,
+        part_number: body.part_number,
+        picks: body.picks,
+        outbound_bom_requirement_id: body.outbound_bom_requirement_id,
+      });
+      res.json(result);
+    } catch (e) {
+      const status = e.code === 'RACK_CONFLICT' ? 409 : 400;
+      res.status(status).json({
+        error: e.message || 'Pick failed',
+        code: e.code || undefined,
+      });
+    }
+  }
+);
+
+/** Picks recorded for one outbound item (FIFO + rack picks); used for Adjust / undo during picking. */
+const PICK_TX_LIST_PERMS = [
+  'can_pick_from_rack_mobile',
+  'can_pick_orders',
+  'can_view_orders',
+  'can_confirm_picked',
+  'can_scan_rack',
+];
+
+router.get(
+  '/picking/:outbound_item_id/item-pick-transactions',
+  requireAnyPermission(PICK_TX_LIST_PERMS),
+  async (req, res) => {
+    try {
+      const outbound_item_id = Number(req.params.outbound_item_id);
+      const outbound_order_id = Number(req.query.outbound_order_id);
+      if (!outbound_item_id || !outbound_order_id) {
+        return res.status(400).json({ error: 'outbound_item_id and outbound_order_id required' });
+      }
+
+      const order = await dbGet(`SELECT id, status FROM outbound_orders WHERE id = ?`, [outbound_order_id]);
+      if (!order) return res.status(404).json({ error: 'Order not found' });
+      const st = String(order.status || '');
+      if (!['Sent For Pick', 'Picking'].includes(st)) {
+        return res.status(400).json({ error: 'Order is not open for picking adjustments' });
+      }
+
+      const item = await dbGet(`SELECT id FROM outbound_items WHERE id = ? AND outbound_id = ?`, [
+        outbound_item_id,
+        outbound_order_id,
+      ]);
+      if (!item) return res.status(404).json({ error: 'Item not found' });
+
+      const po = await dbGet(
+        `SELECT id FROM picked_orders WHERE outbound_order_id = ? AND LOWER(TRIM(COALESCE(status, ''))) != 'reversed'`,
+        [outbound_order_id]
+      );
+      if (po) {
+        return res.status(400).json({ error: 'Order already confirmed picked; cannot change picks from mobile' });
+      }
+
+      const obrRaw = req.query.outbound_bom_requirement_id;
+      const obrId =
+        obrRaw !== undefined && obrRaw !== null && String(obrRaw).trim() !== ''
+          ? Number(obrRaw)
+          : null;
+
+      let sql = `
+        SELECT id, outbound_order_id, outbound_item_id, outbound_bom_requirement_id,
+               rack_location, material, sap_part_number, description,
+               picked_qty, user_name, picked_method, is_bom_pick
+        FROM picked_transactions
+        WHERE outbound_order_id = ?
+          AND outbound_item_id = ?`;
+      const params = [outbound_order_id, outbound_item_id];
+      if (obrId && obrId > 0) {
+        sql += ` AND outbound_bom_requirement_id = ?`;
+        params.push(obrId);
+      } else {
+        sql += ` AND (outbound_bom_requirement_id IS NULL OR outbound_bom_requirement_id = 0)`;
+      }
+      sql += ` ORDER BY id DESC`;
+
+      const rows = await dbAll(sql, params);
+
+      res.json({ ok: true, transactions: rows || [] });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  }
+);
+
+router.post(
+  '/picking/reverse-item-picks',
+  requireAnyPermission(PICK_TX_LIST_PERMS),
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const outbound_order_id = Number(body.outbound_order_id);
+      const outbound_item_id = Number(body.outbound_item_id);
+      const ids = Array.isArray(body.picked_transaction_ids) ? body.picked_transaction_ids : [];
+      if (!outbound_order_id || !outbound_item_id || !ids.length) {
+        return res.status(400).json({ error: 'outbound_order_id, outbound_item_id, picked_transaction_ids required' });
+      }
+
+      const order = await dbGet(`SELECT id, warehouse_id, status FROM outbound_orders WHERE id = ?`, [
+        outbound_order_id,
+      ]);
+      if (!order) return res.status(404).json({ error: 'Order not found' });
+      const st = String(order.status || '');
+      if (!['Sent For Pick', 'Picking'].includes(st)) {
+        return res.status(400).json({ error: 'Order is not open for picking adjustments' });
+      }
+
+      const item = await dbGet(`SELECT id FROM outbound_items WHERE id = ? AND outbound_id = ?`, [
+        outbound_item_id,
+        outbound_order_id,
+      ]);
+      if (!item) return res.status(404).json({ error: 'Item not found' });
+
+      const po = await dbGet(
+        `SELECT id FROM picked_orders WHERE outbound_order_id = ? AND LOWER(TRIM(COALESCE(status, ''))) != 'reversed'`,
+        [outbound_order_id]
+      );
+      if (po) {
+        return res.status(400).json({ error: 'Order already confirmed picked; cannot reverse picks from mobile' });
+      }
+
+      const idNums = [...new Set(ids.map((x) => Number(x)).filter((n) => n > 0))];
+      if (!idNums.length) {
+        return res.status(400).json({ error: 'No valid picked_transaction_ids' });
+      }
+      const placeholders = idNums.map(() => '?').join(',');
+      const txs = await dbAll(
+        `SELECT id, outbound_order_id, outbound_item_id FROM picked_transactions WHERE id IN (${placeholders})`,
+        idNums
+      );
+      if (!txs.length || txs.length !== idNums.length) {
+        return res.status(400).json({ error: 'One or more pick transactions were not found' });
+      }
+      for (const t of txs) {
+        if (Number(t.outbound_order_id) !== outbound_order_id || Number(t.outbound_item_id) !== outbound_item_id) {
+          return res.status(400).json({ error: 'Transaction does not belong to this order line' });
+        }
+      }
+
+      const userRow = await dbGet(`SELECT id, full_name, username FROM users WHERE id = ?`, [req.user.sub]);
+      const user_name = userRow?.full_name || userRow?.username || req.user.username;
+      const reason = body.reason ? String(body.reason).trim() : `mobile undo by ${user_name}`;
+
+      await dbRun('BEGIN IMMEDIATE');
+      try {
+        const result = await reversePickTransactions({ dbRun, dbGet, dbAll }, idNums, { reason });
+        await dbRun('COMMIT');
+        logAudit({
+          warehouse_id: order.warehouse_id,
+          req,
+          module_name: 'PICKING',
+          action_type: 'MOBILE_REVERSE_PICK_TX',
+          reference_type: 'outbound_item',
+          reference_id: outbound_item_id,
+          reference_number: String(outbound_order_id),
+          new_value: { picked_transaction_ids: idNums, ...result },
+          remarks: reason,
+        });
+        res.json({ ok: true, ...result });
+      } catch (e) {
+        try {
+          await dbRun('ROLLBACK');
+        } catch {
+          /* ignore */
+        }
+        throw e;
+      }
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  }
+);
 
 // Picker requests rack/qty change (admin reviews in web)
 router.post('/picking/change-request', requirePermission('can_pick_orders'), async (req, res) => {
@@ -1867,10 +2147,9 @@ router.post('/rack-scan/import', requirePermission('can_scan_rack'), async (req,
 
 router.get('/inbound-batches', async (req, res) => {
   try {
-    const scope = await mobileWarehouseScope(req, res);
+    const scope = await mobileInboundBatchScope(req, res);
     if (!scope) return;
-    const whClause = scope.mode === 'all' ? '' : ' WHERE b.warehouse_id = ? ';
-    const params = scope.mode === 'all' ? [] : [scope.warehouseId];
+    const { sql: whClause, params } = inboundBatchWhereClause(scope);
     const rows = await dbAll(
       `SELECT b.*,
         (SELECT COUNT(*) FROM inbound_items i WHERE i.inbound_batch_id = b.id) AS item_count,
@@ -1889,12 +2168,12 @@ router.get('/inbound-batches', async (req, res) => {
 
 router.get('/inbound-batches/:id', async (req, res) => {
   try {
-    const scope = await mobileWarehouseScope(req, res);
+    const scope = await mobileInboundBatchScope(req, res);
     if (!scope) return;
     const id = Number(req.params.id);
     const batch = await dbGet(`SELECT * FROM inbound_batches WHERE id = ?`, [id]);
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
-    if (scope.mode === 'one' && scope.warehouseId && Number(batch.warehouse_id) !== Number(scope.warehouseId)) {
+    if (!inboundBatchAccessAllowed(scope, batch.warehouse_id)) {
       return res.status(403).json({ error: 'Forbidden for this warehouse' });
     }
     const items = await dbAll(
@@ -1932,6 +2211,14 @@ router.post('/putaway/upload', requirePermission('can_receive_stock'), async (re
     if (!item) return res.status(404).json({ error: 'Inbound item not found' });
     if (String(item.part_number).trim() !== part_number) return res.status(400).json({ error: 'part_number mismatch' });
 
+    const batchScope = await mobileInboundBatchScope(req, res);
+    if (!batchScope) return;
+    const batchRow = await dbGet(`SELECT warehouse_id FROM inbound_batches WHERE id = ?`, [inbound_batch_id]);
+    if (!batchRow) return res.status(404).json({ error: 'Inbound batch not found' });
+    if (!inboundBatchAccessAllowed(batchScope, batchRow.warehouse_id)) {
+      return res.status(403).json({ error: 'Forbidden for this warehouse' });
+    }
+
     const rem = Number(item.remaining_qty);
     if (qty > rem + QTY_EPS) return res.status(400).json({ error: 'Qty exceeds remaining putaway allowance' });
 
@@ -1964,7 +2251,6 @@ router.post('/putaway/upload', requirePermission('can_receive_stock'), async (re
     await updateInboundBatchStatus(inbound_batch_id);
     await dbRun('COMMIT');
 
-    const batchRow = await dbGet(`SELECT warehouse_id FROM inbound_batches WHERE id = ?`, [inbound_batch_id]);
     logAudit({
       warehouse_id: batchRow?.warehouse_id,
       req,

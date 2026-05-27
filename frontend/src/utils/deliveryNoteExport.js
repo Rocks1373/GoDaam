@@ -55,6 +55,7 @@ export function buildDeliveryNoteExcelSheet({
   displayItems,
   packageText,
   transportRenderLines,
+  checkedByDisplayName,
 }) {
   const rows = [];
   pushRow(rows, 'Gulf Applications');
@@ -134,6 +135,10 @@ export function buildDeliveryNoteExcelSheet({
   pushRow(rows, 'Mobile no.', '');
   pushRow(rows, 'DATE', '');
   pushRow(rows, 'STAMP', '');
+  pushRow(rows);
+  const checkedBy = String(checkedByDisplayName ?? '').trim() || '—';
+  pushRow(rows, 'Checked by:', checkedBy);
+  pushRow(rows, 'Place for signature:', '___________________________');
 
   const ws = XLSX.utils.aoa_to_sheet(rows);
   ws['!cols'] = [

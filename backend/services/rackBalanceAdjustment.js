@@ -1,10 +1,12 @@
 const { promisify } = require('util');
 const db = require('../db');
 const { generateFifoForOutboundOrder } = require('./godamFifo');
+const { normalizeDateValue } = require('../lib/safeDateSql');
 
 const dbRun = promisify(db.run.bind(db));
 const dbGet = promisify(db.get.bind(db));
 const dbAll = promisify(db.all.bind(db));
+const QTY_EPS = 1e-6;
 
 function toNumber(x) {
   const n = Number(x);
@@ -74,15 +76,20 @@ async function applyRackAdjustment({
       totalIn += delta;
       avail += delta;
     } else {
-      const d = Math.abs(delta);
+      let d = Math.abs(delta);
+      if (d > avail + QTY_EPS) {
+        d = Math.max(0, avail);
+      }
       totalOut += d;
       avail -= d;
-      if (avail < -1e-9) throw new Error('Not enough available quantity on this rack for this deduction');
     }
-    if (totalIn < -1e-9 || totalOut < -1e-9 || avail < -1e-9) throw new Error('Invalid balances after adjustment');
+    if (totalIn < -1e-9 || totalOut < -1e-9 || avail < -1e-9) {
+      throw new Error('Invalid balances after adjustment');
+    }
+    avail = Math.max(0, avail);
   }
 
-  let newFe = feBefore;
+  let newFe = normalizeDateValue(feBefore);
   if (feTrim) {
     newFe = feTrim;
   }

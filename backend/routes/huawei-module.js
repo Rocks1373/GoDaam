@@ -4,7 +4,6 @@ const jwt = require('jsonwebtoken');
 
 const db = require('../db');
 const { JWT_SECRET } = require('../middleware/auth');
-const { streamlitBasePath } = require('../huaweiGodamStreamlitProxy');
 const dbGet = promisify(db.get.bind(db));
 const dbRun = promisify(db.run.bind(db));
 
@@ -76,7 +75,7 @@ router.post('/streamlit-access-grant', async (req, res) => {
       JWT_SECRET,
       { expiresIn: '8h' }
     );
-    const base = streamlitBasePath();
+    const base = 'huawei-godam-app';
     const cookiePath = `/${base}`;
     const secure =
       String(process.env.COOKIE_SECURE || '').trim() === '1' ||

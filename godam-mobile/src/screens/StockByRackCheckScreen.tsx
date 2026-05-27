@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -16,6 +16,8 @@ import {
   suggestStockByRackRackForMobile,
   type StockByRackRow,
 } from '../api/stockLookupApi';
+import RackAdjustModal, { type RackAdjustTarget } from '../components/RackAdjustModal';
+import { getSelectedWarehouseId } from '../storage/warehouseStorage';
 
 function fmt(v: unknown): string {
   if (v === null || v === undefined) return '—';
@@ -30,6 +32,12 @@ export default function StockByRackCheckScreen() {
   const [rows, setRows] = useState<StockByRackRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warehouseId, setWarehouseId] = useState<number | null>(null);
+  const [adjustTarget, setAdjustTarget] = useState<RackAdjustTarget | null>(null);
+
+  useEffect(() => {
+    void getSelectedWarehouseId().then((id) => setWarehouseId(id));
+  }, []);
 
   const fetchPartSuggest = useCallback((q: string) => suggestStockByRackPartForMobile(q), []);
   const fetchRackSuggest = useCallback((q: string) => suggestStockByRackRackForMobile(q), []);
@@ -80,7 +88,7 @@ export default function StockByRackCheckScreen() {
   return (
     <View style={styles.screen}>
       <Text style={styles.hint}>
-        Read-only · type for suggestions; tap a line to load stock (fields keep what you type / pick)
+        Search stock by rack · use Adjust when physical count differs from system
       </Text>
 
       <PartSuggestInput
@@ -151,8 +159,33 @@ export default function StockByRackCheckScreen() {
               <Text style={styles.qtyLabel}>UOM</Text>
               <Text style={styles.qtyVal}>{fmt(item.uom)}</Text>
             </View>
+            {item.id != null ? (
+              <Pressable
+                style={styles.adjustBtn}
+                onPress={() =>
+                  setAdjustTarget({
+                    stock_by_rack_id: Number(item.id),
+                    rack_location: String(item.rack_location || ''),
+                    available_qty: Number(item.available_qty) || 0,
+                    part_number: item.part_number != null ? String(item.part_number) : undefined,
+                    sap_part_number:
+                      item.sap_part_number != null ? String(item.sap_part_number) : undefined,
+                  })
+                }
+              >
+                <Text style={styles.adjustBtnText}>Adjust qty</Text>
+              </Pressable>
+            ) : null}
           </View>
         )}
+      />
+
+      <RackAdjustModal
+        visible={!!adjustTarget}
+        target={adjustTarget}
+        warehouseId={warehouseId}
+        onClose={() => setAdjustTarget(null)}
+        onAdjusted={() => void runSearch()}
       />
     </View>
   );
@@ -195,4 +228,15 @@ const styles = StyleSheet.create({
   qtyLabel: { fontSize: 12, color: '#64748b', fontWeight: '600' },
   qtyVal: { fontSize: 14, fontWeight: '700', color: '#0f172a' },
   qtySep: { color: '#cbd5e1', marginHorizontal: 4 },
+  adjustBtn: {
+    marginTop: 10,
+    alignSelf: 'flex-start',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#fff7ed',
+    borderWidth: 1,
+    borderColor: '#fdba74',
+  },
+  adjustBtnText: { color: '#c2410c', fontWeight: '700', fontSize: 12 },
 });

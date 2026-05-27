@@ -119,7 +119,12 @@ const StockByRackSummary = ({ currentUser }) => {
     if (!adjRow?.id) return;
     const d = deltaQty === '' || deltaQty === null ? 0 : Number(deltaQty);
     if (!Number.isFinite(d)) {
-      alert('Enter Δ qty as a number (e.g. +2 add, −2 deduct), or 0 if only changing first entry date.');
+      alert('Enter Δ qty as a number (e.g. +2 add, −9 deduct), or 0 if only changing first entry date.');
+      return;
+    }
+    const avail = Number(adjRow.available_qty) || 0;
+    if (d < 0 && avail + d < -1e-6) {
+      alert(`Cannot go below zero. Maximum deduction is ${avail} (rack would become 0).`);
       return;
     }
     try {
@@ -290,9 +295,10 @@ const StockByRackSummary = ({ currentUser }) => {
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-4 border border-gray-200">
             <h3 className="text-sm font-bold text-gray-900 mb-1">Rack adjustment (admin)</h3>
             <p className="text-[11px] text-gray-600 mb-3">
-              {adjRow.part_number} · {adjRow.rack_location} — use <span className="font-mono">+2</span> to add stock,{' '}
-              <span className="font-mono">-2</span> to deduct. Open orders (not delivered) get FIFO rebuilt
-              immediately.
+              {adjRow.part_number} · {adjRow.rack_location} (system {adjRow.available_qty ?? 0}) — use{' '}
+              <span className="font-mono">+2</span> to add, <span className="font-mono">-9</span> to remove 9, or{' '}
+              <span className="font-mono">-{adjRow.available_qty ?? 0}</span> to clear rack to zero. Cannot go
+              negative. FIFO rebuilt for open orders.
             </p>
             <div className="space-y-2">
               <div>

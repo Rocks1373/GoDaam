@@ -12,8 +12,10 @@ const {
   JWT_MAX_LIFETIME_SECONDS,
   requireAuth,
 } = require('../middleware/auth');
-const { getPermissionMapForUserId } = require('../services/permissionService');
+const { getPermissionMapForUserId, effectiveApprovalStatus } = require('../services/permissionService');
 const { listWarehousesForUser } = require('../services/warehouseContext');
+const { buildAuthResponse } = require('../services/authSessionService');
+const { handleGoogleLogin } = require('../services/googleAuthLoginService');
 
 const router = express.Router();
 const dbGet = promisify(db.get.bind(db));
@@ -59,6 +61,11 @@ const refreshLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const googleLoginSchema = z.object({
+  googleToken: z.string().min(10).max(10000),
+  idToken: z.string().min(10).max(10000).optional(),
+});
+
 function clampLifetimeSeconds(requestedDays) {
   const days = Number(requestedDays) > 0 ? Number(requestedDays) : 7;
   const requestedSeconds = days * 86400;
@@ -96,7 +103,9 @@ router.post('/login', loginLimiter, loginLimiterPerUser, async (req, res) => {
     const { username, password } = parsed.data;
 
     const user = await dbGet(
-      `SELECT id, username, password_hash, role, failed_login_attempts, locked_until FROM users WHERE username = ?`,
+      `SELECT id, username, password_hash, role, failed_login_attempts, locked_until,
+              approval_status, is_blocked, is_active, token_expiry_days
+       FROM users WHERE username = ?`,
       [username]
     );
 
@@ -127,48 +136,65 @@ router.post('/login', loginLimiter, loginLimiterPerUser, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const mapped = await getPermissionMapForUserId(user.id);
-    if (!mapped) return res.status(403).json({ error: 'Account inactive or unavailable' });
+    const approval = effectiveApprovalStatus(user);
+    if (approval === 'PENDING') {
+      return res.status(403).json({
+        success: false,
+        status: 'PENDING_APPROVAL',
+        message: 'Your account is waiting for admin approval.',
+      });
+    }
+    if (approval === 'REJECTED') {
+      return res.status(403).json({
+        success: false,
+        status: 'REJECTED',
+        message: 'Your access request was rejected.',
+      });
+    }
+    if (approval === 'BLOCKED') {
+      return res.status(403).json({
+        success: false,
+        status: 'BLOCKED',
+        message: 'Your access has been blocked by administrator.',
+      });
+    }
 
     await dbRun(`UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?`, [user.id]);
 
-    const warehouses = await listWarehousesForUser(user.id, user.role);
-    const defaultWh = mapped.user.default_warehouse_id ?? null;
-
-    const expiresInSeconds = clampLifetimeSeconds(mapped.user.token_expiry_days);
-    const jti = crypto.randomUUID();
-    const token = jwt.sign(
-      {
-        sub: user.id,
-        username: user.username,
-        role: String(user.role || '').toLowerCase(),
-        permissions: mapped.permissions,
-        jti,
-      },
-      JWT_SECRET,
-      { expiresIn: expiresInSeconds }
+    const fullUser = await dbGet(
+      `SELECT id, username, role, full_name, email, approval_status, is_blocked, token_expiry_days
+       FROM users WHERE id = ?`,
+      [user.id]
     );
-
-    const expires_at = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
-
-    return res.json({
-      token,
-      expires_at,
-      token_expiry_days: Math.round(expiresInSeconds / 86400),
-      user: {
-        id: user.id,
-        username: user.username,
-        role: String(user.role || '').toLowerCase(),
-        full_name: mapped.user.full_name || user.username,
-        permissions: mapped.permissions,
-        warehouses: warehouses || [],
-        default_warehouse_id: defaultWh,
-      },
-    });
+    const payload = await buildAuthResponse(fullUser);
+    return res.json(payload);
   } catch (e) {
      
     console.error('[auth/login] error:', e);
     return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.post('/google-login', loginLimiter, async (req, res) => {
+  try {
+    const parsed = googleLoginSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid request', details: parsed.error.flatten() });
+    }
+    const token = parsed.data.googleToken || parsed.data.idToken;
+    const result = await handleGoogleLogin(token, { req });
+    return res.json(result);
+  } catch (e) {
+    if (e.code === 'PENDING_APPROVAL' || e.statusCode === 403) {
+      return res.status(403).json({
+        success: false,
+        status: e.code || 'PENDING_APPROVAL',
+        message: e.message,
+      });
+    }
+    const code = e.statusCode || 500;
+    if (code >= 500) console.error('[auth/google-login] error:', e);
+    return res.status(code).json({ error: e.message || 'Google login failed' });
   }
 });
 
@@ -230,6 +256,45 @@ router.post('/change-password', requireAuth, async (req, res) => {
   }
 });
 
+/** Admin: persist preferred warehouse for uploads and session default (does not restrict access to other sites). */
+router.patch('/me/default-warehouse', requireAuth, async (req, res) => {
+  try {
+    const mapped = await getPermissionMapForUserId(req.user.sub);
+    if (!mapped) return res.status(401).json({ error: 'Unauthorized' });
+    const role = String(mapped.user.role || '').toLowerCase();
+    if (role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can set a default warehouse here' });
+    }
+
+    const raw = req.body?.warehouse_id;
+    let wid = null;
+    if (raw != null && raw !== '') {
+      wid = Number(raw);
+      if (!Number.isFinite(wid) || wid <= 0) {
+        return res.status(400).json({ error: 'Invalid warehouse_id' });
+      }
+      const wh = await dbGet(
+        `SELECT id FROM warehouses WHERE id = ? AND COALESCE(is_active, 1) = 1 LIMIT 1`,
+        [wid]
+      );
+      if (!wh) return res.status(400).json({ error: 'Warehouse not found or inactive' });
+    }
+
+    await dbRun(`UPDATE users SET default_warehouse_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [
+      wid,
+      mapped.user.id,
+    ]);
+
+    res.json({
+      ok: true,
+      default_warehouse_id: wid,
+    });
+  } catch (e) {
+    console.error('[auth/me/default-warehouse] error:', e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/me', requireAuth, async (req, res) => {
   try {
     const mapped = await getPermissionMapForUserId(req.user.sub);
@@ -245,6 +310,8 @@ router.get('/me', requireAuth, async (req, res) => {
         full_name: mapped.user.full_name || mapped.user.username,
         email: mapped.user.email || null,
         mobile_number: mapped.user.mobile_number || null,
+        approval_status: effectiveApprovalStatus(mapped.user),
+        auth_provider: String(mapped.user.auth_provider || 'LOCAL').toUpperCase(),
         permissions: mapped.permissions,
         warehouses: warehouses || [],
         default_warehouse_id: mapped.user.default_warehouse_id ?? null,
@@ -270,6 +337,7 @@ router.post('/refresh', refreshLimiter, requireAuth, async (req, res) => {
         username: mapped.user.username,
         role: String(mapped.user.role || '').toLowerCase(),
         permissions: mapped.permissions,
+        approval_status: effectiveApprovalStatus(mapped.user),
         jti,
       },
       JWT_SECRET,
